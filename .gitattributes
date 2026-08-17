@@ -1,0 +1,44 @@
+# Auto detect text files, normalize line endings to LF in the repo and on checkout
+* text=auto eol=lf
+
+# Rust
+*.rs text diff=rust
+Cargo.toml text
+Cargo.lock text -diff linguist-generated
+
+# Project config
+*.toml text
+.gitattributes text export-ignore
+.gitignore text
+.editorconfig text
+
+# Web assets
+*.css text diff=css
+*.js text
+*.html text diff=html
+*.svg text
+
+# Docs
+*.md text diff=markdown
+*.txt text
+
+# Windows-only scripts keep CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Shell scripts must keep LF
+*.sh text eol=lf
+
+# Binary assets - never diff or normalize
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.eot binary

@@ -1,1 +1,62 @@
 @import "tailwindcss";
+
+@theme {
+    --color-bg: oklch(15% 0.01 260);
+    --color-surface: oklch(22% 0.013 260);
+    --color-line: oklch(34% 0.015 260);
+    --color-ink: oklch(94% 0.004 260);
+    --color-ink-muted: oklch(72% 0.01 260);
+
+    --color-accent: oklch(78% 0.14 85);
+    --color-accent-ink: oklch(15% 0.01 260);
+
+    --color-status-clean: oklch(72% 0.15 150);
+    --color-status-ahead: oklch(75% 0.12 230);
+    --color-status-conflict: oklch(72% 0.19 25);
+    --color-status-empty: oklch(60% 0.012 260);
+
+    --font-mono: ui-monospace, "Cascadia Code", "Segoe UI Mono", Consolas, "Liberation Mono", monospace;
+    --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@layer base {
+    * {
+        box-sizing: border-box;
+    }
+
+    body {
+        background-color: var(--color-bg);
+        color: var(--color-ink);
+        font-family: var(--font-sans);
+        margin: 0;
+    }
+
+    ::selection {
+        background-color: var(--color-accent);
+        color: var(--color-accent-ink);
+    }
+
+    :focus-visible {
+        outline: 2px solid var(--color-accent);
+        outline-offset: 2px;
+    }
+
+    ::-webkit-scrollbar {
+        width: 12px;
+        height: 12px;
+    }
+
+    ::-webkit-scrollbar-track {
+        background: var(--color-bg);
+    }
+
+    ::-webkit-scrollbar-thumb {
+        background-color: var(--color-line);
+        border-radius: 999px;
+        border: 3px solid var(--color-bg);
+    }
+
+    html {
+        scrollbar-color: var(--color-line) var(--color-bg);
+    }
+}

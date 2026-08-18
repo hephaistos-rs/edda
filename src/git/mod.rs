@@ -1,9 +1,31 @@
 pub mod store;
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use store::RepoStore;
+
+/// Per-repo-name lock so two writes to the *same* repo (create/update/delete,
+/// in any combination) serialize instead of racing on a check-then-act — e.g.
+/// two "create alpha" requests both passing the exists-check before either
+/// has created the directory. Writes to different repos never contend.
+///
+/// This only guards Edda's own operations within this process; it says
+/// nothing about an external `git push` landing at the same time — that's
+/// already safe on its own via git's ref-locking, a separate mechanism.
+///
+/// Entries are never removed, including for deleted repos: one `Arc<Mutex<()>>`
+/// per distinct name ever touched is a few dozen bytes, and this is a
+/// self-hosted tool with a human-scale repo count, not something worth adding
+/// reference-counted eviction for.
+fn repo_lock(name: &str) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+    let registry = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut registry = registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    registry.entry(name.to_string()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+}
 
 #[derive(Debug)]
 pub enum GitError {
@@ -72,6 +94,8 @@ fn validate_name(name: &str) -> Result<(), GitError> {
 
 pub fn create_repo(store: &dyn RepoStore, name: &str, description: Option<&str>) -> Result<(), GitError> {
     validate_name(name)?;
+    let lock = repo_lock(name);
+    let _guard = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = store.repo_dir(name);
     if dir.exists() {
         return Err(GitError::AlreadyExists(name.to_string()));
@@ -95,6 +119,8 @@ pub fn create_repo(store: &dyn RepoStore, name: &str, description: Option<&str>)
 /// "no description" rather than writing an empty file.
 pub fn update_repo(store: &dyn RepoStore, name: &str, description: Option<&str>) -> Result<(), GitError> {
     validate_name(name)?;
+    let lock = repo_lock(name);
+    let _guard = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = store.repo_dir(name);
     if !dir.exists() {
         return Err(GitError::NotFound(name.to_string()));
@@ -113,6 +139,8 @@ pub fn update_repo(store: &dyn RepoStore, name: &str, description: Option<&str>)
 
 pub fn delete_repo(store: &dyn RepoStore, name: &str) -> Result<(), GitError> {
     validate_name(name)?;
+    let lock = repo_lock(name);
+    let _guard = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = store.repo_dir(name);
     if !dir.exists() {
         return Err(GitError::NotFound(name.to_string()));

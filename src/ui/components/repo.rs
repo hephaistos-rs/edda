@@ -1,6 +1,8 @@
 use dioxus::prelude::*;
-use dioxus_free_icons::icons::ld_icons::{LdCircleArrowUp, LdCircleCheck, LdCircleDashed, LdTriangleAlert};
+use dioxus_free_icons::icons::ld_icons::{LdCircleArrowUp, LdCircleCheck, LdCircleDashed, LdPlus, LdTriangleAlert};
 use dioxus_free_icons::Icon;
+
+use crate::server::{create_repo, RepoDto};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum RepoStatus {
@@ -26,51 +28,36 @@ impl RepoStatus {
 
 #[derive(Clone, PartialEq)]
 pub struct Repo {
-    pub name: &'static str,
-    pub description: &'static str,
+    pub name: String,
+    pub description: String,
     pub status: RepoStatus,
     pub ahead: u32,
     pub behind: u32,
 }
 
-pub fn sample_repos() -> Vec<Repo> {
-    vec![
-        Repo {
-            name: "edda",
-            description: "Self-hosted git platform, written in Rust.",
-            status: RepoStatus::Ahead,
-            ahead: 3,
-            behind: 0,
-        },
-        Repo {
-            name: "homelab",
-            description: "Docker Compose stack for the home server.",
-            status: RepoStatus::Clean,
-            ahead: 0,
-            behind: 0,
-        },
-        Repo {
-            name: "dotfiles",
-            description: "Personal shell, editor, and tmux config.",
-            status: RepoStatus::Clean,
-            ahead: 0,
-            behind: 0,
-        },
-        Repo {
-            name: "blog",
-            description: "Static site source, built with Zola.",
-            status: RepoStatus::Conflict,
-            ahead: 2,
-            behind: 1,
-        },
-        Repo {
-            name: "scratch",
-            description: "Initialized but unused, no commits yet.",
-            status: RepoStatus::Empty,
-            ahead: 0,
-            behind: 0,
-        },
-    ]
+impl From<RepoDto> for Repo {
+    fn from(dto: RepoDto) -> Self {
+        let status = if dto.is_empty { RepoStatus::Empty } else { RepoStatus::Clean };
+
+        // ahead/behind stay at 0 until repos can mirror an external upstream —
+        // there's nothing for a canonical, self-hosted repo to be ahead/behind of yet.
+        let description = dto.description.unwrap_or_else(|| {
+            if dto.is_empty {
+                "No commits yet".to_string()
+            } else {
+                match &dto.default_branch {
+                    Some(branch) => {
+                        let branches = dto.branch_count;
+                        let noun = if branches == 1 { "branch" } else { "branches" };
+                        format!("{branch} · {branches} {noun}")
+                    }
+                    None => "No description".to_string(),
+                }
+            }
+        });
+
+        Repo { name: dto.name, description, status, ahead: 0, behind: 0 }
+    }
 }
 
 #[component]
@@ -84,7 +71,7 @@ pub fn RepoRow(repo: Repo) -> Element {
 
     rsx! {
         Link {
-            to: crate::Route::Repo { name: repo.name.to_string() },
+            to: crate::Route::Repo { name: repo.name.clone() },
             class: "group flex items-center gap-4 border-b border-line px-4 py-3 no-underline hover:bg-surface focus-visible:bg-surface",
             span {
                 class: "shrink-0 {status_color_class}",
@@ -107,6 +94,72 @@ pub fn RepoRow(repo: Repo) -> Element {
                     span { "—" }
                 }
             }
+        }
+    }
+}
+
+/// Trailing row: click to reveal an inline name field (no modal — creating a
+/// repo doesn't need one), Enter to submit, Escape to back out.
+#[component]
+pub fn NewRepoRow(on_created: EventHandler<()>) -> Element {
+    let mut creating = use_signal(|| false);
+    let mut name = use_signal(String::new);
+    let mut error = use_signal(|| Option::<String>::None);
+
+    if !creating() {
+        return rsx! {
+            button {
+                r#type: "button",
+                class: "flex w-full items-center gap-2 px-4 py-3 text-left text-ink-muted hover:bg-surface hover:text-ink focus-visible:bg-surface",
+                onclick: move |_| creating.set(true),
+                Icon { icon: LdPlus, width: 16, height: 16 }
+                span { class: "font-mono text-sm", "new repository" }
+            }
+        };
+    }
+
+    rsx! {
+        div { class: "flex items-center gap-2 px-4 py-3",
+            Icon { icon: LdPlus, width: 16, height: 16, class: "shrink-0 text-ink-muted" }
+            input {
+                r#type: "text",
+                class: "min-w-0 flex-1 bg-transparent font-mono text-sm text-ink placeholder:text-ink-muted focus:outline-none",
+                placeholder: "repository name",
+                value: "{name}",
+                autofocus: true,
+                oninput: move |event| {
+                    name.set(event.value());
+                    error.set(None);
+                },
+                onkeydown: move |event| match event.key() {
+                    Key::Escape => {
+                        creating.set(false);
+                        name.set(String::new());
+                        error.set(None);
+                    }
+                    Key::Enter => {
+                        let repo_name = name.read().trim().to_string();
+                        if repo_name.is_empty() {
+                            return;
+                        }
+                        spawn(async move {
+                            match create_repo(repo_name, None).await {
+                                Ok(()) => {
+                                    creating.set(false);
+                                    name.set(String::new());
+                                    error.set(None);
+                                    on_created.call(());
+                                }
+                                Err(err) => error.set(Some(err.to_string())),
+                            }
+                        });
+                    }
+                    _ => {}
+                },
+            }
+        }
+        if let Some(message) = error() {
+            div { class: "px-4 pb-3 font-mono text-xs text-status-conflict", "{message}" }
         }
     }
 }

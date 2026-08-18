@@ -41,6 +41,8 @@ curl -sSL http://dioxus.dev/install.sh | sh
 dx serve
 ```
 
+This will automatically rebuild the application on any code change. Do not stop the running server if this is happening.
+
 # UI with RSX
 
 ```rust

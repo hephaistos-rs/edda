@@ -3,6 +3,7 @@ use dioxus::prelude::*;
 mod api;
 mod auth;
 mod db;
+#[cfg(feature = "server")]
 mod git;
 mod migrations;
 mod server;

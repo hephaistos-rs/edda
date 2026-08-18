@@ -7,16 +7,18 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+axum = { version = "0.8.9", optional = true }
 dioxus = { version = "0.7.1", features = ["router", "fullstack"] }
 dioxus-free-icons = { version = "0.10.0", features = ["lucide"] }
 # Server-only: reads/writes repos on disk. Kept optional so it never enters
 # the wasm client build (it wouldn't compile there, and doesn't need to).
 gix = { version = "0.86.0", optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
+tokio = { version = "1.53.1", features = ["sync", "process", "io-util"], optional = true }
 
 [features]
 default = ["web"]
 web = ["dioxus/web"]
 desktop = ["dioxus/desktop"]
 mobile = ["dioxus/mobile"]
-server = ["dioxus/server", "dep:gix"]
+server = ["dioxus/server", "dep:gix", "dep:axum", "dep:tokio"]

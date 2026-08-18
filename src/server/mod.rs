@@ -59,7 +59,7 @@ pub async fn create_repo(name: String, description: Option<String>) -> Result<()
     use crate::git::{self, store::LocalFsStore};
 
     let store = LocalFsStore::from_env();
-    git::create_repo(&store, &name, description.as_deref()).map_err(|err| ServerFnError::new(err.to_string()))
+    git::create_repo(&store, &name, description.as_deref()).await.map_err(|err| ServerFnError::new(err.to_string()))
 }
 
 #[post("/api/repos/:name/update")]
@@ -67,7 +67,7 @@ pub async fn update_repo(name: String, description: Option<String>) -> Result<()
     use crate::git::{self, store::LocalFsStore};
 
     let store = LocalFsStore::from_env();
-    git::update_repo(&store, &name, description.as_deref()).map_err(|err| ServerFnError::new(err.to_string()))
+    git::update_repo(&store, &name, description.as_deref()).await.map_err(|err| ServerFnError::new(err.to_string()))
 }
 
 #[post("/api/repos/:name/delete")]
@@ -75,5 +75,5 @@ pub async fn delete_repo(name: String) -> Result<(), ServerFnError> {
     use crate::git::{self, store::LocalFsStore};
 
     let store = LocalFsStore::from_env();
-    git::delete_repo(&store, &name).map_err(|err| ServerFnError::new(err.to_string()))
+    git::delete_repo(&store, &name).await.map_err(|err| ServerFnError::new(err.to_string()))
 }

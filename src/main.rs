@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 
+#[cfg(feature = "server")]
 mod api;
 mod auth;
 mod db;
@@ -27,6 +28,19 @@ enum Route {
 const FAVICON: Asset = asset!("/assets/favicon.ico");
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
+/// The client (web) build launches normally. The server build needs its own
+/// axum router instead: Dioxus's own router (SSR, assets, server functions)
+/// merged with the git-http routes in `api`, which aren't server functions —
+/// they need to speak raw git wire protocol, not typed RPC.
+#[cfg(feature = "server")]
+fn main() {
+    dioxus::server::serve(|| async {
+        let router = dioxus::server::router(App).merge(api::routes());
+        Ok(router)
+    });
+}
+
+#[cfg(not(feature = "server"))]
 fn main() {
     dioxus::launch(App);
 }

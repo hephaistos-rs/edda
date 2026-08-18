@@ -2,29 +2,33 @@ pub mod store;
 
 use std::collections::HashMap;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+
+use tokio::sync::Mutex as AsyncMutex;
 
 use store::RepoStore;
 
-/// Per-repo-name lock so two writes to the *same* repo (create/update/delete,
-/// in any combination) serialize instead of racing on a check-then-act — e.g.
-/// two "create alpha" requests both passing the exists-check before either
-/// has created the directory. Writes to different repos never contend.
+/// Per-repo-name lock so two writes to the *same* repo serialize instead of
+/// racing — not just Edda's own create/update/delete against each other, but
+/// also against a `git push` landing at the same time (the git-http bridge in
+/// `api` holds this for the duration of a `receive-pack`, since that's a
+/// write too, e.g. someone deleting a repo mid-push). Writes to different
+/// repos never contend.
 ///
-/// This only guards Edda's own operations within this process; it says
-/// nothing about an external `git push` landing at the same time — that's
-/// already safe on its own via git's ref-locking, a separate mechanism.
+/// `tokio::sync::Mutex` rather than `std`'s: the git-http bridge holds this
+/// across an `.await` (a subprocess call), which a std `MutexGuard` can't
+/// safely do (it isn't `Send`).
 ///
 /// Entries are never removed, including for deleted repos: one `Arc<Mutex<()>>`
 /// per distinct name ever touched is a few dozen bytes, and this is a
 /// self-hosted tool with a human-scale repo count, not something worth adding
 /// reference-counted eviction for.
-fn repo_lock(name: &str) -> Arc<Mutex<()>> {
-    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+pub(crate) fn repo_lock(name: &str) -> Arc<AsyncMutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> = OnceLock::new();
     let registry = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut registry = registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    registry.entry(name.to_string()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+    registry.entry(name.to_string()).or_insert_with(|| Arc::new(AsyncMutex::new(()))).clone()
 }
 
 #[derive(Debug)]
@@ -92,10 +96,18 @@ fn validate_name(name: &str) -> Result<(), GitError> {
     }
 }
 
-pub fn create_repo(store: &dyn RepoStore, name: &str, description: Option<&str>) -> Result<(), GitError> {
+/// Validates `name`, then resolves it to its on-disk directory. Used
+/// anywhere a name needs to become a path — including the git-http bridge in
+/// `api` — so validation always happens before a name meets the filesystem.
+pub(crate) fn validated_repo_dir(store: &dyn RepoStore, name: &str) -> Result<PathBuf, GitError> {
+    validate_name(name)?;
+    Ok(store.repo_dir(name))
+}
+
+pub async fn create_repo(store: &dyn RepoStore, name: &str, description: Option<&str>) -> Result<(), GitError> {
     validate_name(name)?;
     let lock = repo_lock(name);
-    let _guard = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = lock.lock().await;
     let dir = store.repo_dir(name);
     if dir.exists() {
         return Err(GitError::AlreadyExists(name.to_string()));
@@ -105,6 +117,20 @@ pub fn create_repo(store: &dyn RepoStore, name: &str, description: Option<&str>)
         std::fs::create_dir_all(parent)?;
     }
     gix::init_bare(&dir).map_err(|err| GitError::Git(err.to_string()))?;
+    // `git http-backend` refuses pushes unless a repo opts in — a repo being
+    // readable doesn't imply it should accept writes. There's no auth yet to
+    // gate this further, so every repo opts in at creation time; once there's
+    // real access control this is where per-repo write permission would live.
+    let config = std::process::Command::new("git")
+        .args(["config", "http.receivepack", "true"])
+        .current_dir(&dir)
+        .output()?;
+    if !config.status.success() {
+        return Err(GitError::Git(format!(
+            "created the repo but couldn't enable http push: {}",
+            String::from_utf8_lossy(&config.stderr)
+        )));
+    }
     if let Some(description) = description {
         let description = description.trim();
         if !description.is_empty() {
@@ -117,10 +143,10 @@ pub fn create_repo(store: &dyn RepoStore, name: &str, description: Option<&str>)
 /// Updates the repo's description (the only editable field until `db`
 /// exists). `None`/empty clears it, matching `read_description`'s notion of
 /// "no description" rather than writing an empty file.
-pub fn update_repo(store: &dyn RepoStore, name: &str, description: Option<&str>) -> Result<(), GitError> {
+pub async fn update_repo(store: &dyn RepoStore, name: &str, description: Option<&str>) -> Result<(), GitError> {
     validate_name(name)?;
     let lock = repo_lock(name);
-    let _guard = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = lock.lock().await;
     let dir = store.repo_dir(name);
     if !dir.exists() {
         return Err(GitError::NotFound(name.to_string()));
@@ -137,10 +163,10 @@ pub fn update_repo(store: &dyn RepoStore, name: &str, description: Option<&str>)
     Ok(())
 }
 
-pub fn delete_repo(store: &dyn RepoStore, name: &str) -> Result<(), GitError> {
+pub async fn delete_repo(store: &dyn RepoStore, name: &str) -> Result<(), GitError> {
     validate_name(name)?;
     let lock = repo_lock(name);
-    let _guard = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = lock.lock().await;
     let dir = store.repo_dir(name);
     if !dir.exists() {
         return Err(GitError::NotFound(name.to_string()));
@@ -182,15 +208,12 @@ pub fn repo_summary(store: &dyn RepoStore, name: &str) -> Result<RepoSummary, Gi
     // `gix::init_bare` points HEAD at a fixed default (e.g. "master") that a
     // push can easily never create (e.g. it pushes "main" instead), which
     // would otherwise report a repo with real history as empty. Fall back to
-    // a branch that actually exists.
+    // a branch that actually exists. (The git-http bridge separately fixes
+    // this for real on disk right after a push — see `fix_unborn_head` — this
+    // is a display-only fallback for repos it hasn't run against yet.)
     if is_empty {
-        if let Some(branch) = branch_names
-            .iter()
-            .find(|n| n.as_str() == "main")
-            .or_else(|| branch_names.iter().find(|n| n.as_str() == "master"))
-            .or_else(|| branch_names.first())
-        {
-            default_branch = Some(branch.clone());
+        if let Some(branch) = pick_default_branch(&branch_names) {
+            default_branch = Some(branch.to_string());
             is_empty = false;
         }
     }
@@ -236,4 +259,53 @@ fn read_description(dir: &Path) -> Option<String> {
     } else {
         Some(text.to_string())
     }
+}
+
+/// Prefers "main", then "master", then whatever's first — the same
+/// preference order used both for display (`repo_summary`) and for actually
+/// repairing HEAD on disk (`fix_unborn_head`).
+fn pick_default_branch(names: &[String]) -> Option<&str> {
+    names
+        .iter()
+        .find(|n| n.as_str() == "main")
+        .or_else(|| names.iter().find(|n| n.as_str() == "master"))
+        .or_else(|| names.first())
+        .map(String::as_str)
+}
+
+/// `gix::init_bare` points a fresh repo's HEAD at a fixed default (e.g.
+/// "master"). If the first push creates a differently-named branch (e.g.
+/// "main"), HEAD is left pointing at a ref that was never created — harmless
+/// for Edda's own reads (`repo_summary` already falls back), but it breaks a
+/// real `git clone`: the client asks the server what HEAD is, gets a
+/// nonexistent ref back, and can't check anything out. Called by the
+/// git-http bridge right after a successful push to repair HEAD for real.
+pub(crate) fn fix_unborn_head(dir: &Path) -> Result<(), GitError> {
+    let repo = gix::open(dir).map_err(|err| GitError::Git(err.to_string()))?;
+    let head = repo.head().map_err(|err| GitError::Git(err.to_string()))?;
+    if !head.is_unborn() {
+        return Ok(());
+    }
+
+    let mut branch_names: Vec<String> = match repo.references() {
+        Ok(refs) => match refs.local_branches() {
+            Ok(branches) => branches.filter_map(Result::ok).map(|r| r.name().shorten().to_string()).collect(),
+            Err(_) => Vec::new(),
+        },
+        Err(_) => Vec::new(),
+    };
+    branch_names.sort();
+
+    let Some(branch) = pick_default_branch(&branch_names) else {
+        return Ok(()); // genuinely still empty — nothing to point HEAD at
+    };
+
+    let output = std::process::Command::new("git")
+        .args(["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")])
+        .current_dir(dir)
+        .output()?;
+    if !output.status.success() {
+        return Err(GitError::Git(format!("couldn't update HEAD: {}", String::from_utf8_lossy(&output.stderr))));
+    }
+    Ok(())
 }

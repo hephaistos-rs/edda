@@ -1856,7 +1856,10 @@ dependencies = [
  "axum",
  "dioxus",
  "dioxus-free-icons",
+ "flate2",
  "gix",
+ "gix-hash",
+ "gix-object",
  "serde",
  "tokio",
 ]

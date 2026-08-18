@@ -1,3 +1,4 @@
+pub mod pack;
 pub mod store;
 
 use std::collections::HashMap;
@@ -261,10 +262,44 @@ fn read_description(dir: &Path) -> Option<String> {
     }
 }
 
+/// The all-zeros object id git's protocols use to mean "no such object" —
+/// a ref-update command's old-id when creating a ref, or its new-id when
+/// deleting one.
+pub const ZERO_ID: &str = "0000000000000000000000000000000000000000";
+
+/// Applies one ref-update command with the same compare-and-swap semantics
+/// real git uses: the update only happens if `expected_old` matches the
+/// ref's *actual* current value. This is the entire non-fast-forward
+/// rejection mechanism — a stale push's `expected_old` won't match what's
+/// really there once someone else has pushed, so it fails here rather than
+/// silently overwriting history.
+pub(crate) fn apply_ref_update(git_dir: &Path, ref_name: &str, expected_old: &str, new_id: &str) -> Result<(), String> {
+    let ref_path = git_dir.join(ref_name);
+    let current = std::fs::read_to_string(&ref_path).ok().map(|s| s.trim().to_string()).unwrap_or_else(|| ZERO_ID.to_string());
+
+    if current != expected_old {
+        return Err(format!("expected {expected_old}, found {current}"));
+    }
+
+    if new_id == ZERO_ID {
+        if ref_path.exists() {
+            std::fs::remove_file(&ref_path).map_err(|err| err.to_string())?;
+        }
+    } else {
+        if let Some(parent) = ref_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+        std::fs::write(&ref_path, format!("{new_id}\n")).map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
 /// Prefers "main", then "master", then whatever's first — the same
-/// preference order used both for display (`repo_summary`) and for actually
-/// repairing HEAD on disk (`fix_unborn_head`).
-fn pick_default_branch(names: &[String]) -> Option<&str> {
+/// preference order used both for display (`repo_summary`), for repairing
+/// HEAD on disk (`fix_unborn_head`), and for the git-http bridge's ref
+/// advertisement in `api` (a client cloning needs *some* answer for HEAD
+/// even when the on-disk repo hasn't been repaired yet).
+pub(crate) fn pick_default_branch(names: &[String]) -> Option<&str> {
     names
         .iter()
         .find(|n| n.as_str() == "main")

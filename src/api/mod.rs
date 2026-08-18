@@ -1,23 +1,29 @@
-//! Git smart-HTTP bridge: lets a real `git` client `clone`/`fetch`/`push`
-//! against Edda over HTTP. Bridges to `git http-backend` as a CGI-style
-//! subprocess rather than reimplementing the pack/wire protocol — `gix` has
-//! no server-side receive-pack/upload-pack support, and hand-rolling it would
-//! be its own multi-week project on top of everything else here. This makes
-//! `git` an actual runtime dependency on the machine hosting Edda, not just
-//! something a client needs — a deliberate, visible tradeoff, not an
-//! accident.
+//! Git smart-HTTP, implemented directly against `gix` — no `git` subprocess
+//! anywhere. Speaks protocol v0 (the classic pkt-line protocol): simpler
+//! than v2, and a server that never advertises v2 support is exactly how a
+//! real client falls back to it, so this needs no special negotiation to
+//! get real `git` clients to use it.
+//!
+//! Read path (`info/refs` + `git-upload-pack`, i.e. clone/fetch) sends every
+//! object reachable from what the client asked for — it ignores the
+//! client's "have" lines, so every fetch re-sends the full requested
+//! history rather than just what's new. Correct, not efficient; real
+//! want/have negotiation is a lot more protocol to implement and isn't
+//! needed for the common case (clone) to work.
+
+mod pktline;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, RawQuery};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 
+use crate::git::pack::{build_pack, parse_pack, write_loose_object};
 use crate::git::store::LocalFsStore;
-use crate::git::{fix_unborn_head, repo_lock, validated_repo_dir};
+use crate::git::{apply_ref_update, fix_unborn_head, repo_lock, validated_repo_dir, GitError, ZERO_ID};
+use pktline::{read_pkt_line, read_pkt_lines_until_flush, write_flush, write_pkt_line, PktLine};
 
 pub fn routes() -> Router {
     Router::new()
@@ -33,166 +39,247 @@ fn repo_name(repo: &str) -> Result<&str, Response> {
     repo.strip_suffix(".git").ok_or_else(|| (StatusCode::NOT_FOUND, "expected a \"<name>.git\" path").into_response())
 }
 
-async fn info_refs(Path(repo): Path<String>, RawQuery(query): RawQuery, headers: HeaderMap) -> Response {
-    let name = match repo_name(&repo) {
-        Ok(name) => name,
-        Err(response) => return response,
-    };
-    run_backend(name, "info/refs", "GET", query.as_deref(), &headers, Bytes::new(), false).await
-}
-
-async fn upload_pack(Path(repo): Path<String>, headers: HeaderMap, body: Bytes) -> Response {
-    let name = match repo_name(&repo) {
-        Ok(name) => name,
-        Err(response) => return response,
-    };
-    // Read-only (fetch/clone): no lock needed, git's own object model is
-    // already safe to read concurrently with anything.
-    run_backend(name, "git-upload-pack", "POST", None, &headers, body, false).await
-}
-
-async fn receive_pack(Path(repo): Path<String>, headers: HeaderMap, body: Bytes) -> Response {
-    let name = match repo_name(&repo) {
-        Ok(name) => name,
-        Err(response) => return response,
-    };
-    // A push is a write: hold the same per-repo lock Edda's own
-    // create/update/delete use, so a push can't land while, say, someone
-    // deletes the repo out from under it via the UI.
-    let response = run_backend(name, "git-receive-pack", "POST", None, &headers, body, true).await;
-
-    // A push can create the repo's first branch under a name HEAD doesn't
-    // point at yet (see `fix_unborn_head`'s doc comment) — repair it now so a
-    // client cloning right after this push gets a working checkout.
-    if response.status().is_success() {
-        let store = LocalFsStore::from_env();
-        if let Ok(dir) = validated_repo_dir(&store, name) {
-            let _ = fix_unborn_head(&dir);
-        }
-    }
-
-    response
-}
-
-async fn run_backend(
-    name: &str,
-    service_path: &str,
-    method: &str,
-    query: Option<&str>,
-    headers: &HeaderMap,
-    body: Bytes,
-    take_lock: bool,
-) -> Response {
+fn open_repo(name: &str) -> Result<gix::Repository, Response> {
     let store = LocalFsStore::from_env();
-    let repo_dir = match validated_repo_dir(&store, name) {
-        Ok(dir) => dir,
-        Err(err) => return (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
-    };
-
-    let (Some(project_root), Some(repo_dir_name)) = (repo_dir.parent(), repo_dir.file_name()) else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "couldn't resolve repo path").into_response();
-    };
-    let path_info = format!("/{}/{service_path}", repo_dir_name.to_string_lossy());
-
-    let lock = take_lock.then(|| repo_lock(name));
-    let _guard = match &lock {
-        Some(lock) => Some(lock.lock().await),
-        None => None,
-    };
-
-    let mut cmd = Command::new("git");
-    cmd.arg("http-backend")
-        .env_clear()
-        .env("GIT_PROJECT_ROOT", project_root)
-        .env("GIT_HTTP_EXPORT_ALL", "1")
-        .env("PATH_INFO", &path_info)
-        .env("REQUEST_METHOD", method)
-        .env("QUERY_STRING", query.unwrap_or(""))
-        .env("CONTENT_LENGTH", body.len().to_string())
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    if let Some(content_type) = headers.get(axum::http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()) {
-        cmd.env("CONTENT_TYPE", content_type);
-    }
-
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(err) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("couldn't start git http-backend: {err}"))
-                .into_response();
-        }
-    };
-
-    if let Some(mut stdin) = child.stdin.take() {
-        // Errors here (e.g. a broken pipe if the backend exits early) don't
-        // matter — the exit status and stdout below are the real signal.
-        let _ = stdin.write_all(&body).await;
-        let _ = stdin.shutdown().await;
-    }
-
-    let output = match child.wait_with_output().await {
-        Ok(output) => output,
-        Err(err) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("git http-backend failed: {err}")).into_response();
-        }
-    };
-
-    if !output.status.success() && output.stdout.is_empty() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("git http-backend exited with {}: {stderr}", output.status))
-            .into_response();
-    }
-
-    parse_cgi_response(&output.stdout)
+    let dir =
+        validated_repo_dir(&store, name).map_err(|err| (StatusCode::NOT_FOUND, err.to_string()).into_response())?;
+    gix::open(&dir).map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response())
 }
 
-/// `git http-backend` speaks CGI: a block of `Header: value` lines, a blank
-/// line, then the raw response body. Translates that into a real HTTP
-/// response instead of passing the CGI framing straight through.
-fn parse_cgi_response(raw: &[u8]) -> Response {
-    let split = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|i| (i, 4))
-        .or_else(|| raw.windows(2).position(|w| w == b"\n\n").map(|i| (i, 2)));
+async fn info_refs(Path(repo): Path<String>, RawQuery(query): RawQuery) -> Response {
+    let name = match repo_name(&repo) {
+        Ok(name) => name,
+        Err(response) => return response,
+    };
+    let Some(service) = query.as_deref().and_then(|q| q.strip_prefix("service=")) else {
+        return (StatusCode::BAD_REQUEST, "expected ?service=git-upload-pack or git-receive-pack").into_response();
+    };
+    let service = service.to_string();
 
-    let Some((idx, sep_len)) = split else {
-        // No header/body separator found (shouldn't happen for a well-formed
-        // CGI response) — fall back to treating the whole thing as the body.
-        return (StatusCode::OK, Body::from(raw.to_vec())).into_response();
+    let repo = match open_repo(name) {
+        Ok(repo) => repo,
+        Err(response) => return response,
     };
 
-    let header_block = &raw[..idx];
-    let body = raw[idx + sep_len..].to_vec();
+    let refs = match advertised_refs(&repo) {
+        Ok(refs) => refs,
+        Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    };
 
-    let mut status = StatusCode::OK;
-    let mut builder = Response::builder();
+    // Capabilities are supposed to be negotiated as the intersection of what
+    // the client wants and what's advertised here — a strict client has no
+    // reason to expect (or correctly parse) a report-status-formatted
+    // receive-pack response unless the server actually said it supports it.
+    let capabilities =
+        if service == "git-receive-pack" { "report-status agent=edda/0.1.0" } else { "agent=edda/0.1.0" };
 
-    for line in header_block.split(|&b| b == b'\n') {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        if line.is_empty() {
-            continue;
+    let mut body = Vec::new();
+    write_pkt_line(&mut body, format!("# service={service}\n").as_bytes());
+    write_flush(&mut body);
+
+    if refs.is_empty() {
+        // No refs to advertise (empty repo) — git still expects a line here
+        // so the client learns server capabilities; the all-zero id is the
+        // documented placeholder for "no real ref".
+        let zero_id = "0".repeat(40);
+        write_pkt_line(&mut body, format!("{zero_id} capabilities^{{}}\0{capabilities}\n").as_bytes());
+    } else {
+        for (i, (oid, ref_name)) in refs.iter().enumerate() {
+            let line = if i == 0 {
+                format!("{oid} {ref_name}\0{capabilities}\n")
+            } else {
+                format!("{oid} {ref_name}\n")
+            };
+            write_pkt_line(&mut body, line.as_bytes());
         }
-        let Some(colon) = line.iter().position(|&b| b == b':') else { continue };
-        let name = String::from_utf8_lossy(&line[..colon]).trim().to_string();
-        let value = String::from_utf8_lossy(&line[colon + 1..]).trim().to_string();
+    }
+    write_flush(&mut body);
 
-        if name.eq_ignore_ascii_case("status") {
-            // CGI's "Status" header looks like "200 OK" or "404 Not Found".
-            if let Some(code) = value.split_whitespace().next().and_then(|s| s.parse::<u16>().ok()) {
-                if let Ok(parsed) = StatusCode::from_u16(code) {
-                    status = parsed;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", format!("application/x-{service}-advertisement"))
+        .header("Cache-Control", "no-cache")
+        .body(Body::from(body))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// HEAD (if it resolves) plus every local branch — everything a client
+/// needs to clone and check out the default branch. No tags: nothing in
+/// Edda creates one yet.
+///
+/// HEAD can be unborn on disk (points at a branch, e.g. "master", that a
+/// push never actually created — see `fix_unborn_head`'s doc comment) even
+/// though real branches exist: without a HEAD line at all here, a cloning
+/// client has nothing to check out and fails outright, so this falls back
+/// to the same branch preference used everywhere else.
+fn advertised_refs(repo: &gix::Repository) -> Result<Vec<(gix::ObjectId, String)>, GitError> {
+    let mut branches = Vec::new();
+    if let Ok(platform) = repo.references() {
+        if let Ok(local) = platform.local_branches() {
+            for reference in local.filter_map(Result::ok) {
+                if let Some(id) = reference.target().try_id() {
+                    branches.push((id.to_owned(), reference.name().shorten().to_string()));
                 }
             }
-            continue;
-        }
-
-        if let (Ok(header_name), Ok(header_value)) = (HeaderName::try_from(name), HeaderValue::try_from(value)) {
-            builder = builder.header(header_name, header_value);
         }
     }
 
-    builder.status(status).body(Body::from(body)).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    let mut refs = Vec::new();
+
+    let head = repo.head_id().ok().map(|id| id.detach()).or_else(|| {
+        let names: Vec<String> = branches.iter().map(|(_, name)| name.clone()).collect();
+        let chosen = crate::git::pick_default_branch(&names)?;
+        branches.iter().find(|(_, name)| name == chosen).map(|(id, _)| *id)
+    });
+    if let Some(id) = head {
+        refs.push((id, "HEAD".to_string()));
+    }
+
+    refs.extend(branches.into_iter().map(|(id, name)| (id, format!("refs/heads/{name}"))));
+
+    Ok(refs)
+}
+
+async fn upload_pack(Path(repo): Path<String>, body: Bytes) -> Response {
+    let name = match repo_name(&repo) {
+        Ok(name) => name,
+        Err(response) => return response,
+    };
+    let repo = match open_repo(name) {
+        Ok(repo) => repo,
+        Err(response) => return response,
+    };
+
+    let wants: Vec<gix::ObjectId> = read_pkt_lines_until_flush(&body)
+        .into_iter()
+        .filter_map(|line| {
+            let text = String::from_utf8_lossy(line);
+            let rest = text.trim_end().strip_prefix("want ")?;
+            let oid_hex = rest.split_whitespace().next()?;
+            gix::ObjectId::from_hex(oid_hex.as_bytes()).ok()
+        })
+        .collect();
+    // "have"/"done" lines are intentionally not parsed — see the module doc
+    // comment: every fetch sends everything reachable from `wants`.
+
+    if wants.is_empty() {
+        return (StatusCode::BAD_REQUEST, "no \"want\" lines in request").into_response();
+    }
+
+    let pack = match build_pack(&repo, &wants) {
+        Ok(pack) => pack,
+        Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    };
+
+    let mut out = Vec::new();
+    // No side-band negotiated (not advertised in `info_refs`), so a plain
+    // NAK line — "no common base found, here's everything" — followed by
+    // the raw pack bytes with no further framing.
+    write_pkt_line(&mut out, b"NAK\n");
+    out.extend_from_slice(&pack);
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/x-git-upload-pack-result")
+        .body(Body::from(out))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+struct RefCommand {
+    old_id: String,
+    new_id: String,
+    ref_name: String,
+}
+
+async fn receive_pack(Path(repo): Path<String>, body: Bytes) -> Response {
+    let name = match repo_name(&repo) {
+        Ok(name) => name,
+        Err(response) => return response,
+    };
+
+    let store = LocalFsStore::from_env();
+    let git_dir = match validated_repo_dir(&store, name) {
+        Ok(dir) => dir,
+        Err(err) => return (StatusCode::NOT_FOUND, err.to_string()).into_response(),
+    };
+    let repo_handle = match gix::open(&git_dir) {
+        Ok(repo) => repo,
+        Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    };
+
+    // A push is a write: hold the same per-repo lock Edda's own
+    // create/update/delete use, so it can't land while, say, someone
+    // deletes the repo out from under it via the UI.
+    let lock = repo_lock(name);
+    let _guard = lock.lock().await;
+
+    // Commands come first as pkt-lines, ending in a flush; the pack data (if
+    // any command isn't a pure delete) follows immediately after with no
+    // further pkt-line framing, running to the end of the body.
+    let mut pos = 0;
+    let mut commands = Vec::new();
+    loop {
+        match read_pkt_line(&body, &mut pos) {
+            Some(PktLine::Flush) | None => break,
+            Some(PktLine::Data(line)) => {
+                let text = String::from_utf8_lossy(line);
+                // Capabilities ride after a NUL on the first line only.
+                let text = text.split('\0').next().unwrap_or(&text).trim_end();
+                let mut parts = text.splitn(3, ' ');
+                let (Some(old_id), Some(new_id), Some(ref_name)) = (parts.next(), parts.next(), parts.next()) else {
+                    return (StatusCode::BAD_REQUEST, format!("malformed ref-update command: {text:?}")).into_response();
+                };
+                commands.push(RefCommand { old_id: old_id.to_string(), new_id: new_id.to_string(), ref_name: ref_name.to_string() });
+            }
+        }
+    }
+
+    if commands.is_empty() {
+        return (StatusCode::BAD_REQUEST, "no ref-update commands in request").into_response();
+    }
+
+    let needs_pack = commands.iter().any(|command| command.new_id != ZERO_ID);
+    if needs_pack {
+        let pack_data = &body[pos..];
+        let objects = match parse_pack(&repo_handle, pack_data) {
+            Ok(objects) => objects,
+            Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("bad pack: {err}")).into_response(),
+        };
+        for object in &objects {
+            if let Err(err) = write_loose_object(&git_dir, object.kind, &object.data) {
+                return (StatusCode::INTERNAL_SERVER_ERROR, format!("couldn't store object {}: {err}", object.id))
+                    .into_response();
+            }
+        }
+    }
+
+    let mut results = Vec::with_capacity(commands.len());
+    for command in &commands {
+        let outcome = apply_ref_update(&git_dir, &command.ref_name, &command.old_id, &command.new_id);
+        results.push((command.ref_name.clone(), outcome));
+    }
+
+    // A push can create the repo's first branch under a name HEAD doesn't
+    // point at yet (see `fix_unborn_head`'s doc comment) — repair it now so
+    // a client cloning right after this push gets a working checkout.
+    if results.iter().any(|(_, outcome)| outcome.is_ok()) {
+        let _ = fix_unborn_head(&git_dir);
+    }
+
+    let mut out = Vec::new();
+    write_pkt_line(&mut out, b"unpack ok\n");
+    for (ref_name, outcome) in &results {
+        let line = match outcome {
+            Ok(()) => format!("ok {ref_name}\n"),
+            Err(reason) => format!("ng {ref_name} {reason}\n"),
+        };
+        write_pkt_line(&mut out, line.as_bytes());
+    }
+    write_flush(&mut out);
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/x-git-receive-pack-result")
+        .body(Body::from(out))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }

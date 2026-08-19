@@ -77,3 +77,16 @@ pub async fn delete_repo(name: String) -> Result<(), ServerFnError> {
     let store = LocalFsStore::from_env();
     git::delete_repo(&store, &name).await.map_err(|err| ServerFnError::new(err.to_string()))
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CurrentUser {
+    pub id: i64,
+    pub email: String,
+}
+
+#[cfg(feature = "server")]
+impl From<crate::auth::User> for CurrentUser {
+    fn from(user: crate::auth::User) -> Self {
+        Self { id: user.id, email: user.email }
+    }
+}

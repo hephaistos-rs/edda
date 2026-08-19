@@ -327,7 +327,11 @@ pub fn browse_tree(store: &dyn RepoStore, name: &str, branch: Option<&str>, path
         .filter_map(Result::ok)
         .map(|entry| {
             let is_dir = entry.mode().kind() == gix_object::tree::EntryKind::Tree;
-            let size = if is_dir { None } else { entry.object().ok().map(|object| object.data.len() as u64) };
+            // `.header()` reads just the object's size/type from its
+            // (small) header — `.object()` would decompress the entire
+            // blob just to throw the content away, which is a real cost
+            // for anything but tiny files and pointless for a listing.
+            let size = if is_dir { None } else { entry.id().header().ok().map(|header| header.size()) };
             TreeEntry { name: entry.filename().to_string(), is_dir, size }
         })
         .collect();

@@ -14,8 +14,8 @@ enum RepoTab {
 /// Relative time without pulling in a date-formatting crate — repo activity
 /// only ever needs coarse granularity here.
 fn relative_time(unix_seconds: i64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(unix_seconds);
     let delta = (now - unix_seconds).max(0);
@@ -76,11 +76,20 @@ pub fn Repo(name: String) -> Element {
         }
     });
 
+    // Gated on the active tab rather than fetching unconditionally on
+    // mount — walking commit history is real work, and most repo visits
+    // never open this tab.
     let commits = use_resource({
         let name = name.clone();
         move || {
             let name = name.clone();
-            async move { get_commit_log(name, None).await }
+            let active = tab() == RepoTab::Commits;
+            async move {
+                if !active {
+                    return None;
+                }
+                Some(get_commit_log(name, None).await)
+            }
         }
     });
     let mut description_error = use_signal(|| Option::<String>::None);
@@ -291,7 +300,7 @@ pub fn Repo(name: String) -> Element {
                     } else {
                         div { class: "mt-4",
                             match &*commits.read() {
-                                Some(Ok(entries)) => rsx! {
+                                Some(Some(Ok(entries))) => rsx! {
                                     div { class: "divide-y divide-line border border-line",
                                         for commit in entries.clone() {
                                             div { class: "px-3 py-2",
@@ -306,10 +315,10 @@ pub fn Repo(name: String) -> Element {
                                         }
                                     }
                                 },
-                                Some(Err(err)) => rsx! {
+                                Some(Some(Err(err))) => rsx! {
                                     p { class: "text-sm text-status-conflict", "{err}" }
                                 },
-                                None => rsx! {
+                                _ => rsx! {
                                     p { class: "text-sm text-ink-muted", "loading…" }
                                 },
                             }

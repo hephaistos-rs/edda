@@ -118,20 +118,6 @@ pub async fn create_repo(store: &dyn RepoStore, name: &str, description: Option<
         std::fs::create_dir_all(parent)?;
     }
     gix::init_bare(&dir).map_err(|err| GitError::Git(err.to_string()))?;
-    // `git http-backend` refuses pushes unless a repo opts in — a repo being
-    // readable doesn't imply it should accept writes. There's no auth yet to
-    // gate this further, so every repo opts in at creation time; once there's
-    // real access control this is where per-repo write permission would live.
-    let config = std::process::Command::new("git")
-        .args(["config", "http.receivepack", "true"])
-        .current_dir(&dir)
-        .output()?;
-    if !config.status.success() {
-        return Err(GitError::Git(format!(
-            "created the repo but couldn't enable http push: {}",
-            String::from_utf8_lossy(&config.stderr)
-        )));
-    }
     if let Some(description) = description {
         let description = description.trim();
         if !description.is_empty() {
@@ -335,12 +321,9 @@ pub(crate) fn fix_unborn_head(dir: &Path) -> Result<(), GitError> {
         return Ok(()); // genuinely still empty — nothing to point HEAD at
     };
 
-    let output = std::process::Command::new("git")
-        .args(["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")])
-        .current_dir(dir)
-        .output()?;
-    if !output.status.success() {
-        return Err(GitError::Git(format!("couldn't update HEAD: {}", String::from_utf8_lossy(&output.stderr))));
-    }
+    // HEAD's on-disk format for a symbolic ref is just this one line — the
+    // same thing `git symbolic-ref` itself would write, and how
+    // `gix::init_bare` sets it initially.
+    std::fs::write(dir.join("HEAD"), format!("ref: refs/heads/{branch}\n"))?;
     Ok(())
 }

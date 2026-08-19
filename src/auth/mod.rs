@@ -1,4 +1,5 @@
 pub mod routes;
+pub mod tokens;
 
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
@@ -58,7 +59,7 @@ impl From<argon2::password_hash::Error> for AuthError {
 
 #[derive(Clone)]
 pub struct Backend {
-    pool: SqlitePool,
+    pub(crate) pool: SqlitePool,
 }
 
 impl Backend {

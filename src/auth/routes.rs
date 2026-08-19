@@ -6,7 +6,7 @@
 //! fails since `AuthSession` isn't `Deserialize`. Plain axum has no such
 //! restriction, so login/signup/logout/whoami live here instead.
 
-use axum::extract::Json;
+use axum::extract::{Json, Path};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -14,7 +14,7 @@ use axum::Router;
 use axum_login::AuthSession;
 use serde::Deserialize;
 
-use crate::auth::Backend;
+use crate::auth::{tokens, Backend};
 use crate::server::CurrentUser;
 
 pub fn routes() -> Router {
@@ -23,6 +23,8 @@ pub fn routes() -> Router {
         .route("/api/auth/login", post(login))
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/me", get(me))
+        .route("/api/auth/tokens", post(create_token).get(list_tokens))
+        .route("/api/auth/tokens/{id}/revoke", post(revoke_token))
 }
 
 #[derive(Deserialize)]
@@ -74,4 +76,50 @@ async fn logout(mut auth: AuthSession<Backend>) -> Response {
 
 async fn me(auth: AuthSession<Backend>) -> Response {
     Json(auth.user.map(CurrentUser::from)).into_response()
+}
+
+#[derive(Deserialize)]
+struct CreateTokenBody {
+    name: String,
+}
+
+#[derive(serde::Serialize)]
+struct CreatedToken {
+    id: String,
+    name: String,
+    token: String,
+    created_at: i64,
+}
+
+async fn create_token(auth: AuthSession<Backend>, Json(body): Json<CreateTokenBody>) -> Response {
+    let Some(user) = auth.user else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    match tokens::create(&auth.backend.pool, &user.id, &body.name).await {
+        Ok((raw, info)) => {
+            Json(CreatedToken { id: info.id, name: info.name, token: raw, created_at: info.created_at }).into_response()
+        }
+        Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
+    }
+}
+
+async fn list_tokens(auth: AuthSession<Backend>) -> Response {
+    let Some(user) = auth.user else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    match tokens::list(&auth.backend.pool, &user.id).await {
+        Ok(tokens) => Json(tokens).into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+async fn revoke_token(auth: AuthSession<Backend>, Path(id): Path<String>) -> Response {
+    let Some(user) = auth.user else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    match tokens::revoke(&auth.backend.pool, &user.id, &id).await {
+        Ok(true) => StatusCode::OK.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "no such token").into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
 }

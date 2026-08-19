@@ -201,15 +201,26 @@ struct RefCommand {
 
 /// The browser session (`AuthSession`, cookie-based) doesn't reach the `git`
 /// CLI — it has no cookie jar. Real git clients authenticate HTTP pushes via
-/// `Authorization: Basic <base64 email:password>`, so that's checked here
-/// too, against the same `Backend::authenticate` login already uses.
+/// `Authorization: Basic <base64 user:pass>`. Both fields are checked for a
+/// personal access token first (conventions differ on which field callers
+/// put it in — GitHub-style tooling favors the password field, some favor
+/// the username), falling back to a real account password only if neither
+/// is a token — same preference order a mature git host like Gitea uses.
 async fn authenticate_basic(backend: &Backend, headers: &HeaderMap) -> Option<User> {
     let value = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
     let encoded = value.strip_prefix("Basic ")?;
     let decoded = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
     let text = String::from_utf8(decoded).ok()?;
-    let (email, password) = text.split_once(':')?;
-    let creds = Credentials { email: email.to_string(), password: password.to_string() };
+    let (identity, secret) = text.split_once(':')?;
+
+    if let Some(user) = crate::auth::tokens::authenticate(&backend.pool, secret).await {
+        return Some(user);
+    }
+    if let Some(user) = crate::auth::tokens::authenticate(&backend.pool, identity).await {
+        return Some(user);
+    }
+
+    let creds = Credentials { email: identity.to_string(), password: secret.to_string() };
     backend.authenticate(creds).await.ok()?
 }
 

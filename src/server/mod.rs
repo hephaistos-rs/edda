@@ -80,7 +80,7 @@ pub async fn delete_repo(name: String) -> Result<(), ServerFnError> {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CurrentUser {
-    pub id: i64,
+    pub id: String,
     pub email: String,
 }
 

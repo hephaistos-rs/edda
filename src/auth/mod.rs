@@ -7,18 +7,18 @@ use axum_login::{AuthUser, AuthnBackend, UserId};
 use serde::Deserialize;
 use sqlx::SqlitePool;
 
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 pub struct User {
-    pub id: i64,
+    pub id: String,
     pub email: String,
     pub password_hash: String,
 }
 
 impl AuthUser for User {
-    type Id = i64;
+    type Id = String;
 
     fn id(&self) -> Self::Id {
-        self.id
+        self.id.clone()
     }
 
     // Session validity is tied to the password hash: changing a password
@@ -73,8 +73,7 @@ impl AuthnBackend for Backend {
     type Error = AuthError;
 
     async fn authenticate(&self, creds: Credentials) -> Result<Option<User>, AuthError> {
-        let user: Option<User> = sqlx::query_as("SELECT id, email, password_hash FROM users WHERE email = ?")
-            .bind(&creds.email)
+        let user = sqlx::query_as!(User, "SELECT id, email, password_hash FROM users WHERE email = ?", creds.email)
             .fetch_optional(&self.pool)
             .await?;
 
@@ -87,8 +86,7 @@ impl AuthnBackend for Backend {
     }
 
     async fn get_user(&self, user_id: &UserId<Self>) -> Result<Option<User>, AuthError> {
-        let user = sqlx::query_as("SELECT id, email, password_hash FROM users WHERE id = ?")
-            .bind(user_id)
+        let user = sqlx::query_as!(User, "SELECT id, email, password_hash FROM users WHERE id = ?", user_id)
             .fetch_optional(&self.pool)
             .await?;
         Ok(user)
@@ -106,17 +104,12 @@ pub async fn signup(pool: &SqlitePool, email: &str, password: &str) -> Result<Us
     }
 
     let password_hash = hash_password(password)?;
-    let created_at = now_unix();
+    let id = uuid::Uuid::now_v7().to_string();
 
-    let result = sqlx::query("INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)")
-        .bind(email)
-        .bind(&password_hash)
-        .bind(created_at)
-        .execute(pool)
-        .await;
+    let result = sqlx::query!("INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)", id, email, password_hash).execute(pool).await;
 
     match result {
-        Ok(inserted) => Ok(User { id: inserted.last_insert_rowid(), email: email.to_string(), password_hash }),
+        Ok(_) => Ok(User { id, email: email.to_string(), password_hash }),
         Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => Err(AuthError::EmailTaken),
         Err(err) => Err(AuthError::Db(err)),
     }
@@ -130,8 +123,4 @@ fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error>
 fn verify_password(password: &str, stored_hash: &str) -> bool {
     let Ok(parsed) = PasswordHash::new(stored_hash) else { return false };
     Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok()
-}
-
-fn now_unix() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }

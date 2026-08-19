@@ -1,9 +1,15 @@
 use dioxus::prelude::*;
-use dioxus_free_icons::icons::ld_icons::LdPencil;
+use dioxus_free_icons::icons::ld_icons::{LdFile, LdFolder, LdPencil};
 use dioxus_free_icons::Icon;
 
-use crate::server::{delete_repo, get_repo, update_repo};
+use crate::server::{delete_repo, get_blob, get_commit_log, get_repo, get_tree, update_repo};
 use crate::Route;
+
+#[derive(Clone, Copy, PartialEq)]
+enum RepoTab {
+    Files,
+    Commits,
+}
 
 /// Relative time without pulling in a date-formatting crate — repo activity
 /// only ever needs coarse granularity here.
@@ -42,6 +48,41 @@ pub fn Repo(name: String) -> Element {
 
     let mut editing_description = use_signal(|| false);
     let mut description_draft = use_signal(String::new);
+
+    let mut tab = use_signal(|| RepoTab::Files);
+    let mut path_segments = use_signal(Vec::<String>::new);
+    let mut viewing_file = use_signal(|| Option::<String>::None);
+
+    let tree = use_resource({
+        let name = name.clone();
+        move || {
+            let name = name.clone();
+            let path = path_segments.read().join("/");
+            async move { get_tree(name, None, if path.is_empty() { None } else { Some(path) }).await }
+        }
+    });
+
+    let blob = use_resource({
+        let name = name.clone();
+        move || {
+            let name = name.clone();
+            let file = viewing_file.read().clone();
+            async move {
+                match file {
+                    Some(path) => Some(get_blob(name, None, path).await),
+                    None => None,
+                }
+            }
+        }
+    });
+
+    let commits = use_resource({
+        let name = name.clone();
+        move || {
+            let name = name.clone();
+            async move { get_commit_log(name, None).await }
+        }
+    });
     let mut description_error = use_signal(|| Option::<String>::None);
 
     let body = match repo() {
@@ -134,6 +175,144 @@ pub fn Repo(name: String) -> Element {
                         div { class: "text-sm text-ink", "{commit.summary}" }
                         div { class: "mt-1 font-mono text-xs text-ink-muted",
                             "{commit.author_name} · {relative_time(commit.unix_seconds)}"
+                        }
+                    }
+                }
+
+                if !dto.is_empty {
+                    nav { class: "mt-8 flex gap-4 border-b border-line font-mono text-sm",
+                        button {
+                            r#type: "button",
+                            class: if tab() == RepoTab::Files { "border-b-2 border-accent px-1 pb-2 text-ink" } else { "border-b-2 border-transparent px-1 pb-2 text-ink-muted hover:text-ink" },
+                            onclick: move |_| tab.set(RepoTab::Files),
+                            "files"
+                        }
+                        button {
+                            r#type: "button",
+                            class: if tab() == RepoTab::Commits { "border-b-2 border-accent px-1 pb-2 text-ink" } else { "border-b-2 border-transparent px-1 pb-2 text-ink-muted hover:text-ink" },
+                            onclick: move |_| tab.set(RepoTab::Commits),
+                            "commits"
+                        }
+                    }
+
+                    if tab() == RepoTab::Files {
+                        if let Some(file_path) = viewing_file() {
+                            div { class: "mt-4",
+                                button {
+                                    r#type: "button",
+                                    class: "font-mono text-xs text-ink-muted hover:text-ink",
+                                    onclick: move |_| viewing_file.set(None),
+                                    "← back to files"
+                                }
+                                p { class: "mt-2 font-mono text-xs text-ink-muted", "{file_path}" }
+                                match &*blob.read() {
+                                    Some(Some(Ok(blob))) => rsx! {
+                                        if blob.is_binary {
+                                            p { class: "mt-2 text-sm text-ink-muted italic", "binary file ({blob.size} bytes)" }
+                                        } else if let Some(content) = &blob.content {
+                                            pre { class: "mt-2 overflow-x-auto border border-line bg-surface p-3 font-mono text-xs text-ink",
+                                                "{content}"
+                                            }
+                                        } else {
+                                            p { class: "mt-2 text-sm text-ink-muted italic", "file too large to preview ({blob.size} bytes)" }
+                                        }
+                                    },
+                                    Some(Some(Err(err))) => rsx! {
+                                        p { class: "mt-2 text-sm text-status-conflict", "{err}" }
+                                    },
+                                    _ => rsx! {
+                                        p { class: "mt-2 text-sm text-ink-muted", "loading…" }
+                                    },
+                                }
+                            }
+                        } else {
+                            div { class: "mt-4",
+                                div { class: "flex flex-wrap items-center gap-1 font-mono text-xs text-ink-muted",
+                                    button {
+                                        r#type: "button",
+                                        class: "hover:text-ink",
+                                        onclick: move |_| path_segments.write().clear(),
+                                        "{dto.name}"
+                                    }
+                                    for (index , segment) in path_segments.read().iter().enumerate() {
+                                        span { "/" }
+                                        button {
+                                            r#type: "button",
+                                            class: "hover:text-ink",
+                                            onclick: move |_| path_segments.write().truncate(index + 1),
+                                            "{segment}"
+                                        }
+                                    }
+                                }
+                                match &*tree.read() {
+                                    Some(Ok(entries)) => rsx! {
+                                        div { class: "mt-2 divide-y divide-line border border-line",
+                                            for entry in entries.clone() {
+                                                button {
+                                                    r#type: "button",
+                                                    class: "flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-ink hover:bg-surface",
+                                                    onclick: {
+                                                        let entry = entry.clone();
+                                                        move |_| {
+                                                            if entry.is_dir {
+                                                                path_segments.write().push(entry.name.clone());
+                                                            } else {
+                                                                let mut full_path = path_segments.read().clone();
+                                                                full_path.push(entry.name.clone());
+                                                                viewing_file.set(Some(full_path.join("/")));
+                                                            }
+                                                        }
+                                                    },
+                                                    if entry.is_dir {
+                                                        Icon { icon: LdFolder, width: 16, height: 16 }
+                                                    } else {
+                                                        Icon { icon: LdFile, width: 16, height: 16 }
+                                                    }
+                                                    span { "{entry.name}" }
+                                                    if let Some(size) = entry.size {
+                                                        span { class: "ml-auto font-mono text-xs text-ink-muted", "{size} B" }
+                                                    }
+                                                }
+                                            }
+                                            if entries.is_empty() {
+                                                p { class: "px-3 py-2 text-sm text-ink-muted italic", "empty directory" }
+                                            }
+                                        }
+                                    },
+                                    Some(Err(err)) => rsx! {
+                                        p { class: "mt-2 text-sm text-status-conflict", "{err}" }
+                                    },
+                                    None => rsx! {
+                                        p { class: "mt-2 text-sm text-ink-muted", "loading…" }
+                                    },
+                                }
+                            }
+                        }
+                    } else {
+                        div { class: "mt-4",
+                            match &*commits.read() {
+                                Some(Ok(entries)) => rsx! {
+                                    div { class: "divide-y divide-line border border-line",
+                                        for commit in entries.clone() {
+                                            div { class: "px-3 py-2",
+                                                div { class: "text-sm text-ink", "{commit.summary}" }
+                                                div { class: "mt-0.5 font-mono text-xs text-ink-muted",
+                                                    "{commit.author_name} · {relative_time(commit.unix_seconds)} · {&commit.id[..7.min(commit.id.len())]}"
+                                                }
+                                            }
+                                        }
+                                        if entries.is_empty() {
+                                            p { class: "px-3 py-2 text-sm text-ink-muted italic", "no commits" }
+                                        }
+                                    }
+                                },
+                                Some(Err(err)) => rsx! {
+                                    p { class: "text-sm text-status-conflict", "{err}" }
+                                },
+                                None => rsx! {
+                                    p { class: "text-sm text-ink-muted", "loading…" }
+                                },
+                            }
                         }
                     }
                 }

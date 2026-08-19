@@ -235,6 +235,154 @@ pub fn repo_summary(store: &dyn RepoStore, name: &str) -> Result<RepoSummary, Gi
     })
 }
 
+pub struct TreeEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: Option<u64>,
+}
+
+pub struct BlobContent {
+    pub name: String,
+    pub size: u64,
+    pub is_binary: bool,
+    /// `None` for binary content or anything past `MAX_INLINE_BLOB_BYTES` —
+    /// the browser has no reason to render either, and there's no reason to
+    /// pay to serialize/transfer bytes nothing will show.
+    pub content: Option<String>,
+}
+
+pub struct CommitLogEntry {
+    pub id: String,
+    pub summary: String,
+    pub author_name: String,
+    pub unix_seconds: i64,
+}
+
+const MAX_INLINE_BLOB_BYTES: usize = 1_000_000;
+
+/// Opens `name`'s repo and resolves which commit to browse: `branch` if
+/// given, else the same "real HEAD, falling back to a sensible default
+/// branch" logic used everywhere else a repo needs one commit to point at
+/// (see `pick_default_branch`).
+fn open_and_resolve<'repo>(
+    repo: &'repo gix::Repository,
+    branch: Option<&str>,
+) -> Result<gix::Commit<'repo>, GitError> {
+    if let Some(branch) = branch {
+        let mut reference =
+            repo.find_reference(&format!("refs/heads/{branch}")).map_err(|err| GitError::Git(err.to_string()))?;
+        return reference.peel_to_commit().map_err(|err| GitError::Git(err.to_string()));
+    }
+
+    if let Ok(commit) = repo.head_commit() {
+        return Ok(commit);
+    }
+
+    let mut branch_names: Vec<String> = match repo.references() {
+        Ok(refs) => match refs.local_branches() {
+            Ok(branches) => branches.filter_map(Result::ok).map(|r| r.name().shorten().to_string()).collect(),
+            Err(_) => Vec::new(),
+        },
+        Err(_) => Vec::new(),
+    };
+    branch_names.sort();
+    let branch = pick_default_branch(&branch_names).ok_or_else(|| GitError::NotFound("no commits yet".to_string()))?;
+    let mut reference =
+        repo.find_reference(&format!("refs/heads/{branch}")).map_err(|err| GitError::Git(err.to_string()))?;
+    reference.peel_to_commit().map_err(|err| GitError::Git(err.to_string()))
+}
+
+fn open_repo_dir(store: &dyn RepoStore, name: &str) -> Result<gix::Repository, GitError> {
+    validate_name(name)?;
+    let dir = store.repo_dir(name);
+    if !dir.exists() {
+        return Err(GitError::NotFound(name.to_string()));
+    }
+    gix::open(&dir).map_err(|err| GitError::Git(err.to_string()))
+}
+
+/// Lists the entries of the directory at `path` (root if empty) as it
+/// existed at `branch`'s tip (or the default branch if `None`). Directories
+/// sort before files, then alphabetically within each group.
+pub fn browse_tree(store: &dyn RepoStore, name: &str, branch: Option<&str>, path: &str) -> Result<Vec<TreeEntry>, GitError> {
+    let repo = open_repo_dir(store, name)?;
+    let commit = open_and_resolve(&repo, branch)?;
+    let mut tree = commit.tree().map_err(|err| GitError::Git(err.to_string()))?;
+
+    if !path.is_empty() {
+        let entry = tree
+            .peel_to_entry_by_path(path)
+            .map_err(|err| GitError::Git(err.to_string()))?
+            .ok_or_else(|| GitError::NotFound(format!("{path} in {name}")))?;
+        if entry.mode().kind() != gix_object::tree::EntryKind::Tree {
+            return Err(GitError::Git(format!("\"{path}\" is not a directory")));
+        }
+        // `peel_to_entry_by_path` already left `tree` pointing at the
+        // resolved directory's tree when the entry is one — nothing further
+        // to do here.
+    }
+
+    let mut entries: Vec<TreeEntry> = tree
+        .iter()
+        .filter_map(Result::ok)
+        .map(|entry| {
+            let is_dir = entry.mode().kind() == gix_object::tree::EntryKind::Tree;
+            let size = if is_dir { None } else { entry.object().ok().map(|object| object.data.len() as u64) };
+            TreeEntry { name: entry.filename().to_string(), is_dir, size }
+        })
+        .collect();
+    entries.sort_by_key(|entry| (!entry.is_dir, entry.name.clone()));
+    Ok(entries)
+}
+
+/// Reads one file's content as it existed at `branch`'s tip (or the default
+/// branch if `None`). Binary detection is the same coarse heuristic git
+/// itself uses: a NUL byte anywhere in the first few KB means "binary."
+pub fn read_blob(store: &dyn RepoStore, name: &str, branch: Option<&str>, path: &str) -> Result<BlobContent, GitError> {
+    let repo = open_repo_dir(store, name)?;
+    let commit = open_and_resolve(&repo, branch)?;
+    let tree = commit.tree().map_err(|err| GitError::Git(err.to_string()))?;
+
+    let entry = tree
+        .lookup_entry_by_path(path)
+        .map_err(|err| GitError::Git(err.to_string()))?
+        .ok_or_else(|| GitError::NotFound(format!("{path} in {name}")))?;
+    if entry.mode().kind() == gix_object::tree::EntryKind::Tree {
+        return Err(GitError::Git(format!("\"{path}\" is a directory")));
+    }
+
+    let mut object = entry.object().map_err(|err| GitError::Git(err.to_string()))?;
+    let data = std::mem::take(&mut object.data);
+    let size = data.len() as u64;
+    let is_binary = data.iter().take(8000).any(|&byte| byte == 0);
+
+    let content = if is_binary || data.len() > MAX_INLINE_BLOB_BYTES { None } else { Some(String::from_utf8_lossy(&data).into_owned()) };
+
+    let file_name = path.rsplit('/').next().unwrap_or(path).to_string();
+    Ok(BlobContent { name: file_name, size, is_binary, content })
+}
+
+/// The most recent `limit` commits reachable from `branch`'s tip (or the
+/// default branch if `None`), newest first.
+pub fn commit_log(store: &dyn RepoStore, name: &str, branch: Option<&str>, limit: usize) -> Result<Vec<CommitLogEntry>, GitError> {
+    let repo = open_repo_dir(store, name)?;
+    let commit = open_and_resolve(&repo, branch)?;
+
+    let walk = repo.rev_walk([commit.id()]).all().map_err(|err| GitError::Git(err.to_string()))?;
+
+    let mut entries = Vec::new();
+    for info in walk.take(limit) {
+        let info = info.map_err(|err| GitError::Git(err.to_string()))?;
+        let commit = repo.find_commit(info.id).map_err(|err| GitError::Git(err.to_string()))?;
+        let summary = commit.message().ok().map(|message| message.summary().to_string()).unwrap_or_default();
+        let author = commit.author().ok();
+        let author_name = author.as_ref().map(|author| author.name.to_string()).unwrap_or_default();
+        let unix_seconds = author.and_then(|author| author.time().ok()).map(|time| time.seconds).unwrap_or(0);
+        entries.push(CommitLogEntry { id: info.id.to_string(), summary, author_name, unix_seconds });
+    }
+    Ok(entries)
+}
+
 /// Bare repos conventionally carry a `description` file (used by gitweb/cgit)
 /// — reused here instead of a database column, since git already gives us
 /// somewhere to put it and there's no `db` yet.

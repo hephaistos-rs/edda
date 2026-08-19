@@ -169,9 +169,14 @@ async fn upload_pack(Path(repo): Path<String>, body: Bytes) -> Response {
         return (StatusCode::BAD_REQUEST, "no \"want\" lines in request").into_response();
     }
 
-    let pack = match build_pack(&repo, &wants) {
-        Ok(pack) => pack,
-        Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    // Walking the object graph and zlib-deflating every reachable object is
+    // real CPU work, not I/O — run it on the blocking pool so it doesn't tie
+    // up one of the async runtime's worker threads (and everything else
+    // scheduled on it) for however long a large clone takes.
+    let pack = match tokio::task::spawn_blocking(move || build_pack(&repo, &wants)).await {
+        Ok(Ok(pack)) => pack,
+        Ok(Err(err)) => return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "pack build task panicked").into_response(),
     };
 
     let mut out = Vec::new();
@@ -270,16 +275,27 @@ async fn receive_pack(auth: AuthSession<Backend>, headers: HeaderMap, Path(repo)
 
     let needs_pack = commands.iter().any(|command| command.new_id != ZERO_ID);
     if needs_pack {
-        let pack_data = &body[pos..];
-        let objects = match parse_pack(&repo_handle, pack_data) {
-            Ok(objects) => objects,
-            Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("bad pack: {err}")).into_response(),
-        };
-        for object in &objects {
-            if let Err(err) = write_loose_object(&git_dir, object.kind, &object.data) {
-                return (StatusCode::INTERNAL_SERVER_ERROR, format!("couldn't store object {}: {err}", object.id))
-                    .into_response();
+        // Same reasoning as `upload_pack`: delta resolution and re-deflating
+        // every object to write it out as a loose object is real CPU work —
+        // move it to the blocking pool rather than occupy an async worker
+        // thread for the duration. `body.slice` is a cheap refcount bump
+        // (shares the same buffer), not a copy, so this isn't paying to
+        // duplicate the pack.
+        let pack_data = body.slice(pos..);
+        let git_dir_for_pack = git_dir.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let objects = parse_pack(&repo_handle, &pack_data).map_err(|err| format!("bad pack: {err}"))?;
+            for object in &objects {
+                write_loose_object(&git_dir_for_pack, object.kind, &object.data)
+                    .map_err(|err| format!("couldn't store object {}: {err}", object.id))?;
             }
+            Ok::<_, String>(objects)
+        })
+        .await;
+        match outcome {
+            Ok(Ok(_)) => {}
+            Ok(Err(message)) => return (StatusCode::INTERNAL_SERVER_ERROR, message).into_response(),
+            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "pack processing task panicked").into_response(),
         }
     }
 

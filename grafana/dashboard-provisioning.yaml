@@ -1,0 +1,13 @@
+# Tells Grafana (bundled inside the grafana-lgtm container) to auto-load
+# the dashboard(s) mounted at the path below. Verified against the running
+# image (v0.30.2 / Grafana 13.1.3): its own default dashboards are
+# provisioned from /otel-lgtm/grafana/conf/provisioning/dashboards/, so a
+# custom provider follows the same convention rather than guessing one.
+apiVersion: 1
+
+providers:
+  - name: "Edda"
+    type: file
+    options:
+      path: /otel-lgtm/grafana/conf/provisioning/dashboards/edda
+      foldersFromFilesStructure: false

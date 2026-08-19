@@ -51,6 +51,7 @@ Edda's interface reads like the terminal tools its audience — solo devs and sm
 System requirements shaped the world as much as taste did: because the terminal aesthetic naturally leans on ANSI-style status colors, every status is deliberately carried by a distinct icon shape and a text label as well as its color — confirmed as a hard requirement during design, not a nice-to-have.
 
 **Key Characteristics:**
+
 - Graphite ground, no cards, no shadows — regions are separated by 1px hairline seams only.
 - One accent (gold) reserved for interactive/brand moments; status meaning lives in its own, separate hue family.
 - Monospace is earned by data (names, counts, hashes) — prose stays in a readable proportional face.
@@ -61,9 +62,11 @@ System requirements shaped the world as much as taste did: because the terminal 
 A near-black graphite ground with a single warm accent and four distinct, non-overlapping status hues.
 
 ### Primary
+
 - **Signal Gold** (`oklch(78% 0.14 85)` / `#e0af3b`): the one interactive/brand accent — links, primary actions, active nav, focus rings. Used sparingly (restrained strategy); its rarity is the point.
 
 ### Neutral
+
 - **Graphite Ground** (`oklch(15% 0.01 260)` / `#090b0f`): page background.
 - **Panel Surface** (`oklch(22% 0.013 260)` / `#171b21`): hover/focus state fill for interactive rows.
 - **Hairline** (`oklch(34% 0.015 260)` / `#333840`): the only divider — a 1px border, never a shadow or card.
@@ -71,12 +74,14 @@ A near-black graphite ground with a single warm accent and four distinct, non-ov
 - **Ink Muted** (`oklch(72% 0.01 260)` / `#a1a5ab`): secondary text (descriptions, counts). Still 7.9:1 against the ground — never a low-contrast decorative gray.
 
 ### Status (Neutral role, functional)
+
 - **Status Clean** (`oklch(72% 0.15 150)` / `#53be70`): up to date. Paired with a checked-circle icon.
 - **Status Ahead** (`oklch(75% 0.12 230)` / `#4ebceb`): ahead of remote / pending. Paired with an arrow-up-circle icon.
 - **Status Conflict** (`oklch(72% 0.19 25)` / `#ff706a`): needs attention / destructive. Paired with a triangle-alert icon.
 - **Status Empty** (`oklch(60% 0.012 260)` / `#7c8088`): no commits yet. Paired with a dashed-circle icon.
 
 ### Named Rules
+
 **The Never-Color-Alone Rule.** Every status carries a distinct icon shape and an `sr-only` text label in addition to its color. This is a confirmed accessibility requirement, not a style preference — verify it on every new status introduced.
 
 **The One Voice Rule.** Signal Gold is the only accent used for interactive/brand meaning. It never doubles as a status color, and status colors never substitute for it on interactive elements.
@@ -89,12 +94,14 @@ A near-black graphite ground with a single warm accent and four distinct, non-ov
 **Character:** System stacks by deliberate choice, not default laziness — a self-hosted tool that phones out to a font CDN undercuts its own "self-hosted, no external dependencies" premise. The pairing is functional, not expressive: mono is reserved for the data it's earned (names, hashes, counts), sans carries everything read as prose.
 
 ### Hierarchy
+
 - **Title** (600 weight, 1.5rem): repo detail page name.
 - **Body** (500 weight, 15px, mono): repo name in a list row — the primary scan target.
 - **Body** (400 weight, 0.875rem, sans): repo description.
 - **Label** (500 weight, 0.75rem, mono, tabular-nums): ahead/behind counts, always right-aligned.
 
 ### Named Rules
+
 **The Earned-Mono Rule.** Monospace marks data (names, hashes, counts, branches) — never used as a "technical-looking" costume on prose or UI chrome labels.
 
 ## Layout
@@ -106,6 +113,7 @@ Single-column, dense list as the primary composition — not a grid of cards. A 
 Flat by design — no shadows anywhere. Depth and separation come entirely from the hairline-seam border and a one-step surface tint on hover/focus, never from blur or offset shadow.
 
 ### Named Rules
+
 **The No-Shadow Rule.** Panels and rows are separated by a 1px `border-line` hairline or a `bg-surface` tint on interaction. A shadow anywhere in this system is a bug, not a stylistic choice.
 
 ## Shapes
@@ -115,27 +123,32 @@ Sharp corners throughout (`rounded: 0`) — no rounded rectangles. This is a del
 ## Components
 
 ### Repo Row
+
 - **Shape:** full-bleed row, sharp corners, `border-line` bottom hairline separating rows (no side borders, no card wrapper).
 - **Content:** status icon (with `sr-only` label) + mono repo name + sans description (truncates) + tabular-nums ahead/behind counts, right-aligned.
 - **Hover / Focus:** `bg-surface` fill across the full row; the whole row is the click target (wraps a `<Link>`).
 - **Disabled:** the trailing "new repository" row uses the same anatomy at 60% opacity with `aria-disabled="true"` and a `title` explaining why, rather than pretending to be a live control.
 
 ### Search Input
+
 - **Style:** `bg-surface` fill, `border-line` border, sharp corners, leading search icon.
 - **Focus:** border shifts to `accent`.
 
 ### Navigation
+
 - **Style:** mono wordmark + mono nav links in `ink-muted`, `ink` on hover. No active-state pill or underline — current page is conveyed via `aria-current` for assistive tech, not a visual treatment yet (open item, see Do's and Don'ts).
 
 ## Do's and Don'ts
 
 ### Do:
+
 - **Do** pair every status color with a distinct drawn icon shape and a text label — confirmed accessibility requirement.
 - **Do** keep monospace scoped to data (names, hashes, counts) and sans to prose.
 - **Do** use system font stacks — no external font requests, consistent with the self-hosted product premise.
 - **Do** separate regions with a 1px `border-line` hairline, never a shadow or a card wrapper.
 
 ### Don't:
+
 - **Don't** introduce a second interactive accent color — Signal Gold stays the only one.
 - **Don't** reuse a status color for a non-status, non-decorative meaning (e.g. don't make a random illustrative element status-conflict red).
 - **Don't** add shadows, rounded corners, or card containers — flat and sharp is the invariant, not a placeholder.

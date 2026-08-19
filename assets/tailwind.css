@@ -4,7 +4,8 @@
 @layer theme {
   :root, :host {
     --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    --font-mono: ui-monospace, "Cascadia Code", "Segoe UI Mono", Consolas, "Liberation Mono", monospace;
+    --font-mono: ui-monospace, "Cascadia Code", "Segoe UI Mono", Consolas, "Liberation Mono",
+    monospace;
     --spacing: 0.25rem;
     --container-xs: 20rem;
     --container-sm: 24rem;
@@ -181,6 +182,9 @@
   }
 }
 @layer utilities {
+  .invisible {
+    visibility: hidden;
+  }
   .sr-only {
     position: absolute;
     width: 1px;
@@ -260,6 +264,9 @@
   }
   .inline {
     display: inline;
+  }
+  .table {
+    display: table;
   }
   .w-full {
     width: 100%;

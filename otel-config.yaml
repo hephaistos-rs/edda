@@ -19,7 +19,6 @@ exporters:
     # other compose service. Docker Compose's service-name DNS is what makes
     # this resolve to the actual grafana-lgtm container.
     endpoint: http://grafana-lgtm:4318
-
 service:
   pipelines:
     traces:

@@ -1963,6 +1963,7 @@ dependencies = [
  "argon2",
  "axum",
  "axum-login",
+ "base64",
  "dioxus",
  "dioxus-free-icons",
  "flate2",

@@ -51,6 +51,8 @@ async fn signup(mut auth: AuthSession<Backend>, Json(creds): Json<Credentials>) 
     Json(CurrentUser::from(user)).into_response()
 }
 
+// `skip_all`: `creds` carries a raw password — never a span field.
+#[tracing::instrument(name = "authentication.login", skip_all)]
 async fn login(mut auth: AuthSession<Backend>, Json(creds): Json<Credentials>) -> Response {
     let creds = crate::auth::Credentials { email: creds.email, password: creds.password };
 
@@ -91,6 +93,10 @@ struct CreatedToken {
     created_at: i64,
 }
 
+// `body.name` is a user-chosen label for the token (like a device name), not
+// the token secret itself — the generated token value is never captured
+// anywhere in telemetry.
+#[tracing::instrument(name = "authentication.token.create", skip_all, fields(token.name = %body.name))]
 async fn create_token(auth: AuthSession<Backend>, Json(body): Json<CreateTokenBody>) -> Response {
     let Some(user) = auth.user else {
         return StatusCode::UNAUTHORIZED.into_response();

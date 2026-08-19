@@ -143,6 +143,7 @@ fn advertised_refs(repo: &gix::Repository) -> Result<Vec<(gix::ObjectId, String)
     Ok(refs)
 }
 
+#[tracing::instrument(name = "git.upload_pack", skip_all, fields(repo = %repo))]
 async fn upload_pack(Path(repo): Path<String>, body: Bytes) -> Response {
     let name = match repo_name(&repo) {
         Ok(name) => name,
@@ -173,7 +174,14 @@ async fn upload_pack(Path(repo): Path<String>, body: Bytes) -> Response {
     // real CPU work, not I/O — run it on the blocking pool so it doesn't tie
     // up one of the async runtime's worker threads (and everything else
     // scheduled on it) for however long a large clone takes.
-    let pack = match tokio::task::spawn_blocking(move || build_pack(&repo, &wants)).await {
+    //
+    // `spawn_blocking` runs the closure on a fresh OS thread with no tracing
+    // context of its own — a span doesn't cross that boundary automatically.
+    // Capturing the current span here and re-entering it inside the closure
+    // is what makes `git.build_pack` (added in `pack.rs`) show up nested
+    // under `git.upload_pack` rather than as an orphaned span.
+    let current_span = tracing::Span::current();
+    let pack = match tokio::task::spawn_blocking(move || current_span.in_scope(|| build_pack(&repo, &wants))).await {
         Ok(Ok(pack)) => pack,
         Ok(Err(err)) => return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "pack build task panicked").into_response(),
@@ -224,6 +232,7 @@ async fn authenticate_basic(backend: &Backend, headers: &HeaderMap) -> Option<Us
     backend.authenticate(creds).await.ok()?
 }
 
+#[tracing::instrument(name = "git.receive_pack", skip_all, fields(repo = %repo))]
 async fn receive_pack(auth: AuthSession<Backend>, headers: HeaderMap, Path(repo): Path<String>, body: Bytes) -> Response {
     // Any push is a write, and there's no per-repo ownership model yet — any
     // logged-in user can push to any repo. That's the same coarse trust
@@ -294,13 +303,19 @@ async fn receive_pack(auth: AuthSession<Backend>, headers: HeaderMap, Path(repo)
         // duplicate the pack.
         let pack_data = body.slice(pos..);
         let git_dir_for_pack = git_dir.clone();
+        // Same `spawn_blocking`-doesn't-inherit-the-current-span caveat as
+        // `upload_pack` above — capture and re-enter explicitly so
+        // `git.parse_pack` nests under `git.receive_pack`.
+        let current_span = tracing::Span::current();
         let outcome = tokio::task::spawn_blocking(move || {
-            let objects = parse_pack(&repo_handle, &pack_data).map_err(|err| format!("bad pack: {err}"))?;
-            for object in &objects {
-                write_loose_object(&git_dir_for_pack, object.kind, &object.data)
-                    .map_err(|err| format!("couldn't store object {}: {err}", object.id))?;
-            }
-            Ok::<_, String>(objects)
+            current_span.in_scope(|| {
+                let objects = parse_pack(&repo_handle, &pack_data).map_err(|err| format!("bad pack: {err}"))?;
+                for object in &objects {
+                    write_loose_object(&git_dir_for_pack, object.kind, &object.data)
+                        .map_err(|err| format!("couldn't store object {}: {err}", object.id))?;
+                }
+                Ok::<_, String>(objects)
+            })
         })
         .await;
         match outcome {

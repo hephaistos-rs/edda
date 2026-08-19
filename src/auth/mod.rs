@@ -98,6 +98,13 @@ impl AuthnBackend for Backend {
 /// verification, no password strength check beyond non-empty — signup is
 /// instant. Email uniqueness is enforced by the `users.email` UNIQUE
 /// constraint; a violation there is reported as `EmailTaken`.
+// `skip_all` and no explicit `fields(...)` here on purpose: `email` is
+// personally-identifying and `password` is a credential — neither belongs on
+// a span even though `email` alone isn't as sensitive as a password. Argon2
+// hashing inside `hash_password` legitimately shows up as the expensive part
+// of this span's duration; that's useful for diagnosing signup latency and
+// carries no secret (the span has no field with the password or its hash).
+#[tracing::instrument(name = "authentication.signup", skip_all, err)]
 pub async fn signup(pool: &SqlitePool, email: &str, password: &str) -> Result<User, AuthError> {
     let email = email.trim();
     if email.is_empty() || password.is_empty() {

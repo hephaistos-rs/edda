@@ -1,0 +1,25 @@
+# Minimal local observability stack: an OpenTelemetry Collector (the
+# backend-neutral boundary Edda actually talks to) in front of a single
+# grafana/otel-lgtm container (Tempo for traces, Loki for logs, Prometheus
+# for metrics, and Grafana as the one UI for all three — pre-wired, nothing
+# else to configure).
+#
+# Usage:
+#   docker compose -f compose.otel.yml up
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 cargo run --features server
+#   open http://localhost:3000 (Grafana; no login required by default)
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otel-config.yaml"]
+    volumes:
+      - ./otel-config.yaml:/etc/otel-config.yaml:ro
+    ports:
+      - "4318:4318" # OTLP HTTP — this is the endpoint Edda's OTEL_EXPORTER_OTLP_ENDPOINT should point at
+    depends_on:
+      - grafana-lgtm
+
+  grafana-lgtm:
+    image: grafana/otel-lgtm:latest
+    ports:
+      - "3000:3000" # Grafana UI

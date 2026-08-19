@@ -27,6 +27,15 @@ pub async fn pool() -> Result<SqlitePool, sqlx::Error> {
     // concurrent traffic, not just heavy writes. WAL lets readers and the
     // writer proceed together; busy_timeout makes a connection that still
     // loses a write race retry for a bit instead of failing outright.
+    // sqlx already emits a `tracing::event!` (not a `log`-crate event — no
+    // bridge needed) at target `sqlx::query` for every statement, with
+    // duration, at its own sensible defaults: Debug for normal queries
+    // (matches Edda's dev-default filter, invisible at production's default
+    // Info), Warn for anything over 1s (visible even in production, a free
+    // slow-query signal). Left at sqlx's defaults rather than overridden —
+    // no reason to duplicate what's already right. It logs the statement
+    // text (every query here is parameterized, never string-built from
+    // input) but never bound parameter values.
     let options = SqliteConnectOptions::new()
         .filename(&path)
         .create_if_missing(true)

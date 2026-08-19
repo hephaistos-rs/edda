@@ -22,6 +22,7 @@ use crate::git::GitError;
 
 /// Walks every object reachable from `wants` (commits, their trees, and
 /// everything those trees reference) and serializes them into a pack.
+#[tracing::instrument(name = "git.build_pack", skip_all, err, fields(wants = wants.len()))]
 pub fn build_pack(repo: &gix::Repository, wants: &[ObjectId]) -> Result<Vec<u8>, GitError> {
     let mut seen: HashSet<ObjectId> = HashSet::new();
     let mut queue: VecDeque<ObjectId> = wants.iter().copied().collect();
@@ -153,6 +154,7 @@ pub struct ParsedObject {
 /// `git push` clients delta-compress non-trivial pushes by default, so this
 /// resolves both delta kinds, not just plain objects. `REF_DELTA` bases may
 /// be objects already in the repo from before this push, hence `repo`.
+#[tracing::instrument(name = "git.parse_pack", skip_all, err, fields(bytes = data.len()))]
 pub fn parse_pack(repo: &gix::Repository, data: &[u8]) -> Result<Vec<ParsedObject>, GitError> {
     if data.len() < 12 || &data[0..4] != b"PACK" {
         return Err(GitError::Git("not a valid pack: missing PACK header".to_string()));

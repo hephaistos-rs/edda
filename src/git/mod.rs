@@ -32,6 +32,15 @@ pub(crate) fn repo_lock(name: &str) -> Arc<AsyncMutex<()>> {
     registry.entry(name.to_string()).or_insert_with(|| Arc::new(AsyncMutex::new(()))).clone()
 }
 
+/// Records one git operation's outcome as the `edda.git.operation.duration`
+/// metric (`operation`/`status` attributes only — never a repo name, see
+/// `telemetry::metrics`). Kept as a one-line call at each instrumented git
+/// boundary so a span's name and its matching metric label can't drift apart.
+fn record_git_op<T>(operation: &'static str, start: std::time::Instant, result: &Result<T, GitError>) {
+    let status = if result.is_ok() { "success" } else { "error" };
+    crate::telemetry::metrics::record_git_operation(operation, status, start.elapsed());
+}
+
 #[derive(Debug)]
 pub enum GitError {
     InvalidName(String),
@@ -117,7 +126,14 @@ pub async fn create_repo(store: &dyn RepoStore, name: &str, description: Option<
     if let Some(parent) = dir.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    gix::init_bare(&dir).map_err(|err| GitError::Git(err.to_string()))?;
+    {
+        let span = tracing::info_span!("git.initialize", repo.name = %name);
+        let _guard = span.enter();
+        let start = std::time::Instant::now();
+        let result = gix::init_bare(&dir).map_err(|err| GitError::Git(err.to_string())).map(|_| ());
+        record_git_op("git.initialize", start, &result);
+        result?;
+    }
     if let Some(description) = description {
         let description = description.trim();
         if !description.is_empty() {
@@ -264,41 +280,53 @@ const MAX_INLINE_BLOB_BYTES: usize = 1_000_000;
 /// given, else the same "real HEAD, falling back to a sensible default
 /// branch" logic used everywhere else a repo needs one commit to point at
 /// (see `pick_default_branch`).
+#[tracing::instrument(name = "git.resolve_revision", skip_all, err, fields(branch = branch.unwrap_or("HEAD")))]
 fn open_and_resolve<'repo>(
     repo: &'repo gix::Repository,
     branch: Option<&str>,
 ) -> Result<gix::Commit<'repo>, GitError> {
-    if let Some(branch) = branch {
+    let start = std::time::Instant::now();
+    let result = (|| {
+        if let Some(branch) = branch {
+            let mut reference =
+                repo.find_reference(&format!("refs/heads/{branch}")).map_err(|err| GitError::Git(err.to_string()))?;
+            return reference.peel_to_commit().map_err(|err| GitError::Git(err.to_string()));
+        }
+
+        if let Ok(commit) = repo.head_commit() {
+            return Ok(commit);
+        }
+
+        let mut branch_names: Vec<String> = match repo.references() {
+            Ok(refs) => match refs.local_branches() {
+                Ok(branches) => branches.filter_map(Result::ok).map(|r| r.name().shorten().to_string()).collect(),
+                Err(_) => Vec::new(),
+            },
+            Err(_) => Vec::new(),
+        };
+        branch_names.sort();
+        let branch = pick_default_branch(&branch_names).ok_or_else(|| GitError::NotFound("no commits yet".to_string()))?;
         let mut reference =
             repo.find_reference(&format!("refs/heads/{branch}")).map_err(|err| GitError::Git(err.to_string()))?;
-        return reference.peel_to_commit().map_err(|err| GitError::Git(err.to_string()));
-    }
-
-    if let Ok(commit) = repo.head_commit() {
-        return Ok(commit);
-    }
-
-    let mut branch_names: Vec<String> = match repo.references() {
-        Ok(refs) => match refs.local_branches() {
-            Ok(branches) => branches.filter_map(Result::ok).map(|r| r.name().shorten().to_string()).collect(),
-            Err(_) => Vec::new(),
-        },
-        Err(_) => Vec::new(),
-    };
-    branch_names.sort();
-    let branch = pick_default_branch(&branch_names).ok_or_else(|| GitError::NotFound("no commits yet".to_string()))?;
-    let mut reference =
-        repo.find_reference(&format!("refs/heads/{branch}")).map_err(|err| GitError::Git(err.to_string()))?;
-    reference.peel_to_commit().map_err(|err| GitError::Git(err.to_string()))
+        reference.peel_to_commit().map_err(|err| GitError::Git(err.to_string()))
+    })();
+    record_git_op("git.resolve_revision", start, &result);
+    result
 }
 
+#[tracing::instrument(name = "git.open", skip_all, err, fields(repo.name = %name))]
 fn open_repo_dir(store: &dyn RepoStore, name: &str) -> Result<gix::Repository, GitError> {
-    validate_name(name)?;
-    let dir = store.repo_dir(name);
-    if !dir.exists() {
-        return Err(GitError::NotFound(name.to_string()));
-    }
-    gix::open(&dir).map_err(|err| GitError::Git(err.to_string()))
+    let start = std::time::Instant::now();
+    let result = (|| {
+        validate_name(name)?;
+        let dir = store.repo_dir(name);
+        if !dir.exists() {
+            return Err(GitError::NotFound(name.to_string()));
+        }
+        gix::open(&dir).map_err(|err| GitError::Git(err.to_string()))
+    })();
+    record_git_op("git.open", start, &result);
+    result
 }
 
 /// Lists the entries of the directory at `path` (root if empty) as it
@@ -307,36 +335,44 @@ fn open_repo_dir(store: &dyn RepoStore, name: &str) -> Result<gix::Repository, G
 pub fn browse_tree(store: &dyn RepoStore, name: &str, branch: Option<&str>, path: &str) -> Result<Vec<TreeEntry>, GitError> {
     let repo = open_repo_dir(store, name)?;
     let commit = open_and_resolve(&repo, branch)?;
-    let mut tree = commit.tree().map_err(|err| GitError::Git(err.to_string()))?;
 
-    if !path.is_empty() {
-        let entry = tree
-            .peel_to_entry_by_path(path)
-            .map_err(|err| GitError::Git(err.to_string()))?
-            .ok_or_else(|| GitError::NotFound(format!("{path} in {name}")))?;
-        if entry.mode().kind() != gix_object::tree::EntryKind::Tree {
-            return Err(GitError::Git(format!("\"{path}\" is not a directory")));
+    let span = tracing::info_span!("git.read_tree", repo.name = %name, path = %path);
+    let _guard = span.enter();
+    let start = std::time::Instant::now();
+    let result = (|| {
+        let mut tree = commit.tree().map_err(|err| GitError::Git(err.to_string()))?;
+
+        if !path.is_empty() {
+            let entry = tree
+                .peel_to_entry_by_path(path)
+                .map_err(|err| GitError::Git(err.to_string()))?
+                .ok_or_else(|| GitError::NotFound(format!("{path} in {name}")))?;
+            if entry.mode().kind() != gix_object::tree::EntryKind::Tree {
+                return Err(GitError::Git(format!("\"{path}\" is not a directory")));
+            }
+            // `peel_to_entry_by_path` already left `tree` pointing at the
+            // resolved directory's tree when the entry is one — nothing further
+            // to do here.
         }
-        // `peel_to_entry_by_path` already left `tree` pointing at the
-        // resolved directory's tree when the entry is one — nothing further
-        // to do here.
-    }
 
-    let mut entries: Vec<TreeEntry> = tree
-        .iter()
-        .filter_map(Result::ok)
-        .map(|entry| {
-            let is_dir = entry.mode().kind() == gix_object::tree::EntryKind::Tree;
-            // `.header()` reads just the object's size/type from its
-            // (small) header — `.object()` would decompress the entire
-            // blob just to throw the content away, which is a real cost
-            // for anything but tiny files and pointless for a listing.
-            let size = if is_dir { None } else { entry.id().header().ok().map(|header| header.size()) };
-            TreeEntry { name: entry.filename().to_string(), is_dir, size }
-        })
-        .collect();
-    entries.sort_by_key(|entry| (!entry.is_dir, entry.name.clone()));
-    Ok(entries)
+        let mut entries: Vec<TreeEntry> = tree
+            .iter()
+            .filter_map(Result::ok)
+            .map(|entry| {
+                let is_dir = entry.mode().kind() == gix_object::tree::EntryKind::Tree;
+                // `.header()` reads just the object's size/type from its
+                // (small) header — `.object()` would decompress the entire
+                // blob just to throw the content away, which is a real cost
+                // for anything but tiny files and pointless for a listing.
+                let size = if is_dir { None } else { entry.id().header().ok().map(|header| header.size()) };
+                TreeEntry { name: entry.filename().to_string(), is_dir, size }
+            })
+            .collect();
+        entries.sort_by_key(|entry| (!entry.is_dir, entry.name.clone()));
+        Ok(entries)
+    })();
+    record_git_op("git.read_tree", start, &result);
+    result
 }
 
 /// Reads one file's content as it existed at `branch`'s tip (or the default
@@ -345,25 +381,34 @@ pub fn browse_tree(store: &dyn RepoStore, name: &str, branch: Option<&str>, path
 pub fn read_blob(store: &dyn RepoStore, name: &str, branch: Option<&str>, path: &str) -> Result<BlobContent, GitError> {
     let repo = open_repo_dir(store, name)?;
     let commit = open_and_resolve(&repo, branch)?;
-    let tree = commit.tree().map_err(|err| GitError::Git(err.to_string()))?;
 
-    let entry = tree
-        .lookup_entry_by_path(path)
-        .map_err(|err| GitError::Git(err.to_string()))?
-        .ok_or_else(|| GitError::NotFound(format!("{path} in {name}")))?;
-    if entry.mode().kind() == gix_object::tree::EntryKind::Tree {
-        return Err(GitError::Git(format!("\"{path}\" is a directory")));
-    }
+    let span = tracing::info_span!("git.read_blob", repo.name = %name, path = %path);
+    let _guard = span.enter();
+    let start = std::time::Instant::now();
+    let result = (|| {
+        let tree = commit.tree().map_err(|err| GitError::Git(err.to_string()))?;
 
-    let mut object = entry.object().map_err(|err| GitError::Git(err.to_string()))?;
-    let data = std::mem::take(&mut object.data);
-    let size = data.len() as u64;
-    let is_binary = data.iter().take(8000).any(|&byte| byte == 0);
+        let entry = tree
+            .lookup_entry_by_path(path)
+            .map_err(|err| GitError::Git(err.to_string()))?
+            .ok_or_else(|| GitError::NotFound(format!("{path} in {name}")))?;
+        if entry.mode().kind() == gix_object::tree::EntryKind::Tree {
+            return Err(GitError::Git(format!("\"{path}\" is a directory")));
+        }
 
-    let content = if is_binary || data.len() > MAX_INLINE_BLOB_BYTES { None } else { Some(String::from_utf8_lossy(&data).into_owned()) };
+        let mut object = entry.object().map_err(|err| GitError::Git(err.to_string()))?;
+        let data = std::mem::take(&mut object.data);
+        let size = data.len() as u64;
+        let is_binary = data.iter().take(8000).any(|&byte| byte == 0);
 
-    let file_name = path.rsplit('/').next().unwrap_or(path).to_string();
-    Ok(BlobContent { name: file_name, size, is_binary, content })
+        let content =
+            if is_binary || data.len() > MAX_INLINE_BLOB_BYTES { None } else { Some(String::from_utf8_lossy(&data).into_owned()) };
+
+        let file_name = path.rsplit('/').next().unwrap_or(path).to_string();
+        Ok(BlobContent { name: file_name, size, is_binary, content })
+    })();
+    record_git_op("git.read_blob", start, &result);
+    result
 }
 
 /// The most recent `limit` commits reachable from `branch`'s tip (or the
@@ -372,19 +417,34 @@ pub fn commit_log(store: &dyn RepoStore, name: &str, branch: Option<&str>, limit
     let repo = open_repo_dir(store, name)?;
     let commit = open_and_resolve(&repo, branch)?;
 
-    let walk = repo.rev_walk([commit.id()]).all().map_err(|err| GitError::Git(err.to_string()))?;
+    // One span for the whole walk, not one per commit — up to `limit`
+    // (currently 50) child spans would be noise, not signal (see the
+    // "don't over-instrument" guidance this instrumentation follows
+    // throughout). `commit_count` on the span after the fact answers "how
+    // much work did this do" without per-commit spans.
+    let span = tracing::info_span!("git.read_commit_log", repo.name = %name, commit_count = tracing::field::Empty);
+    let _guard = span.enter();
+    let start = std::time::Instant::now();
+    let result = (|| {
+        let walk = repo.rev_walk([commit.id()]).all().map_err(|err| GitError::Git(err.to_string()))?;
 
-    let mut entries = Vec::new();
-    for info in walk.take(limit) {
-        let info = info.map_err(|err| GitError::Git(err.to_string()))?;
-        let commit = repo.find_commit(info.id).map_err(|err| GitError::Git(err.to_string()))?;
-        let summary = commit.message().ok().map(|message| message.summary().to_string()).unwrap_or_default();
-        let author = commit.author().ok();
-        let author_name = author.as_ref().map(|author| author.name.to_string()).unwrap_or_default();
-        let unix_seconds = author.and_then(|author| author.time().ok()).map(|time| time.seconds).unwrap_or(0);
-        entries.push(CommitLogEntry { id: info.id.to_string(), summary, author_name, unix_seconds });
+        let mut entries = Vec::new();
+        for info in walk.take(limit) {
+            let info = info.map_err(|err| GitError::Git(err.to_string()))?;
+            let commit = repo.find_commit(info.id).map_err(|err| GitError::Git(err.to_string()))?;
+            let summary = commit.message().ok().map(|message| message.summary().to_string()).unwrap_or_default();
+            let author = commit.author().ok();
+            let author_name = author.as_ref().map(|author| author.name.to_string()).unwrap_or_default();
+            let unix_seconds = author.and_then(|author| author.time().ok()).map(|time| time.seconds).unwrap_or(0);
+            entries.push(CommitLogEntry { id: info.id.to_string(), summary, author_name, unix_seconds });
+        }
+        Ok(entries)
+    })();
+    if let Ok(entries) = &result {
+        span.record("commit_count", entries.len());
     }
-    Ok(entries)
+    record_git_op("git.read_commit_log", start, &result);
+    result
 }
 
 /// Bare repos conventionally carry a `description` file (used by gitweb/cgit)

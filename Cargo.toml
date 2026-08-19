@@ -20,13 +20,33 @@ gix = { version = "0.86.0", optional = true }
 gix-hash = { version = "0.26.0", optional = true, features = ["sha1"] }
 gix-object = { version = "0.63.0", optional = true }
 gloo-net = { version = "0.7.0", features = ["json"], optional = true }
+# Server-only observability stack: tracing is the application's instrumentation
+# API; the opentelemetry* crates are purely an optional export path underneath
+# it (see src/telemetry). Versions verified as a mutually-compatible set
+# against docs.rs at implementation time, not copied from an old tutorial.
+opentelemetry = { version = "0.32.0", optional = true }
+opentelemetry-appender-tracing = { version = "0.32.0", optional = true }
+opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "metrics", "logs"], optional = true }
+opentelemetry-semantic-conventions = { version = "0.32.1", features = ["semconv_experimental"], optional = true }
+opentelemetry_sdk = { version = "0.32.1", optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 sha2 = { version = "0.10.9", optional = true }
 sqlx = { version = "0.8.6", features = ["sqlite", "runtime-tokio", "migrate", "macros"], optional = true }
 thiserror = { version = "2.0.20", optional = true }
-tokio = { version = "1.53.1", features = ["sync", "rt"], optional = true }
+# "signal"/"time" are pulled in for this crate's own graceful-shutdown code
+# (src/main.rs) — cargo's feature unification means dioxus's own tokio usage
+# likely already enables them, but this crate shouldn't rely on that
+# implicitly for code it directly calls.
+tokio = { version = "1.53.1", features = ["sync", "rt", "signal", "time"], optional = true }
+tower-http = { version = "0.6.11", features = ["trace"], optional = true }
 tower-sessions = { version = "0.14.0", optional = true }
 tower-sessions-sqlx-store = { version = "0.15.0", features = ["sqlite"], optional = true }
+# Not optional: `tracing`'s macros (`info!`, `#[instrument]`, ...) are used
+# from server-only modules, but the facade itself is tiny and side-effect-free
+# to depend on — Dioxus already pulls it in transitively either way.
+tracing = "0.1.44"
+tracing-opentelemetry = { version = "0.33.0", optional = true }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json", "registry"], optional = true }
 uuid = { version = "1.24.1", features = ["v7"], optional = true }
 # Not optional: used from `ui/`, which compiles for both the wasm client and
 # the native server. Plain `std::time::SystemTime::now()` panics on
@@ -57,4 +77,12 @@ server = [
     "dep:thiserror",
     "dep:uuid",
     "dep:sha2",
+    "dep:opentelemetry",
+    "dep:opentelemetry-appender-tracing",
+    "dep:opentelemetry-otlp",
+    "dep:opentelemetry-semantic-conventions",
+    "dep:opentelemetry_sdk",
+    "dep:tower-http",
+    "dep:tracing-opentelemetry",
+    "dep:tracing-subscriber",
 ]

@@ -36,7 +36,15 @@ impl From<crate::git::RepoSummary> for RepoDto {
     }
 }
 
+// Spans on these server functions carry `repo.name` as a field, never a
+// metric label (see `telemetry::metrics`'s doc comment): Edda has no
+// internal repository id to prefer instead — audited `migrations/*.sql` and
+// confirmed there is no `repos` table at all, repos are identified solely by
+// their filesystem-derived name. Name is bounded/human-scale (rejected past
+// 100 chars, restricted charset — see `git::validate_name`), which is why
+// it's acceptable as a span field despite being user-chosen.
 #[get("/api/repos")]
+#[tracing::instrument(name = "repository.list", skip_all, err)]
 pub async fn list_repos() -> Result<Vec<RepoDto>, ServerFnError> {
     use crate::git::{self, store::LocalFsStore};
 
@@ -46,6 +54,7 @@ pub async fn list_repos() -> Result<Vec<RepoDto>, ServerFnError> {
 }
 
 #[get("/api/repos/:name")]
+#[tracing::instrument(name = "repository.get", skip_all, err, fields(repo.name = %name))]
 pub async fn get_repo(name: String) -> Result<RepoDto, ServerFnError> {
     use crate::git::{self, store::LocalFsStore};
 
@@ -55,6 +64,7 @@ pub async fn get_repo(name: String) -> Result<RepoDto, ServerFnError> {
 }
 
 #[post("/api/repos")]
+#[tracing::instrument(name = "repository.create", skip_all, err, fields(repo.name = %name))]
 pub async fn create_repo(name: String, description: Option<String>) -> Result<(), ServerFnError> {
     use crate::git::{self, store::LocalFsStore};
 
@@ -63,6 +73,7 @@ pub async fn create_repo(name: String, description: Option<String>) -> Result<()
 }
 
 #[post("/api/repos/:name/update")]
+#[tracing::instrument(name = "repository.update", skip_all, err, fields(repo.name = %name))]
 pub async fn update_repo(name: String, description: Option<String>) -> Result<(), ServerFnError> {
     use crate::git::{self, store::LocalFsStore};
 
@@ -71,6 +82,7 @@ pub async fn update_repo(name: String, description: Option<String>) -> Result<()
 }
 
 #[post("/api/repos/:name/delete")]
+#[tracing::instrument(name = "repository.delete", skip_all, err, fields(repo.name = %name))]
 pub async fn delete_repo(name: String) -> Result<(), ServerFnError> {
     use crate::git::{self, store::LocalFsStore};
 
@@ -129,6 +141,7 @@ impl From<crate::git::CommitLogEntry> for CommitLogEntryDto {
 /// in the route literal (`?branch&path`) — left implicit, they'd silently
 /// become JSON-body fields instead, which a plain `GET` never populates.
 #[get("/api/repos/:name/tree?branch&path")]
+#[tracing::instrument(name = "repository.tree", skip_all, err, fields(repo.name = %name, branch = branch.as_deref().unwrap_or("HEAD")))]
 pub async fn get_tree(name: String, branch: Option<String>, path: Option<String>) -> Result<Vec<TreeEntryDto>, ServerFnError> {
     use crate::git::{self, store::LocalFsStore};
 
@@ -139,6 +152,7 @@ pub async fn get_tree(name: String, branch: Option<String>, path: Option<String>
 }
 
 #[get("/api/repos/:name/blob?branch&path")]
+#[tracing::instrument(name = "repository.blob", skip_all, err, fields(repo.name = %name, branch = branch.as_deref().unwrap_or("HEAD")))]
 pub async fn get_blob(name: String, branch: Option<String>, path: String) -> Result<BlobDto, ServerFnError> {
     use crate::git::{self, store::LocalFsStore};
 
@@ -148,6 +162,7 @@ pub async fn get_blob(name: String, branch: Option<String>, path: String) -> Res
 }
 
 #[get("/api/repos/:name/commits?branch")]
+#[tracing::instrument(name = "repository.commits", skip_all, err, fields(repo.name = %name, branch = branch.as_deref().unwrap_or("HEAD")))]
 pub async fn get_commit_log(name: String, branch: Option<String>) -> Result<Vec<CommitLogEntryDto>, ServerFnError> {
     use crate::git::{self, store::LocalFsStore};
 

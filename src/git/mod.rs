@@ -86,12 +86,27 @@ pub struct CommitSummary {
     pub unix_seconds: i64,
 }
 
-/// Repo names become directory names under the store's root, so this is a
-/// security boundary, not just validation: reject anything that could
-/// escape the root (`.`, `..`, path separators) or collide with the `.git`
-/// suffix the store appends.
-fn validate_name(name: &str) -> Result<(), GitError> {
-    let valid = !name.is_empty()
+/// A repo's full identity is `{owner}/{repo}` (see `PLAN.local.md`'s
+/// "Decisions": path-based identity, no `repos` table) — this splits that
+/// string into its two segments, requiring exactly one `/`. Used by
+/// `validate_name` before either segment is checked, and by the store when
+/// it turns an identity into a nested on-disk path.
+pub(crate) fn split_owner_repo(name: &str) -> Option<(&str, &str)> {
+    let (owner, repo) = name.split_once('/')?;
+    if repo.contains('/') {
+        return None;
+    }
+    Some((owner, repo))
+}
+
+/// Validates the `{repo}` segment of a `{owner}/{repo}` identity — everything
+/// `validate_name` checked before namespacing existed, unchanged. Repo names
+/// become directory names under the store's root, so this is a security
+/// boundary, not just validation: reject anything that could escape the
+/// root (`.`, `..`, path separators) or collide with the `.git` suffix the
+/// store appends.
+fn validate_repo_segment(name: &str) -> bool {
+    !name.is_empty()
         && name.len() <= 100
         && name != "."
         && name != ".."
@@ -99,11 +114,60 @@ fn validate_name(name: &str) -> Result<(), GitError> {
         && !name.ends_with(".git")
         && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
+/// Validates a full repository identity, `{owner}/{repo}`. `owner` must be a
+/// valid username (`auth::is_valid_username` is the single source of truth
+/// for that charset — repo owners are account usernames, not a separate
+/// namespace) so a repo's URL segment always resolves to the account that
+/// owns it; `repo` follows the pre-namespacing rules in
+/// `validate_repo_segment`.
+fn validate_name(name: &str) -> Result<(), GitError> {
+    let valid = match split_owner_repo(name) {
+        Some((owner, repo)) => crate::auth::is_valid_username(owner) && validate_repo_segment(repo),
+        None => false,
+    };
     if valid {
         Ok(())
     } else {
         Err(GitError::InvalidName(name.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_owner_repo_identities() {
+        assert!(validate_name("alice/my-repo").is_ok());
+        assert!(validate_name("alice/my.repo_1").is_ok());
+        assert!(validate_name("a/b").is_ok());
+        assert!(validate_name(&format!("alice/{}", "a".repeat(100))).is_ok());
+    }
+
+    #[test]
+    fn invalid_owner_repo_identities() {
+        // no owner segment at all
+        assert!(validate_name("my-repo").is_err());
+        assert!(validate_name("").is_err());
+        // empty owner or repo segment
+        assert!(validate_name("/my-repo").is_err());
+        assert!(validate_name("alice/").is_err());
+        // more than one '/'
+        assert!(validate_name("alice/sub/my-repo").is_err());
+        // invalid owner segment (see `auth::is_valid_username`)
+        assert!(validate_name("-alice/my-repo").is_err());
+        assert!(validate_name("al ice/my-repo").is_err());
+        assert!(validate_name(&format!("{}/repo", "a".repeat(40))).is_err());
+        // invalid repo segment, same rules as before namespacing
+        assert!(validate_name("alice/.").is_err());
+        assert!(validate_name("alice/..").is_err());
+        assert!(validate_name("alice/.hidden").is_err());
+        assert!(validate_name("alice/repo.git").is_err());
+        assert!(validate_name("alice/repo name").is_err());
+        assert!(validate_name(&format!("alice/{}", "a".repeat(101))).is_err());
     }
 }
 

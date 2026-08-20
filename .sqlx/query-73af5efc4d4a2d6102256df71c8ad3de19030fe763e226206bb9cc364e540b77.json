@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO repo_access (repo_name, user_id, role) VALUES (?, ?, 'collaborator')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "73af5efc4d4a2d6102256df71c8ad3de19030fe763e226206bb9cc364e540b77"
+}

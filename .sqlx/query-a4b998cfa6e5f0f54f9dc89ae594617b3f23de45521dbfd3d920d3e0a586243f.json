@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT repo_access.user_id, users.email, repo_access.role, repo_access.added_at FROM repo_access JOIN users ON users.id = repo_access.user_id WHERE repo_access.repo_name = ? ORDER BY repo_access.added_at",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "email",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "role",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "added_at",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a4b998cfa6e5f0f54f9dc89ae594617b3f23de45521dbfd3d920d3e0a586243f"
+}

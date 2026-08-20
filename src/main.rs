@@ -1,6 +1,8 @@
 use dioxus::prelude::*;
 
 #[cfg(feature = "server")]
+mod access;
+#[cfg(feature = "server")]
 mod api;
 #[cfg(feature = "server")]
 mod auth;
@@ -37,31 +39,6 @@ enum Route {
 const FAVICON: Asset = asset!("/assets/favicon.ico");
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
-/// Dioxus server functions (`#[get]`/`#[post]` in `server/mod.rs`) can't
-/// take `AuthSession` as a parameter — its macro only recognizes a fixed
-/// extractor allowlist, not arbitrary `FromRequestParts` types (see
-/// `auth::routes`, which exists for the same reason). So the repo
-/// create/update/delete endpoints are gated here instead, at the router
-/// level: any POST under `/api/repos` requires a logged-in session.
-/// Must be layered *before* `auth_layer` below — layers apply outside-in for
-/// requests in the order they're added, so `auth_layer` (which populates the
-/// session/backend that `AuthSession` extraction reads) has to be the
-/// outermost, i.e. the last `.layer()` call.
-#[cfg(feature = "server")]
-async fn require_login_for_repo_writes(
-    auth: axum_login::AuthSession<auth::Backend>,
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    use axum::response::IntoResponse;
-
-    let protected = req.method() == axum::http::Method::POST && req.uri().path().starts_with("/api/repos");
-    if protected && auth.user.is_none() {
-        return (axum::http::StatusCode::UNAUTHORIZED, "login required").into_response();
-    }
-    next.run(req).await
-}
-
 /// axum's `MatchedPath` extractor (the templated route, e.g.
 /// `/api/repos/{name}`, not the raw request URL — required so neither the
 /// HTTP span nor the `edda.http.server.request.duration` metric ever carries
@@ -73,13 +50,12 @@ async fn require_login_for_repo_writes(
 /// observability is applied here, per sub-router, rather than as one more
 /// `.layer()` alongside `auth_layer` below.
 ///
-/// Trade-off this implies: a request rejected by `require_login_for_repo_writes`
-/// or one that matches no route at all (a 404) short-circuits before reaching
-/// any of these route-matched routers, so it isn't individually traced or
-/// measured. Both are near-instant, no-real-work responses — not the
-/// "why was this slow" cases this instrumentation exists to answer — so this
-/// is an accepted gap rather than something worth restructuring the existing
-/// auth-layering order for.
+/// Trade-off this implies: a request that matches no route at all (a 404)
+/// short-circuits before reaching any of these route-matched routers, so it
+/// isn't individually traced or measured. That's a near-instant, no-real-work
+/// response — not the "why was this slow" case this instrumentation exists
+/// to answer — so this is an accepted gap rather than something worth
+/// restructuring the existing auth-layering order for.
 #[cfg(feature = "server")]
 fn with_http_observability(router: axum::Router) -> axum::Router {
     use axum::extract::{MatchedPath, Request};
@@ -179,7 +155,7 @@ fn main() {
             let router = with_http_observability(dioxus::server::router(App))
                 .merge(with_http_observability(api::routes()))
                 .merge(with_http_observability(auth::routes::routes()))
-                .layer(axum::middleware::from_fn(require_login_for_repo_writes))
+                .merge(with_http_observability(access::routes::routes()))
                 .layer(auth_layer);
 
             shutdown_watcher_started.call_once(|| {

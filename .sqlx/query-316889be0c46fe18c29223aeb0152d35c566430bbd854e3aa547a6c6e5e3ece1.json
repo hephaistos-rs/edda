@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM repo_access WHERE repo_name = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "316889be0c46fe18c29223aeb0152d35c566430bbd854e3aa547a6c6e5e3ece1"
+}

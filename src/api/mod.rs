@@ -22,6 +22,7 @@ use axum::Router;
 use axum_login::{AuthSession, AuthnBackend};
 use base64::Engine;
 
+use crate::access;
 use crate::auth::{Backend, Credentials, User};
 use crate::git::pack::{build_pack, parse_pack, write_loose_object};
 use crate::git::store::LocalFsStore;
@@ -234,23 +235,35 @@ async fn authenticate_basic(backend: &Backend, headers: &HeaderMap) -> Option<Us
 
 #[tracing::instrument(name = "git.receive_pack", skip_all, fields(repo = %repo))]
 async fn receive_pack(auth: AuthSession<Backend>, headers: HeaderMap, Path(repo): Path<String>, body: Bytes) -> Response {
-    // Any push is a write, and there's no per-repo ownership model yet — any
-    // logged-in user can push to any repo. That's the same coarse trust
-    // level the UI's create/update/delete already assumes; the finer-grained
-    // "who owns this repo" question is a separate, later feature.
-    let authenticated = auth.user.is_some() || authenticate_basic(&auth.backend, &headers).await.is_some();
-    if !authenticated {
-        return Response::builder()
-            .status(StatusCode::UNAUTHORIZED)
-            .header("WWW-Authenticate", "Basic realm=\"edda\"")
-            .body(Body::from("login required to push"))
-            .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response());
-    }
-
     let name = match repo_name(&repo) {
         Ok(name) => name,
         Err(response) => return response,
     };
+
+    // Same identity resolution as any Basic-Auth push (cookie session first,
+    // then token/password over Basic Auth), but now checked against this
+    // specific repo's `repo_access` grants — not just "is anyone logged in."
+    let user = match &auth.user {
+        Some(user) => Some(user.clone()),
+        None => authenticate_basic(&auth.backend, &headers).await,
+    };
+    let has_access = match &user {
+        Some(user) => access::has_write_access(&auth.backend.pool, name, &user.id).await.unwrap_or(false),
+        None => false,
+    };
+    if !has_access {
+        return match user {
+            // A real identity that just isn't allowed to write here — 403,
+            // not 401: re-prompting for different credentials (what a
+            // `WWW-Authenticate` 401 tells a git client to do) won't help.
+            Some(_) => (StatusCode::FORBIDDEN, "you don't have write access to this repo").into_response(),
+            None => Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .header("WWW-Authenticate", "Basic realm=\"edda\"")
+                .body(Body::from("login required to push"))
+                .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response()),
+        };
+    }
 
     let store = LocalFsStore::from_env();
     let git_dir = match validated_repo_dir(&store, name) {

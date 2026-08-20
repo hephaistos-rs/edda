@@ -63,31 +63,62 @@ pub async fn get_repo(name: String) -> Result<RepoDto, ServerFnError> {
     Ok(RepoDto::from(summary))
 }
 
-#[post("/api/repos")]
+#[post("/api/repos", auth: axum_login::AuthSession<crate::auth::Backend>)]
 #[tracing::instrument(name = "repository.create", skip_all, err, fields(repo.name = %name))]
 pub async fn create_repo(name: String, description: Option<String>) -> Result<(), ServerFnError> {
     use crate::git::{self, store::LocalFsStore};
 
+    let Some(user) = auth.user else {
+        return Err(ServerFnError::new("login required"));
+    };
+
     let store = LocalFsStore::from_env();
-    git::create_repo(&store, &name, description.as_deref()).await.map_err(|err| ServerFnError::new(err.to_string()))
+    git::create_repo(&store, &name, description.as_deref()).await.map_err(|err| ServerFnError::new(err.to_string()))?;
+
+    let pool = crate::db::pool().await.map_err(|err| ServerFnError::new(err.to_string()))?;
+    crate::access::grant_owner(&pool, &name, &user.id).await.map_err(|err| ServerFnError::new(err.to_string()))?;
+    Ok(())
 }
 
-#[post("/api/repos/:name/update")]
+/// Shared by `update_repo`/`delete_repo`: both require the caller to be
+/// logged in *and* to hold write access (owner or collaborator) to this
+/// specific repo — `create_repo` is the only one of the three that doesn't
+/// need this, since ownership is granted rather than checked there.
+#[cfg(feature = "server")]
+async fn require_write_access(auth: &axum_login::AuthSession<crate::auth::Backend>, name: &str) -> Result<(), ServerFnError> {
+    let Some(user) = &auth.user else {
+        return Err(ServerFnError::new("login required"));
+    };
+    let allowed =
+        crate::access::has_write_access(&auth.backend.pool, name, &user.id).await.map_err(|err| ServerFnError::new(err.to_string()))?;
+    if !allowed {
+        return Err(ServerFnError::new("you don't have write access to this repo"));
+    }
+    Ok(())
+}
+
+#[post("/api/repos/:name/update", auth: axum_login::AuthSession<crate::auth::Backend>)]
 #[tracing::instrument(name = "repository.update", skip_all, err, fields(repo.name = %name))]
 pub async fn update_repo(name: String, description: Option<String>) -> Result<(), ServerFnError> {
     use crate::git::{self, store::LocalFsStore};
+
+    require_write_access(&auth, &name).await?;
 
     let store = LocalFsStore::from_env();
     git::update_repo(&store, &name, description.as_deref()).await.map_err(|err| ServerFnError::new(err.to_string()))
 }
 
-#[post("/api/repos/:name/delete")]
+#[post("/api/repos/:name/delete", auth: axum_login::AuthSession<crate::auth::Backend>)]
 #[tracing::instrument(name = "repository.delete", skip_all, err, fields(repo.name = %name))]
 pub async fn delete_repo(name: String) -> Result<(), ServerFnError> {
     use crate::git::{self, store::LocalFsStore};
 
+    require_write_access(&auth, &name).await?;
+
     let store = LocalFsStore::from_env();
-    git::delete_repo(&store, &name).await.map_err(|err| ServerFnError::new(err.to_string()))
+    git::delete_repo(&store, &name).await.map_err(|err| ServerFnError::new(err.to_string()))?;
+    crate::access::revoke_all(&auth.backend.pool, &name).await.map_err(|err| ServerFnError::new(err.to_string()))?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

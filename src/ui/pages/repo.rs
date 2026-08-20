@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
-use dioxus_free_icons::icons::ld_icons::{LdFile, LdFolder, LdPencil};
+use dioxus_free_icons::icons::ld_icons::{LdFile, LdFolder, LdLock, LdLockOpen, LdPencil};
 use dioxus_free_icons::Icon;
 
-use crate::server::{delete_repo, get_blob, get_commit_log, get_repo, get_tree, update_repo};
+use crate::server::{delete_repo, get_blob, get_commit_log, get_repo, get_tree, set_repo_visibility, update_repo};
 use crate::Route;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -93,6 +93,8 @@ pub fn Repo(name: String) -> Element {
         }
     });
     let mut description_error = use_signal(|| Option::<String>::None);
+    let mut visibility_error = use_signal(|| Option::<String>::None);
+    let mut visibility_pending = use_signal(|| false);
 
     let body = match repo() {
         Some(Ok(dto)) => {
@@ -108,8 +110,52 @@ pub fn Repo(name: String) -> Element {
             let description_class = if dto.description.is_some() { "text-ink" } else { "text-ink-muted italic" };
             let current_description = dto.description.clone().unwrap_or_default();
 
+            let is_private = dto.is_private;
+            let is_owner = dto.is_owner;
+
             rsx! {
-                h1 { class: "mt-4 font-mono text-2xl font-semibold text-ink", "{dto.name}" }
+                div { class: "mt-4 flex items-center gap-2",
+                    h1 { class: "font-mono text-2xl font-semibold text-ink", "{dto.name}" }
+                    span {
+                        class: "flex items-center gap-1 border border-line px-1.5 py-0.5 font-mono text-[11px] uppercase tracking-wide text-ink-muted",
+                        title: if is_private { "only the owner and collaborators can see this repo" } else { "anyone can see this repo" },
+                        if is_private {
+                            Icon { icon: LdLock, width: 11, height: 11 }
+                        } else {
+                            Icon { icon: LdLockOpen, width: 11, height: 11 }
+                        }
+                        if is_private { "private" } else { "public" }
+                    }
+                    if is_owner {
+                        button {
+                            r#type: "button",
+                            class: "font-mono text-xs text-ink-muted underline hover:text-ink disabled:opacity-50",
+                            disabled: visibility_pending(),
+                            onclick: {
+                                let name = name.clone();
+                                move |_| {
+                                    let name = name.clone();
+                                    let next_private = !is_private;
+                                    visibility_pending.set(true);
+                                    spawn(async move {
+                                        match set_repo_visibility(name, next_private).await {
+                                            Ok(()) => {
+                                                visibility_error.set(None);
+                                                repo.restart();
+                                            }
+                                            Err(err) => visibility_error.set(Some(err.to_string())),
+                                        }
+                                        visibility_pending.set(false);
+                                    });
+                                }
+                            },
+                            if is_private { "make public" } else { "make private" }
+                        }
+                    }
+                }
+                if let Some(message) = visibility_error() {
+                    p { class: "mt-1 font-mono text-xs text-status-conflict", "{message}" }
+                }
                 p { class: "mt-1 font-mono text-xs text-ink-muted", "{status_line}" }
 
                 div { class: "mt-4",

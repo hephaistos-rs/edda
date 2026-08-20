@@ -50,7 +50,7 @@ fn open_repo(name: &str) -> Result<gix::Repository, Response> {
     gix::open(&dir).map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response())
 }
 
-async fn info_refs(Path(repo): Path<String>, RawQuery(query): RawQuery) -> Response {
+async fn info_refs(auth: AuthSession<Backend>, headers: HeaderMap, Path(repo): Path<String>, RawQuery(query): RawQuery) -> Response {
     let name = match repo_name(&repo) {
         Ok(name) => name,
         Err(response) => return response,
@@ -59,6 +59,13 @@ async fn info_refs(Path(repo): Path<String>, RawQuery(query): RawQuery) -> Respo
         return (StatusCode::BAD_REQUEST, "expected ?service=git-upload-pack or git-receive-pack").into_response();
     };
     let service = service.to_string();
+
+    // Both services just advertise ref names here (no write happens until
+    // `git-receive-pack`'s own POST) but a private repo's ref names are
+    // still information an outsider shouldn't get either way.
+    if let Some(response) = require_clone_access(&auth, &headers, name).await {
+        return response;
+    }
 
     let repo = match open_repo(name) {
         Ok(repo) => repo,
@@ -145,11 +152,14 @@ fn advertised_refs(repo: &gix::Repository) -> Result<Vec<(gix::ObjectId, String)
 }
 
 #[tracing::instrument(name = "git.upload_pack", skip_all, fields(repo = %repo))]
-async fn upload_pack(Path(repo): Path<String>, body: Bytes) -> Response {
+async fn upload_pack(auth: AuthSession<Backend>, headers: HeaderMap, Path(repo): Path<String>, body: Bytes) -> Response {
     let name = match repo_name(&repo) {
         Ok(name) => name,
         Err(response) => return response,
     };
+    if let Some(response) = require_clone_access(&auth, &headers, name).await {
+        return response;
+    }
     let repo = match open_repo(name) {
         Ok(repo) => repo,
         Err(response) => return response,
@@ -231,6 +241,46 @@ async fn authenticate_basic(backend: &Backend, headers: &HeaderMap) -> Option<Us
 
     let creds = Credentials { email: identity.to_string(), password: secret.to_string() };
     backend.authenticate(creds).await.ok()?
+}
+
+/// Gate for `info_refs`/`upload_pack` (the clone/fetch path): `None` means
+/// proceed, `Some(response)` is the response to return instead. A public
+/// repo never touches the db here — this is the hot path for every clone,
+/// most of which are public.
+///
+/// Same 401-vs-404 split as `receive_pack`'s write check: no credentials at
+/// all gets a `WWW-Authenticate` 401 (a real git client retries with
+/// creds); a real identity that just isn't allowed to read this repo gets
+/// 404, not 403 — a private repo's existence shouldn't be distinguishable
+/// from a repo that was never created.
+async fn require_clone_access(auth: &AuthSession<Backend>, headers: &HeaderMap, name: &str) -> Option<Response> {
+    let store = LocalFsStore::from_env();
+    let is_private = match crate::git::is_repo_private(&store, name) {
+        Ok(is_private) => is_private,
+        Err(err) => return Some((StatusCode::NOT_FOUND, err.to_string()).into_response()),
+    };
+    if !is_private {
+        return None;
+    }
+
+    let user = match &auth.user {
+        Some(user) => Some(user.clone()),
+        None => authenticate_basic(&auth.backend, headers).await,
+    };
+    let Some(user) = user else {
+        return Some(
+            Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .header("WWW-Authenticate", "Basic realm=\"edda\"")
+                .body(Body::from("login required to read this repo"))
+                .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response()),
+        );
+    };
+    let allowed = access::has_write_access(&auth.backend.pool, name, &user.id).await.unwrap_or(false);
+    if !allowed {
+        return Some((StatusCode::NOT_FOUND, format!("no repository named \"{name}\"")).into_response());
+    }
+    None
 }
 
 #[tracing::instrument(name = "git.receive_pack", skip_all, fields(repo = %repo))]

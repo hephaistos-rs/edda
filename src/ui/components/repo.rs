@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use dioxus_free_icons::icons::ld_icons::{LdCircleArrowUp, LdCircleCheck, LdCircleDashed, LdPlus, LdTriangleAlert};
+use dioxus_free_icons::icons::ld_icons::{LdCircleArrowUp, LdCircleCheck, LdCircleDashed, LdLock, LdPlus, LdTriangleAlert};
 use dioxus_free_icons::Icon;
 
 use crate::server::{create_repo, RepoDto};
@@ -33,6 +33,7 @@ pub struct Repo {
     pub status: RepoStatus,
     pub ahead: u32,
     pub behind: u32,
+    pub is_private: bool,
 }
 
 impl From<RepoDto> for Repo {
@@ -56,7 +57,7 @@ impl From<RepoDto> for Repo {
             }
         });
 
-        Repo { name: dto.name, description, status, ahead: 0, behind: 0 }
+        Repo { name: dto.name, description, status, ahead: 0, behind: 0, is_private: dto.is_private }
     }
 }
 
@@ -80,7 +81,15 @@ pub fn RepoRow(repo: Repo) -> Element {
                 span { class: "sr-only", "{repo.status.label()}" }
             }
             div { class: "min-w-0 flex-1",
-                div { class: "truncate font-mono text-[15px] font-medium text-ink", "{repo.name}" }
+                div { class: "flex items-center gap-1.5 truncate font-mono text-[15px] font-medium text-ink",
+                    span { "{repo.name}" }
+                    if repo.is_private {
+                        span { class: "shrink-0 text-ink-muted", title: "private repository",
+                            Icon { icon: LdLock, width: 12, height: 12 }
+                            span { class: "sr-only", "private" }
+                        }
+                    }
+                }
                 div { class: "truncate text-sm text-ink-muted", "{repo.description}" }
             }
             div { class: "shrink-0 font-mono text-xs tabular-nums text-ink-muted",
@@ -105,6 +114,9 @@ pub fn NewRepoRow(on_created: EventHandler<()>) -> Element {
     let mut creating = use_signal(|| false);
     let mut name = use_signal(String::new);
     let mut error = use_signal(|| Option::<String>::None);
+    // Defaults to checked: a new repo should be private unless someone
+    // deliberately opens it up, not the other way around.
+    let mut private = use_signal(|| true);
 
     if !creating() {
         return rsx! {
@@ -142,11 +154,13 @@ pub fn NewRepoRow(on_created: EventHandler<()>) -> Element {
                         if repo_name.is_empty() {
                             return;
                         }
+                        let is_private = private();
                         spawn(async move {
-                            match create_repo(repo_name, None).await {
+                            match create_repo(repo_name, None, is_private).await {
                                 Ok(()) => {
                                     creating.set(false);
                                     name.set(String::new());
+                                    private.set(true);
                                     error.set(None);
                                     on_created.call(());
                                 }
@@ -156,6 +170,14 @@ pub fn NewRepoRow(on_created: EventHandler<()>) -> Element {
                     }
                     _ => {}
                 },
+            }
+            label { class: "flex shrink-0 items-center gap-1.5 font-mono text-xs text-ink-muted",
+                input {
+                    r#type: "checkbox",
+                    checked: private(),
+                    onchange: move |event| private.set(event.checked()),
+                }
+                "private"
             }
         }
         if let Some(message) = error() {

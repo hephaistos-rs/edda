@@ -38,13 +38,15 @@ pub async fn grant_owner(pool: &SqlitePool, repo_name: &str, user_id: &str) -> R
 }
 
 /// Owner or collaborator — the only two roles, and both carry the same
-/// write access today.
+/// write access today. Also reused, unchanged, as the read-access check for
+/// private repos: the same set of people who can push should be able to
+/// browse/clone, so there's no separate "has_read_access" predicate.
 pub async fn has_write_access(pool: &SqlitePool, repo_name: &str, user_id: &str) -> Result<bool, AccessError> {
     let row = sqlx::query!("SELECT user_id FROM repo_access WHERE repo_name = ? AND user_id = ?", repo_name, user_id).fetch_optional(pool).await?;
     Ok(row.is_some())
 }
 
-async fn is_owner(pool: &SqlitePool, repo_name: &str, user_id: &str) -> Result<bool, AccessError> {
+pub async fn is_owner(pool: &SqlitePool, repo_name: &str, user_id: &str) -> Result<bool, AccessError> {
     let row = sqlx::query!("SELECT user_id FROM repo_access WHERE repo_name = ? AND user_id = ? AND role = 'owner'", repo_name, user_id)
         .fetch_optional(pool)
         .await?;

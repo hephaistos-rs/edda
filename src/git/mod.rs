@@ -76,6 +76,7 @@ pub struct RepoSummary {
     pub default_branch: Option<String>,
     pub branch_count: usize,
     pub is_empty: bool,
+    pub is_private: bool,
     pub last_commit: Option<CommitSummary>,
 }
 
@@ -114,7 +115,7 @@ pub(crate) fn validated_repo_dir(store: &dyn RepoStore, name: &str) -> Result<Pa
     Ok(store.repo_dir(name))
 }
 
-pub async fn create_repo(store: &dyn RepoStore, name: &str, description: Option<&str>) -> Result<(), GitError> {
+pub async fn create_repo(store: &dyn RepoStore, name: &str, description: Option<&str>, private: bool) -> Result<(), GitError> {
     validate_name(name)?;
     let lock = repo_lock(name);
     let _guard = lock.lock().await;
@@ -140,12 +141,15 @@ pub async fn create_repo(store: &dyn RepoStore, name: &str, description: Option<
             std::fs::write(dir.join("description"), description)?;
         }
     }
+    if private {
+        std::fs::write(dir.join("private"), b"")?;
+    }
     Ok(())
 }
 
-/// Updates the repo's description (the only editable field until `db`
-/// exists). `None`/empty clears it, matching `read_description`'s notion of
-/// "no description" rather than writing an empty file.
+/// Updates the repo's description. `None`/empty clears it, matching
+/// `read_description`'s notion of "no description" rather than writing an
+/// empty file.
 pub async fn update_repo(store: &dyn RepoStore, name: &str, description: Option<&str>) -> Result<(), GitError> {
     validate_name(name)?;
     let lock = repo_lock(name);
@@ -164,6 +168,39 @@ pub async fn update_repo(store: &dyn RepoStore, name: &str, description: Option<
         }
     }
     Ok(())
+}
+
+/// Flips a repo between public and private. Kept separate from
+/// `update_repo` since it's gated differently — owner-only, not any
+/// collaborator with write access (see `require_owner` in `server/mod.rs`).
+pub async fn set_visibility(store: &dyn RepoStore, name: &str, private: bool) -> Result<(), GitError> {
+    validate_name(name)?;
+    let lock = repo_lock(name);
+    let _guard = lock.lock().await;
+    let dir = store.repo_dir(name);
+    if !dir.exists() {
+        return Err(GitError::NotFound(name.to_string()));
+    }
+    let path = dir.join("private");
+    if private {
+        std::fs::write(path, b"")?;
+    } else if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+/// Cheap visibility check that doesn't require opening the repo with `gix`
+/// — used on every read path (file browsing, clone/fetch) to decide whether
+/// an access check is even needed, without paying `repo_summary`'s cost of
+/// walking branches and peeling the last commit.
+pub fn is_repo_private(store: &dyn RepoStore, name: &str) -> Result<bool, GitError> {
+    validate_name(name)?;
+    let dir = store.repo_dir(name);
+    if !dir.exists() {
+        return Err(GitError::NotFound(name.to_string()));
+    }
+    Ok(read_private_flag(&dir))
 }
 
 pub async fn delete_repo(store: &dyn RepoStore, name: &str) -> Result<(), GitError> {
@@ -191,6 +228,7 @@ pub fn repo_summary(store: &dyn RepoStore, name: &str) -> Result<RepoSummary, Gi
     }
 
     let description = read_description(&dir);
+    let is_private = read_private_flag(&dir);
 
     let repo = gix::open(&dir).map_err(|err| GitError::Git(err.to_string()))?;
 
@@ -247,6 +285,7 @@ pub fn repo_summary(store: &dyn RepoStore, name: &str) -> Result<RepoSummary, Gi
         default_branch,
         branch_count,
         is_empty,
+        is_private,
         last_commit,
     })
 }
@@ -305,7 +344,7 @@ fn open_and_resolve<'repo>(
             Err(_) => Vec::new(),
         };
         branch_names.sort();
-        let branch = pick_default_branch(&branch_names).ok_or_else(|| GitError::NotFound("no commits yet".to_string()))?;
+        let branch = pick_default_branch(&branch_names).ok_or_else(|| GitError::Git("repository has no commits yet".to_string()))?;
         let mut reference =
             repo.find_reference(&format!("refs/heads/{branch}")).map_err(|err| GitError::Git(err.to_string()))?;
         reference.peel_to_commit().map_err(|err| GitError::Git(err.to_string()))
@@ -458,6 +497,14 @@ fn read_description(dir: &Path) -> Option<String> {
     } else {
         Some(text.to_string())
     }
+}
+
+/// Not a git convention like `description` — Edda's own marker. Presence
+/// (not content) is what matters, matching how the rest of this repo's
+/// metadata is stored: cheap files next to the bare repo rather than a `db`
+/// row, since there's still no `repos` table.
+fn read_private_flag(dir: &Path) -> bool {
+    dir.join("private").exists()
 }
 
 /// The all-zeros object id git's protocols use to mean "no such object" —

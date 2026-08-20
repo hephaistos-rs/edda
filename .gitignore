@@ -17,3 +17,4 @@ desktop.ini
 # Editors
 .vscode/
 .idea/
+*.local.md

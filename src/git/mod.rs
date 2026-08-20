@@ -232,14 +232,7 @@ pub fn repo_summary(store: &dyn RepoStore, name: &str) -> Result<RepoSummary, Gi
 
     let repo = gix::open(&dir).map_err(|err| GitError::Git(err.to_string()))?;
 
-    let mut branch_names: Vec<String> = match repo.references() {
-        Ok(refs) => match refs.local_branches() {
-            Ok(branches) => branches.filter_map(Result::ok).map(|r| r.name().shorten().to_string()).collect(),
-            Err(_) => Vec::new(),
-        },
-        Err(_) => Vec::new(),
-    };
-    branch_names.sort();
+    let branch_names = list_branch_names(&repo);
     let branch_count = branch_names.len();
 
     let head = repo.head().map_err(|err| GitError::Git(err.to_string()))?;
@@ -315,6 +308,32 @@ pub struct CommitLogEntry {
 
 const MAX_INLINE_BLOB_BYTES: usize = 1_000_000;
 
+/// Sorted local branch names — shared by `repo_summary` (for `branch_count`),
+/// `open_and_resolve`'s unborn-HEAD fallback, and `list_branches` (for the
+/// UI's branch switcher), so there's exactly one place that defines what
+/// "the repo's branches" means.
+fn list_branch_names(repo: &gix::Repository) -> Vec<String> {
+    let mut names: Vec<String> = match repo.references() {
+        Ok(refs) => match refs.local_branches() {
+            Ok(branches) => branches.filter_map(Result::ok).map(|r| r.name().shorten().to_string()).collect(),
+            Err(_) => Vec::new(),
+        },
+        Err(_) => Vec::new(),
+    };
+    names.sort();
+    names
+}
+
+pub fn list_branches(store: &dyn RepoStore, name: &str) -> Result<Vec<String>, GitError> {
+    validate_name(name)?;
+    let dir = store.repo_dir(name);
+    if !dir.exists() {
+        return Err(GitError::NotFound(name.to_string()));
+    }
+    let repo = gix::open(&dir).map_err(|err| GitError::Git(err.to_string()))?;
+    Ok(list_branch_names(&repo))
+}
+
 /// Opens `name`'s repo and resolves which commit to browse: `branch` if
 /// given, else the same "real HEAD, falling back to a sensible default
 /// branch" logic used everywhere else a repo needs one commit to point at
@@ -336,14 +355,7 @@ fn open_and_resolve<'repo>(
             return Ok(commit);
         }
 
-        let mut branch_names: Vec<String> = match repo.references() {
-            Ok(refs) => match refs.local_branches() {
-                Ok(branches) => branches.filter_map(Result::ok).map(|r| r.name().shorten().to_string()).collect(),
-                Err(_) => Vec::new(),
-            },
-            Err(_) => Vec::new(),
-        };
-        branch_names.sort();
+        let branch_names = list_branch_names(repo);
         let branch = pick_default_branch(&branch_names).ok_or_else(|| GitError::Git("repository has no commits yet".to_string()))?;
         let mut reference =
             repo.find_reference(&format!("refs/heads/{branch}")).map_err(|err| GitError::Git(err.to_string()))?;

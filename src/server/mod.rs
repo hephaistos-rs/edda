@@ -291,6 +291,16 @@ pub async fn get_blob(name: String, branch: Option<String>, path: String) -> Res
     Ok(BlobDto::from(blob))
 }
 
+#[get("/api/repos/:name/branches", auth: axum_login::AuthSession<crate::auth::Backend>)]
+#[tracing::instrument(name = "repository.branches", skip_all, err, fields(repo.name = %name))]
+pub async fn get_branches(name: String) -> Result<Vec<String>, ServerFnError> {
+    use crate::git::{self, store::LocalFsStore};
+
+    let store = LocalFsStore::from_env();
+    require_read_access(&auth, &store, &name).await?;
+    git::list_branches(&store, &name).map_err(|err| ServerFnError::new(err.to_string()))
+}
+
 #[get("/api/repos/:name/commits?branch", auth: axum_login::AuthSession<crate::auth::Backend>)]
 #[tracing::instrument(name = "repository.commits", skip_all, err, fields(repo.name = %name, branch = branch.as_deref().unwrap_or("HEAD")))]
 pub async fn get_commit_log(name: String, branch: Option<String>) -> Result<Vec<CommitLogEntryDto>, ServerFnError> {

@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use dioxus_free_icons::icons::ld_icons::{LdFile, LdFolder, LdLock, LdLockOpen, LdPencil};
 use dioxus_free_icons::Icon;
 
-use crate::server::{delete_repo, get_blob, get_commit_log, get_repo, get_tree, set_repo_visibility, update_repo};
+use crate::server::{delete_repo, get_blob, get_branches, get_commit_log, get_repo, get_tree, set_repo_visibility, update_repo};
 use crate::Route;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -52,13 +52,26 @@ pub fn Repo(name: String) -> Element {
     let mut tab = use_signal(|| RepoTab::Files);
     let mut path_segments = use_signal(Vec::<String>::new);
     let mut viewing_file = use_signal(|| Option::<String>::None);
+    // `None` means "the repo's default branch" — never resolved to a
+    // concrete name client-side, since `get_tree`/`get_blob`/`get_commit_log`
+    // already treat `None` that way server-side (see `open_and_resolve`).
+    let mut selected_branch = use_signal(|| Option::<String>::None);
+
+    let branches = use_resource({
+        let name = name.clone();
+        move || {
+            let name = name.clone();
+            async move { get_branches(name).await }
+        }
+    });
 
     let tree = use_resource({
         let name = name.clone();
         move || {
             let name = name.clone();
+            let branch = selected_branch.read().clone();
             let path = path_segments.read().join("/");
-            async move { get_tree(name, None, if path.is_empty() { None } else { Some(path) }).await }
+            async move { get_tree(name, branch, if path.is_empty() { None } else { Some(path) }).await }
         }
     });
 
@@ -66,10 +79,11 @@ pub fn Repo(name: String) -> Element {
         let name = name.clone();
         move || {
             let name = name.clone();
+            let branch = selected_branch.read().clone();
             let file = viewing_file.read().clone();
             async move {
                 match file {
-                    Some(path) => Some(get_blob(name, None, path).await),
+                    Some(path) => Some(get_blob(name, branch, path).await),
                     None => None,
                 }
             }
@@ -83,12 +97,13 @@ pub fn Repo(name: String) -> Element {
         let name = name.clone();
         move || {
             let name = name.clone();
+            let branch = selected_branch.read().clone();
             let active = tab() == RepoTab::Commits;
             async move {
                 if !active {
                     return None;
                 }
-                Some(get_commit_log(name, None).await)
+                Some(get_commit_log(name, branch).await)
             }
         }
     });
@@ -235,18 +250,35 @@ pub fn Repo(name: String) -> Element {
                 }
 
                 if !dto.is_empty {
-                    nav { class: "mt-8 flex gap-4 border-b border-line font-mono text-sm",
-                        button {
-                            r#type: "button",
-                            class: if tab() == RepoTab::Files { "border-b-2 border-accent px-1 pb-2 text-ink" } else { "border-b-2 border-transparent px-1 pb-2 text-ink-muted hover:text-ink" },
-                            onclick: move |_| tab.set(RepoTab::Files),
-                            "files"
+                    nav { class: "mt-8 flex items-center justify-between gap-4 border-b border-line font-mono text-sm",
+                        div { class: "flex gap-4",
+                            button {
+                                r#type: "button",
+                                class: if tab() == RepoTab::Files { "border-b-2 border-accent px-1 pb-2 text-ink" } else { "border-b-2 border-transparent px-1 pb-2 text-ink-muted hover:text-ink" },
+                                onclick: move |_| tab.set(RepoTab::Files),
+                                "files"
+                            }
+                            button {
+                                r#type: "button",
+                                class: if tab() == RepoTab::Commits { "border-b-2 border-accent px-1 pb-2 text-ink" } else { "border-b-2 border-transparent px-1 pb-2 text-ink-muted hover:text-ink" },
+                                onclick: move |_| tab.set(RepoTab::Commits),
+                                "commits"
+                            }
                         }
-                        button {
-                            r#type: "button",
-                            class: if tab() == RepoTab::Commits { "border-b-2 border-accent px-1 pb-2 text-ink" } else { "border-b-2 border-transparent px-1 pb-2 text-ink-muted hover:text-ink" },
-                            onclick: move |_| tab.set(RepoTab::Commits),
-                            "commits"
+                        if let Some(Ok(names)) = &*branches.read() {
+                            select {
+                                class: "mb-2 shrink-0 border border-line bg-surface px-2 py-1 text-xs text-ink focus:border-accent focus:outline-none",
+                                value: selected_branch.read().clone().or_else(|| dto.default_branch.clone()).unwrap_or_default(),
+                                onchange: move |event| {
+                                    let value = event.value();
+                                    selected_branch.set(if value.is_empty() { None } else { Some(value) });
+                                    path_segments.write().clear();
+                                    viewing_file.set(None);
+                                },
+                                for branch_name in names.clone() {
+                                    option { value: "{branch_name}", "{branch_name}" }
+                                }
+                            }
                         }
                     }
 

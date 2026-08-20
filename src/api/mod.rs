@@ -32,15 +32,22 @@ use pktline::{read_pkt_line, read_pkt_lines_until_flush, write_flush, write_pkt_
 pub fn routes() -> Router {
     Router::new()
         // axum only allows one `{param}` per path segment — it can't match
-        // `{name}.git` (parameter mixed with literal text) directly, so the
-        // whole segment is captured and `.git` is stripped in `repo_name`.
-        .route("/{repo}/info/refs", get(info_refs))
-        .route("/{repo}/git-upload-pack", post(upload_pack))
-        .route("/{repo}/git-receive-pack", post(receive_pack))
+        // `{repo}.git` (parameter mixed with literal text) directly, so the
+        // whole segment is captured and `.git` is stripped in `repo_identity`.
+        .route("/{owner}/{repo}/info/refs", get(info_refs))
+        .route("/{owner}/{repo}/git-upload-pack", post(upload_pack))
+        .route("/{owner}/{repo}/git-receive-pack", post(receive_pack))
 }
 
-fn repo_name(repo: &str) -> Result<&str, Response> {
-    repo.strip_suffix(".git").ok_or_else(|| (StatusCode::NOT_FOUND, "expected a \"<name>.git\" path").into_response())
+/// Joins the URL's `{owner}` and `{repo}.git` segments into the
+/// `{owner}/{repo}` identity used everywhere else (`git::mod`, `access::mod`)
+/// — the one place that identity gets assembled for the git-http bridge, so
+/// every handler below builds it the same way.
+fn repo_identity(owner: &str, repo: &str) -> Result<String, Response> {
+    let name = repo
+        .strip_suffix(".git")
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "expected a \"<name>.git\" path").into_response())?;
+    Ok(format!("{owner}/{name}"))
 }
 
 fn open_repo(name: &str) -> Result<gix::Repository, Response> {
@@ -50,9 +57,14 @@ fn open_repo(name: &str) -> Result<gix::Repository, Response> {
     gix::open(&dir).map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response())
 }
 
-async fn info_refs(auth: AuthSession<Backend>, headers: HeaderMap, Path(repo): Path<String>, RawQuery(query): RawQuery) -> Response {
-    let name = match repo_name(&repo) {
-        Ok(name) => name,
+async fn info_refs(
+    auth: AuthSession<Backend>,
+    headers: HeaderMap,
+    Path((owner, repo)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
+) -> Response {
+    let identity = match repo_identity(&owner, &repo) {
+        Ok(identity) => identity,
         Err(response) => return response,
     };
     let Some(service) = query.as_deref().and_then(|q| q.strip_prefix("service=")) else {
@@ -63,11 +75,11 @@ async fn info_refs(auth: AuthSession<Backend>, headers: HeaderMap, Path(repo): P
     // Both services just advertise ref names here (no write happens until
     // `git-receive-pack`'s own POST) but a private repo's ref names are
     // still information an outsider shouldn't get either way.
-    if let Some(response) = require_clone_access(&auth, &headers, name).await {
+    if let Some(response) = require_clone_access(&auth, &headers, &identity).await {
         return response;
     }
 
-    let repo = match open_repo(name) {
+    let repo = match open_repo(&identity) {
         Ok(repo) => repo,
         Err(response) => return response,
     };
@@ -151,16 +163,16 @@ fn advertised_refs(repo: &gix::Repository) -> Result<Vec<(gix::ObjectId, String)
     Ok(refs)
 }
 
-#[tracing::instrument(name = "git.upload_pack", skip_all, fields(repo = %repo))]
-async fn upload_pack(auth: AuthSession<Backend>, headers: HeaderMap, Path(repo): Path<String>, body: Bytes) -> Response {
-    let name = match repo_name(&repo) {
-        Ok(name) => name,
+#[tracing::instrument(name = "git.upload_pack", skip_all, fields(repo.owner = %owner, repo = %repo))]
+async fn upload_pack(auth: AuthSession<Backend>, headers: HeaderMap, Path((owner, repo)): Path<(String, String)>, body: Bytes) -> Response {
+    let identity = match repo_identity(&owner, &repo) {
+        Ok(identity) => identity,
         Err(response) => return response,
     };
-    if let Some(response) = require_clone_access(&auth, &headers, name).await {
+    if let Some(response) = require_clone_access(&auth, &headers, &identity).await {
         return response;
     }
-    let repo = match open_repo(name) {
+    let repo = match open_repo(&identity) {
         Ok(repo) => repo,
         Err(response) => return response,
     };
@@ -283,12 +295,13 @@ async fn require_clone_access(auth: &AuthSession<Backend>, headers: &HeaderMap, 
     None
 }
 
-#[tracing::instrument(name = "git.receive_pack", skip_all, fields(repo = %repo))]
-async fn receive_pack(auth: AuthSession<Backend>, headers: HeaderMap, Path(repo): Path<String>, body: Bytes) -> Response {
-    let name = match repo_name(&repo) {
-        Ok(name) => name,
+#[tracing::instrument(name = "git.receive_pack", skip_all, fields(repo.owner = %owner, repo = %repo))]
+async fn receive_pack(auth: AuthSession<Backend>, headers: HeaderMap, Path((owner, repo)): Path<(String, String)>, body: Bytes) -> Response {
+    let identity = match repo_identity(&owner, &repo) {
+        Ok(identity) => identity,
         Err(response) => return response,
     };
+    let name = identity.as_str();
 
     // Same identity resolution as any Basic-Auth push (cookie session first,
     // then token/password over Basic Auth), but now checked against this

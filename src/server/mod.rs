@@ -316,12 +316,13 @@ pub async fn get_commit_log(name: String, branch: Option<String>) -> Result<Vec<
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CurrentUser {
     pub id: String,
+    pub username: String,
     pub email: String,
 }
 
 #[cfg(feature = "server")]
 impl From<crate::auth::User> for CurrentUser {
     fn from(user: crate::auth::User) -> Self {
-        Self { id: user.id, email: user.email }
+        Self { id: user.id, username: user.username, email: user.email }
     }
 }

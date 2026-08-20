@@ -5,6 +5,7 @@ use crate::Route;
 
 #[derive(Serialize)]
 struct SignupBody<'a> {
+    username: &'a str,
     email: &'a str,
     password: &'a str,
 }
@@ -33,6 +34,7 @@ async fn request_signup(_body: &SignupBody<'_>) -> Result<(), String> {
 #[component]
 pub fn Signup() -> Element {
     let navigator = use_navigator();
+    let mut username = use_signal(String::new);
     let mut email = use_signal(String::new);
     let mut password = use_signal(String::new);
     let mut confirm = use_signal(String::new);
@@ -45,13 +47,14 @@ pub fn Signup() -> Element {
             error.set(Some("passwords don't match".to_string()));
             return;
         }
+        let username_value = username.read().clone();
         let email_value = email.read().clone();
         let password_value = password.read().clone();
 
         submitting.set(true);
         error.set(None);
         spawn(async move {
-            let body = SignupBody { email: &email_value, password: &password_value };
+            let body = SignupBody { username: &username_value, email: &email_value, password: &password_value };
             let outcome = request_signup(&body).await;
 
             submitting.set(false);
@@ -68,6 +71,19 @@ pub fn Signup() -> Element {
         main { class: "mx-auto max-w-sm px-4 py-16",
             h1 { class: "font-mono text-xl font-semibold text-ink", "create account" }
             form { class: "mt-6 flex flex-col gap-4", onsubmit: on_submit,
+                label { class: "flex flex-col gap-1 text-sm text-ink-muted",
+                    "username"
+                    input {
+                        r#type: "text",
+                        required: true,
+                        maxlength: 39,
+                        pattern: "[A-Za-z0-9][A-Za-z0-9_-]*[A-Za-z0-9]|[A-Za-z0-9]",
+                        title: "1-39 characters, start and end with a letter or digit, and only letters, digits, '-' or '_'",
+                        class: "border border-line bg-surface px-2.5 py-1.5 font-mono text-sm text-ink focus:border-accent focus:outline-none",
+                        value: "{username}",
+                        oninput: move |event| username.set(event.value()),
+                    }
+                }
                 label { class: "flex flex-col gap-1 text-sm text-ink-muted",
                     "email"
                     input {

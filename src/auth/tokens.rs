@@ -90,9 +90,9 @@ pub async fn authenticate(pool: &SqlitePool, raw_token: &str) -> Option<User> {
 
     let user = sqlx::query_as!(
         User,
-        "SELECT users.id, users.email, users.password_hash FROM users \
-         JOIN tokens ON tokens.user_id = users.id \
-         WHERE tokens.token_hash = ?",
+        r#"SELECT users.id, users.username AS "username!", users.email, users.password_hash FROM users
+         JOIN tokens ON tokens.user_id = users.id
+         WHERE tokens.token_hash = ?"#,
         token_hash
     )
     .fetch_optional(pool)

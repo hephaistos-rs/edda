@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT users.id, users.email, users.password_hash FROM users JOIN tokens ON tokens.user_id = users.id WHERE tokens.token_hash = ?",
+  "query": "SELECT id, username AS \"username!\", email, password_hash FROM users WHERE id = ?",
   "describe": {
     "columns": [
       {
@@ -9,13 +9,18 @@
         "type_info": "Text"
       },
       {
-        "name": "email",
+        "name": "username!",
         "ordinal": 1,
         "type_info": "Text"
       },
       {
-        "name": "password_hash",
+        "name": "email",
         "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "password_hash",
+        "ordinal": 3,
         "type_info": "Text"
       }
     ],
@@ -24,9 +29,10 @@
     },
     "nullable": [
       false,
+      true,
       false,
       false
     ]
   },
-  "hash": "5d3e81206ad365525540a9a0f230825a82caa3ce91b787a7d5a025ab59a23d0f"
+  "hash": "82b600f3678868bc2738110eb762ca8c00a9791232bcb02095abec508eda0447"
 }

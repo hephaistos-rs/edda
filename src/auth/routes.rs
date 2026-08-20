@@ -33,13 +33,20 @@ struct Credentials {
     password: String,
 }
 
-async fn signup(mut auth: AuthSession<Backend>, Json(creds): Json<Credentials>) -> Response {
+#[derive(Deserialize)]
+struct SignupBody {
+    username: String,
+    email: String,
+    password: String,
+}
+
+async fn signup(mut auth: AuthSession<Backend>, Json(body): Json<SignupBody>) -> Response {
     let pool = match crate::db::pool().await {
         Ok(pool) => pool,
         Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
     };
 
-    let user = match crate::auth::signup(&pool, &creds.email, &creds.password).await {
+    let user = match crate::auth::signup(&pool, &body.username, &body.email, &body.password).await {
         Ok(user) => user,
         Err(err) => return (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
     };

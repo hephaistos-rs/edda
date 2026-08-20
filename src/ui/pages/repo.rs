@@ -36,11 +36,12 @@ fn relative_time(unix_seconds: i64) -> String {
 }
 
 #[component]
-pub fn Repo(name: String) -> Element {
+pub fn Repo(owner: String, name: String) -> Element {
     let navigator = use_navigator();
     let mut repo = use_server_future({
+        let owner = owner.clone();
         let name = name.clone();
-        move || get_repo(name.clone())
+        move || get_repo(owner.clone(), name.clone())
     })?;
 
     let mut confirming_delete = use_signal(|| false);
@@ -58,32 +59,38 @@ pub fn Repo(name: String) -> Element {
     let mut selected_branch = use_signal(|| Option::<String>::None);
 
     let branches = use_resource({
+        let owner = owner.clone();
         let name = name.clone();
         move || {
+            let owner = owner.clone();
             let name = name.clone();
-            async move { get_branches(name).await }
+            async move { get_branches(owner, name).await }
         }
     });
 
     let tree = use_resource({
+        let owner = owner.clone();
         let name = name.clone();
         move || {
+            let owner = owner.clone();
             let name = name.clone();
             let branch = selected_branch.read().clone();
             let path = path_segments.read().join("/");
-            async move { get_tree(name, branch, if path.is_empty() { None } else { Some(path) }).await }
+            async move { get_tree(owner, name, branch, if path.is_empty() { None } else { Some(path) }).await }
         }
     });
 
     let blob = use_resource({
+        let owner = owner.clone();
         let name = name.clone();
         move || {
+            let owner = owner.clone();
             let name = name.clone();
             let branch = selected_branch.read().clone();
             let file = viewing_file.read().clone();
             async move {
                 match file {
-                    Some(path) => Some(get_blob(name, branch, path).await),
+                    Some(path) => Some(get_blob(owner, name, branch, path).await),
                     None => None,
                 }
             }
@@ -94,8 +101,10 @@ pub fn Repo(name: String) -> Element {
     // mount — walking commit history is real work, and most repo visits
     // never open this tab.
     let commits = use_resource({
+        let owner = owner.clone();
         let name = name.clone();
         move || {
+            let owner = owner.clone();
             let name = name.clone();
             let branch = selected_branch.read().clone();
             let active = tab() == RepoTab::Commits;
@@ -103,7 +112,7 @@ pub fn Repo(name: String) -> Element {
                 if !active {
                     return None;
                 }
-                Some(get_commit_log(name, branch).await)
+                Some(get_commit_log(owner, name, branch).await)
             }
         }
     });
@@ -130,7 +139,7 @@ pub fn Repo(name: String) -> Element {
 
             rsx! {
                 div { class: "mt-4 flex items-center gap-2",
-                    h1 { class: "font-mono text-2xl font-semibold text-ink", "{dto.name}" }
+                    h1 { class: "font-mono text-2xl font-semibold text-ink", "{dto.owner}/{dto.name}" }
                     span {
                         class: "flex items-center gap-1 border border-line px-1.5 py-0.5 font-mono text-[11px] uppercase tracking-wide text-ink-muted",
                         title: if is_private { "only the owner and collaborators can see this repo" } else { "anyone can see this repo" },
@@ -147,13 +156,15 @@ pub fn Repo(name: String) -> Element {
                             class: "font-mono text-xs text-ink-muted underline hover:text-ink disabled:opacity-50",
                             disabled: visibility_pending(),
                             onclick: {
+                                let owner = owner.clone();
                                 let name = name.clone();
                                 move |_| {
+                                    let owner = owner.clone();
                                     let name = name.clone();
                                     let next_private = !is_private;
                                     visibility_pending.set(true);
                                     spawn(async move {
-                                        match set_repo_visibility(name, next_private).await {
+                                        match set_repo_visibility(owner, name, next_private).await {
                                             Ok(()) => {
                                                 visibility_error.set(None);
                                                 repo.restart();
@@ -189,13 +200,15 @@ pub fn Repo(name: String) -> Element {
                                     r#type: "button",
                                     class: "border border-line px-2 py-1 font-mono text-xs text-ink hover:border-accent",
                                     onclick: {
+                                        let owner = owner.clone();
                                         let name = name.clone();
                                         move |_| {
+                                            let owner = owner.clone();
                                             let name = name.clone();
                                             let text = description_draft.read().clone();
                                             spawn(async move {
                                                 let value = if text.trim().is_empty() { None } else { Some(text) };
-                                                match update_repo(name, value).await {
+                                                match update_repo(owner, name, value).await {
                                                     Ok(()) => {
                                                         editing_description.set(false);
                                                         description_error.set(None);
@@ -412,11 +425,13 @@ pub fn Repo(name: String) -> Element {
                                 r#type: "button",
                                 class: "border border-status-conflict px-2 py-1 font-mono text-xs text-status-conflict hover:bg-status-conflict hover:text-accent-ink",
                                 onclick: {
+                                    let owner = owner.clone();
                                     let name = name.clone();
                                     move |_| {
+                                        let owner = owner.clone();
                                         let name = name.clone();
                                         spawn(async move {
-                                            match delete_repo(name).await {
+                                            match delete_repo(owner, name).await {
                                                 Ok(()) => { navigator.push(Route::Home {}); }
                                                 Err(err) => {
                                                     delete_error.set(Some(err.to_string()));
@@ -450,7 +465,7 @@ pub fn Repo(name: String) -> Element {
             }
         }
         Some(Err(err)) => rsx! {
-            p { class: "mt-4 text-sm text-status-conflict", "Couldn't load \"{name}\": {err}" }
+            p { class: "mt-4 text-sm text-status-conflict", "Couldn't load \"{owner}/{name}\": {err}" }
         },
         None => rsx! {
             p { class: "mt-4 text-sm text-ink-muted", "Loading…" }

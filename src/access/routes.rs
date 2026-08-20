@@ -20,8 +20,8 @@ use crate::auth::Backend;
 
 pub fn routes() -> Router {
     Router::new()
-        .route("/api/repos/{name}/collaborators", post(add_collaborator).get(list_collaborators))
-        .route("/api/repos/{name}/collaborators/{user_id}", delete(remove_collaborator))
+        .route("/api/repos/{owner}/{name}/collaborators", post(add_collaborator).get(list_collaborators))
+        .route("/api/repos/{owner}/{name}/collaborators/{user_id}", delete(remove_collaborator))
 }
 
 impl IntoResponse for AccessError {
@@ -40,34 +40,41 @@ struct AddCollaboratorBody {
     email: String,
 }
 
-#[tracing::instrument(name = "access.collaborator.add", skip_all, fields(repo.name = %name))]
-async fn add_collaborator(auth: AuthSession<Backend>, Path(name): Path<String>, Json(body): Json<AddCollaboratorBody>) -> Response {
+#[tracing::instrument(name = "access.collaborator.add", skip_all, fields(repo.owner = %owner, repo.name = %name))]
+async fn add_collaborator(
+    auth: AuthSession<Backend>,
+    Path((owner, name)): Path<(String, String)>,
+    Json(body): Json<AddCollaboratorBody>,
+) -> Response {
     let Some(user) = auth.user else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    match access::add_collaborator(&auth.backend.pool, &name, &user.id, &body.email).await {
+    let identity = format!("{owner}/{name}");
+    match access::add_collaborator(&auth.backend.pool, &identity, &user.id, &body.email).await {
         Ok(()) => StatusCode::OK.into_response(),
         Err(err) => err.into_response(),
     }
 }
 
-#[tracing::instrument(name = "access.collaborator.list", skip_all, fields(repo.name = %name))]
-async fn list_collaborators(auth: AuthSession<Backend>, Path(name): Path<String>) -> Response {
+#[tracing::instrument(name = "access.collaborator.list", skip_all, fields(repo.owner = %owner, repo.name = %name))]
+async fn list_collaborators(auth: AuthSession<Backend>, Path((owner, name)): Path<(String, String)>) -> Response {
     if auth.user.is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    match access::list_collaborators(&auth.backend.pool, &name).await {
+    let identity = format!("{owner}/{name}");
+    match access::list_collaborators(&auth.backend.pool, &identity).await {
         Ok(collaborators) => Json(collaborators).into_response(),
         Err(err) => err.into_response(),
     }
 }
 
-#[tracing::instrument(name = "access.collaborator.remove", skip_all, fields(repo.name = %name))]
-async fn remove_collaborator(auth: AuthSession<Backend>, Path((name, target_user_id)): Path<(String, String)>) -> Response {
+#[tracing::instrument(name = "access.collaborator.remove", skip_all, fields(repo.owner = %owner, repo.name = %name))]
+async fn remove_collaborator(auth: AuthSession<Backend>, Path((owner, name, target_user_id)): Path<(String, String, String)>) -> Response {
     let Some(user) = auth.user else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    match access::remove_collaborator(&auth.backend.pool, &name, &user.id, &target_user_id).await {
+    let identity = format!("{owner}/{name}");
+    match access::remove_collaborator(&auth.backend.pool, &identity, &user.id, &target_user_id).await {
         Ok(true) => StatusCode::OK.into_response(),
         Ok(false) => (StatusCode::NOT_FOUND, "no such collaborator").into_response(),
         Err(err) => err.into_response(),

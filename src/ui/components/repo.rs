@@ -28,6 +28,7 @@ impl RepoStatus {
 
 #[derive(Clone, PartialEq)]
 pub struct Repo {
+    pub owner: String,
     pub name: String,
     pub description: String,
     pub status: RepoStatus,
@@ -57,7 +58,7 @@ impl From<RepoDto> for Repo {
             }
         });
 
-        Repo { name: dto.name, description, status, ahead: 0, behind: 0, is_private: dto.is_private }
+        Repo { owner: dto.owner, name: dto.name, description, status, ahead: 0, behind: 0, is_private: dto.is_private }
     }
 }
 
@@ -72,7 +73,7 @@ pub fn RepoRow(repo: Repo) -> Element {
 
     rsx! {
         Link {
-            to: crate::Route::Repo { name: repo.name.clone() },
+            to: crate::Route::Repo { owner: repo.owner.clone(), name: repo.name.clone() },
             class: "group flex items-center gap-4 border-b border-line px-4 py-3 no-underline hover:bg-surface focus-visible:bg-surface",
             span {
                 class: "shrink-0 {status_color_class}",
@@ -82,7 +83,7 @@ pub fn RepoRow(repo: Repo) -> Element {
             }
             div { class: "min-w-0 flex-1",
                 div { class: "flex items-center gap-1.5 truncate font-mono text-[15px] font-medium text-ink",
-                    span { "{repo.name}" }
+                    span { "{repo.owner}/{repo.name}" }
                     if repo.is_private {
                         span { class: "shrink-0 text-ink-muted", title: "private repository",
                             Icon { icon: LdLock, width: 12, height: 12 }

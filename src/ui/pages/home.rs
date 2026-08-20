@@ -17,6 +17,7 @@ pub fn Home() -> Element {
                 .map(Repo::from)
                 .filter(|repo| {
                     query.is_empty()
+                        || repo.owner.to_lowercase().contains(&query)
                         || repo.name.to_lowercase().contains(&query)
                         || repo.description.to_lowercase().contains(&query)
                 })
@@ -32,7 +33,7 @@ pub fn Home() -> Element {
                 rsx! {
                     div { class: "border border-line",
                         for repo in filtered {
-                            RepoRow { key: "{repo.name}", repo }
+                            RepoRow { key: "{repo.owner}/{repo.name}", repo }
                         }
                         NewRepoRow { on_created: move |_| repos.restart() }
                     }

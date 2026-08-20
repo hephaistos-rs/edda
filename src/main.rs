@@ -26,8 +26,8 @@ enum Route {
     #[layout(Navbar)]
     #[route("/")]
     Home {},
-    #[route("/repo/:name")]
-    Repo { name: String },
+    #[route("/:owner/:name")]
+    Repo { owner: String, name: String },
     #[route("/blog/:id")]
     Blog { id: i32 },
     #[route("/signup")]

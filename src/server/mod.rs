@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RepoDto {
+    pub owner: String,
     pub name: String,
     pub description: Option<String>,
     pub default_branch: Option<String>,
@@ -23,8 +24,18 @@ pub struct CommitDto {
 #[cfg(feature = "server")]
 impl From<crate::git::RepoSummary> for RepoDto {
     fn from(summary: crate::git::RepoSummary) -> Self {
+        // `summary.name` is always a full `{owner}/{repo}` identity — every
+        // repo in the store got there through `git::create_repo`, which
+        // validates that shape first. Falling back to an empty owner rather
+        // than panicking if that invariant is ever violated: a malformed DTO
+        // is a much smaller problem than a 500 taking down a whole listing.
+        let (owner, name) = crate::git::split_owner_repo(&summary.name).unwrap_or_else(|| {
+            tracing::warn!(repo.identity = %summary.name, "repo identity missing an owner segment");
+            ("", summary.name.as_str())
+        });
         Self {
-            name: summary.name,
+            owner: owner.to_string(),
+            name: name.to_string(),
             description: summary.description,
             default_branch: summary.default_branch,
             branch_count: summary.branch_count,
@@ -84,17 +95,18 @@ pub async fn list_repos() -> Result<Vec<RepoDto>, ServerFnError> {
     Ok(visible)
 }
 
-#[get("/api/repos/:name", auth: axum_login::AuthSession<crate::auth::Backend>)]
-#[tracing::instrument(name = "repository.get", skip_all, err, fields(repo.name = %name))]
-pub async fn get_repo(name: String) -> Result<RepoDto, ServerFnError> {
+#[get("/api/repos/:owner/:name", auth: axum_login::AuthSession<crate::auth::Backend>)]
+#[tracing::instrument(name = "repository.get", skip_all, err, fields(repo.owner = %owner, repo.name = %name))]
+pub async fn get_repo(owner: String, name: String) -> Result<RepoDto, ServerFnError> {
     use crate::git::{self, store::LocalFsStore};
 
+    let identity = format!("{owner}/{name}");
     let store = LocalFsStore::from_env();
-    let summary = git::repo_summary(&store, &name).map_err(|err| ServerFnError::new(err.to_string()))?;
+    let summary = git::repo_summary(&store, &identity).map_err(|err| ServerFnError::new(err.to_string()))?;
 
     let role = match &auth.user {
         Some(user) => {
-            sqlx::query!("SELECT role FROM repo_access WHERE repo_name = ? AND user_id = ?", name, user.id)
+            sqlx::query!("SELECT role FROM repo_access WHERE repo_name = ? AND user_id = ?", identity, user.id)
                 .fetch_optional(&auth.backend.pool)
                 .await
                 .map_err(|err| ServerFnError::new(err.to_string()))?
@@ -106,13 +118,17 @@ pub async fn get_repo(name: String) -> Result<RepoDto, ServerFnError> {
     // response as a repo that doesn't exist, so an outsider can't use this
     // to confirm a private repo's name is taken.
     if summary.is_private && role.is_none() {
-        return Err(ServerFnError::new(git::GitError::NotFound(name).to_string()));
+        return Err(ServerFnError::new(git::GitError::NotFound(identity).to_string()));
     }
 
     let is_owner = role.as_deref() == Some("owner");
     Ok(RepoDto { is_owner, ..RepoDto::from(summary) })
 }
 
+/// `name` is just the repo-name segment — the owner half of the
+/// `{owner}/{repo}` identity is never taken from the caller, only derived
+/// from whoever is authenticated, so there's no way to create a repo under
+/// someone else's namespace.
 #[post("/api/repos", auth: axum_login::AuthSession<crate::auth::Backend>)]
 #[tracing::instrument(name = "repository.create", skip_all, err, fields(repo.name = %name))]
 pub async fn create_repo(name: String, description: Option<String>, private: bool) -> Result<(), ServerFnError> {
@@ -121,12 +137,13 @@ pub async fn create_repo(name: String, description: Option<String>, private: boo
     let Some(user) = auth.user else {
         return Err(ServerFnError::new("login required"));
     };
+    let identity = format!("{}/{name}", user.username);
 
     let store = LocalFsStore::from_env();
-    git::create_repo(&store, &name, description.as_deref(), private).await.map_err(|err| ServerFnError::new(err.to_string()))?;
+    git::create_repo(&store, &identity, description.as_deref(), private).await.map_err(|err| ServerFnError::new(err.to_string()))?;
 
     let pool = crate::db::pool().await.map_err(|err| ServerFnError::new(err.to_string()))?;
-    crate::access::grant_owner(&pool, &name, &user.id).await.map_err(|err| ServerFnError::new(err.to_string()))?;
+    crate::access::grant_owner(&pool, &identity, &user.id).await.map_err(|err| ServerFnError::new(err.to_string()))?;
     Ok(())
 }
 
@@ -134,21 +151,23 @@ pub async fn create_repo(name: String, description: Option<String>, private: boo
 /// — flipping a repo private/public is a stronger action than editing its
 /// description, closer to the collaborator-management routes in
 /// `access::routes`, which use the same restriction.
-#[post("/api/repos/:name/visibility", auth: axum_login::AuthSession<crate::auth::Backend>)]
-#[tracing::instrument(name = "repository.set_visibility", skip_all, err, fields(repo.name = %name))]
-pub async fn set_repo_visibility(name: String, private: bool) -> Result<(), ServerFnError> {
+#[post("/api/repos/:owner/:name/visibility", auth: axum_login::AuthSession<crate::auth::Backend>)]
+#[tracing::instrument(name = "repository.set_visibility", skip_all, err, fields(repo.owner = %owner, repo.name = %name))]
+pub async fn set_repo_visibility(owner: String, name: String, private: bool) -> Result<(), ServerFnError> {
     use crate::git::{self, store::LocalFsStore};
 
+    let identity = format!("{owner}/{name}");
     let Some(user) = &auth.user else {
         return Err(ServerFnError::new("login required"));
     };
-    let is_owner = crate::access::is_owner(&auth.backend.pool, &name, &user.id).await.map_err(|err| ServerFnError::new(err.to_string()))?;
+    let is_owner =
+        crate::access::is_owner(&auth.backend.pool, &identity, &user.id).await.map_err(|err| ServerFnError::new(err.to_string()))?;
     if !is_owner {
         return Err(ServerFnError::new("only the repo owner can change its visibility"));
     }
 
     let store = LocalFsStore::from_env();
-    git::set_visibility(&store, &name, private).await.map_err(|err| ServerFnError::new(err.to_string()))
+    git::set_visibility(&store, &identity, private).await.map_err(|err| ServerFnError::new(err.to_string()))
 }
 
 /// Shared by `update_repo`/`delete_repo`: both require the caller to be
@@ -194,27 +213,29 @@ async fn require_read_access(
     Ok(())
 }
 
-#[post("/api/repos/:name/update", auth: axum_login::AuthSession<crate::auth::Backend>)]
-#[tracing::instrument(name = "repository.update", skip_all, err, fields(repo.name = %name))]
-pub async fn update_repo(name: String, description: Option<String>) -> Result<(), ServerFnError> {
+#[post("/api/repos/:owner/:name/update", auth: axum_login::AuthSession<crate::auth::Backend>)]
+#[tracing::instrument(name = "repository.update", skip_all, err, fields(repo.owner = %owner, repo.name = %name))]
+pub async fn update_repo(owner: String, name: String, description: Option<String>) -> Result<(), ServerFnError> {
     use crate::git::{self, store::LocalFsStore};
 
-    require_write_access(&auth, &name).await?;
+    let identity = format!("{owner}/{name}");
+    require_write_access(&auth, &identity).await?;
 
     let store = LocalFsStore::from_env();
-    git::update_repo(&store, &name, description.as_deref()).await.map_err(|err| ServerFnError::new(err.to_string()))
+    git::update_repo(&store, &identity, description.as_deref()).await.map_err(|err| ServerFnError::new(err.to_string()))
 }
 
-#[post("/api/repos/:name/delete", auth: axum_login::AuthSession<crate::auth::Backend>)]
-#[tracing::instrument(name = "repository.delete", skip_all, err, fields(repo.name = %name))]
-pub async fn delete_repo(name: String) -> Result<(), ServerFnError> {
+#[post("/api/repos/:owner/:name/delete", auth: axum_login::AuthSession<crate::auth::Backend>)]
+#[tracing::instrument(name = "repository.delete", skip_all, err, fields(repo.owner = %owner, repo.name = %name))]
+pub async fn delete_repo(owner: String, name: String) -> Result<(), ServerFnError> {
     use crate::git::{self, store::LocalFsStore};
 
-    require_write_access(&auth, &name).await?;
+    let identity = format!("{owner}/{name}");
+    require_write_access(&auth, &identity).await?;
 
     let store = LocalFsStore::from_env();
-    git::delete_repo(&store, &name).await.map_err(|err| ServerFnError::new(err.to_string()))?;
-    crate::access::revoke_all(&auth.backend.pool, &name).await.map_err(|err| ServerFnError::new(err.to_string()))?;
+    git::delete_repo(&store, &identity).await.map_err(|err| ServerFnError::new(err.to_string()))?;
+    crate::access::revoke_all(&auth.backend.pool, &identity).await.map_err(|err| ServerFnError::new(err.to_string()))?;
     Ok(())
 }
 
@@ -268,48 +289,52 @@ impl From<crate::git::CommitLogEntry> for CommitLogEntryDto {
 /// arguments are only routed through the query string when named explicitly
 /// in the route literal (`?branch&path`) — left implicit, they'd silently
 /// become JSON-body fields instead, which a plain `GET` never populates.
-#[get("/api/repos/:name/tree?branch&path", auth: axum_login::AuthSession<crate::auth::Backend>)]
-#[tracing::instrument(name = "repository.tree", skip_all, err, fields(repo.name = %name, branch = branch.as_deref().unwrap_or("HEAD")))]
-pub async fn get_tree(name: String, branch: Option<String>, path: Option<String>) -> Result<Vec<TreeEntryDto>, ServerFnError> {
+#[get("/api/repos/:owner/:name/tree?branch&path", auth: axum_login::AuthSession<crate::auth::Backend>)]
+#[tracing::instrument(name = "repository.tree", skip_all, err, fields(repo.owner = %owner, repo.name = %name, branch = branch.as_deref().unwrap_or("HEAD")))]
+pub async fn get_tree(owner: String, name: String, branch: Option<String>, path: Option<String>) -> Result<Vec<TreeEntryDto>, ServerFnError> {
     use crate::git::{self, store::LocalFsStore};
 
+    let identity = format!("{owner}/{name}");
     let store = LocalFsStore::from_env();
-    require_read_access(&auth, &store, &name).await?;
+    require_read_access(&auth, &store, &identity).await?;
     let path = path.unwrap_or_default();
-    let entries = git::browse_tree(&store, &name, branch.as_deref(), &path).map_err(|err| ServerFnError::new(err.to_string()))?;
+    let entries = git::browse_tree(&store, &identity, branch.as_deref(), &path).map_err(|err| ServerFnError::new(err.to_string()))?;
     Ok(entries.into_iter().map(TreeEntryDto::from).collect())
 }
 
-#[get("/api/repos/:name/blob?branch&path", auth: axum_login::AuthSession<crate::auth::Backend>)]
-#[tracing::instrument(name = "repository.blob", skip_all, err, fields(repo.name = %name, branch = branch.as_deref().unwrap_or("HEAD")))]
-pub async fn get_blob(name: String, branch: Option<String>, path: String) -> Result<BlobDto, ServerFnError> {
+#[get("/api/repos/:owner/:name/blob?branch&path", auth: axum_login::AuthSession<crate::auth::Backend>)]
+#[tracing::instrument(name = "repository.blob", skip_all, err, fields(repo.owner = %owner, repo.name = %name, branch = branch.as_deref().unwrap_or("HEAD")))]
+pub async fn get_blob(owner: String, name: String, branch: Option<String>, path: String) -> Result<BlobDto, ServerFnError> {
     use crate::git::{self, store::LocalFsStore};
 
+    let identity = format!("{owner}/{name}");
     let store = LocalFsStore::from_env();
-    require_read_access(&auth, &store, &name).await?;
-    let blob = git::read_blob(&store, &name, branch.as_deref(), &path).map_err(|err| ServerFnError::new(err.to_string()))?;
+    require_read_access(&auth, &store, &identity).await?;
+    let blob = git::read_blob(&store, &identity, branch.as_deref(), &path).map_err(|err| ServerFnError::new(err.to_string()))?;
     Ok(BlobDto::from(blob))
 }
 
-#[get("/api/repos/:name/branches", auth: axum_login::AuthSession<crate::auth::Backend>)]
-#[tracing::instrument(name = "repository.branches", skip_all, err, fields(repo.name = %name))]
-pub async fn get_branches(name: String) -> Result<Vec<String>, ServerFnError> {
+#[get("/api/repos/:owner/:name/branches", auth: axum_login::AuthSession<crate::auth::Backend>)]
+#[tracing::instrument(name = "repository.branches", skip_all, err, fields(repo.owner = %owner, repo.name = %name))]
+pub async fn get_branches(owner: String, name: String) -> Result<Vec<String>, ServerFnError> {
     use crate::git::{self, store::LocalFsStore};
 
+    let identity = format!("{owner}/{name}");
     let store = LocalFsStore::from_env();
-    require_read_access(&auth, &store, &name).await?;
-    git::list_branches(&store, &name).map_err(|err| ServerFnError::new(err.to_string()))
+    require_read_access(&auth, &store, &identity).await?;
+    git::list_branches(&store, &identity).map_err(|err| ServerFnError::new(err.to_string()))
 }
 
-#[get("/api/repos/:name/commits?branch", auth: axum_login::AuthSession<crate::auth::Backend>)]
-#[tracing::instrument(name = "repository.commits", skip_all, err, fields(repo.name = %name, branch = branch.as_deref().unwrap_or("HEAD")))]
-pub async fn get_commit_log(name: String, branch: Option<String>) -> Result<Vec<CommitLogEntryDto>, ServerFnError> {
+#[get("/api/repos/:owner/:name/commits?branch", auth: axum_login::AuthSession<crate::auth::Backend>)]
+#[tracing::instrument(name = "repository.commits", skip_all, err, fields(repo.owner = %owner, repo.name = %name, branch = branch.as_deref().unwrap_or("HEAD")))]
+pub async fn get_commit_log(owner: String, name: String, branch: Option<String>) -> Result<Vec<CommitLogEntryDto>, ServerFnError> {
     use crate::git::{self, store::LocalFsStore};
 
+    let identity = format!("{owner}/{name}");
     let store = LocalFsStore::from_env();
-    require_read_access(&auth, &store, &name).await?;
+    require_read_access(&auth, &store, &identity).await?;
     let entries =
-        git::commit_log(&store, &name, branch.as_deref(), 50).map_err(|err| ServerFnError::new(err.to_string()))?;
+        git::commit_log(&store, &identity, branch.as_deref(), 50).map_err(|err| ServerFnError::new(err.to_string()))?;
     Ok(entries.into_iter().map(CommitLogEntryDto::from).collect())
 }
 

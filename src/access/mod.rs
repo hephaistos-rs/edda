@@ -101,3 +101,104 @@ pub async fn revoke_all(pool: &SqlitePool, repo_name: &str) -> Result<(), Access
     sqlx::query!("DELETE FROM repo_access WHERE repo_name = ?", repo_name).execute(pool).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs `fut` to completion on a fresh, single-threaded runtime — every
+    /// test below needs one to await these `async fn`s, but none of them
+    /// need `tokio`'s `#[tokio::test]` macro (not a feature this crate
+    /// enables) or a multi-threaded scheduler.
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(fut)
+    }
+
+    /// An in-memory, fully migrated database — isolated per test, never the
+    /// real `EDDA_DATA_DIR`/`data/edda.db`.
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::migrations::run(&pool).await.unwrap();
+        pool
+    }
+
+    async fn insert_user(pool: &SqlitePool, username: &str) -> String {
+        let id = uuid::Uuid::now_v7().to_string();
+        let email = format!("{username}@example.com");
+        sqlx::query!("INSERT INTO users (id, username, email, password_hash) VALUES (?, ?, ?, 'x')", id, username, email)
+            .execute(pool)
+            .await
+            .unwrap();
+        id
+    }
+
+    /// The core requirement of this increment: access is keyed by the full
+    /// `{owner}/{repo}` identity, so two different owners' repos that happen
+    /// to share a repo-name segment (`alice/shared` vs. `bob/shared`) never
+    /// leak access into each other.
+    #[test]
+    fn write_access_is_keyed_by_the_complete_identity() {
+        block_on(async {
+            let pool = test_pool().await;
+            let alice = insert_user(&pool, "alice").await;
+            let bob = insert_user(&pool, "bob").await;
+
+            grant_owner(&pool, "alice/shared", &alice).await.unwrap();
+            grant_owner(&pool, "bob/shared", &bob).await.unwrap();
+
+            assert!(has_write_access(&pool, "alice/shared", &alice).await.unwrap());
+            assert!(!has_write_access(&pool, "alice/shared", &bob).await.unwrap());
+            assert!(has_write_access(&pool, "bob/shared", &bob).await.unwrap());
+            assert!(!has_write_access(&pool, "bob/shared", &alice).await.unwrap());
+
+            assert!(is_owner(&pool, "alice/shared", &alice).await.unwrap());
+            assert!(!is_owner(&pool, "bob/shared", &alice).await.unwrap());
+        });
+    }
+
+    #[test]
+    fn collaborator_grants_are_keyed_by_the_complete_identity() {
+        block_on(async {
+            let pool = test_pool().await;
+            let alice = insert_user(&pool, "alice").await;
+            let bob = insert_user(&pool, "bob").await;
+            let carol = insert_user(&pool, "carol").await;
+
+            grant_owner(&pool, "alice/shared", &alice).await.unwrap();
+            grant_owner(&pool, "bob/shared", &bob).await.unwrap();
+
+            add_collaborator(&pool, "alice/shared", &alice, "carol@example.com").await.unwrap();
+
+            assert!(has_write_access(&pool, "alice/shared", &carol).await.unwrap());
+            // Carol was only added to alice/shared — a same-named repo under
+            // a different owner must not see her as a collaborator too.
+            assert!(!has_write_access(&pool, "bob/shared", &carol).await.unwrap());
+
+            // Only an owner of *that* identity can grant/revoke on it — bob
+            // isn't alice/shared's owner, even though he owns bob/shared.
+            let err = add_collaborator(&pool, "alice/shared", &bob, "carol@example.com").await;
+            assert!(matches!(err, Err(AccessError::NotOwner)));
+
+            let removed = remove_collaborator(&pool, "alice/shared", &alice, &carol).await.unwrap();
+            assert!(removed);
+            assert!(!has_write_access(&pool, "alice/shared", &carol).await.unwrap());
+        });
+    }
+
+    #[test]
+    fn revoke_all_only_affects_its_own_identity() {
+        block_on(async {
+            let pool = test_pool().await;
+            let alice = insert_user(&pool, "alice").await;
+            let bob = insert_user(&pool, "bob").await;
+
+            grant_owner(&pool, "alice/shared", &alice).await.unwrap();
+            grant_owner(&pool, "bob/shared", &bob).await.unwrap();
+
+            revoke_all(&pool, "alice/shared").await.unwrap();
+
+            assert!(!has_write_access(&pool, "alice/shared", &alice).await.unwrap());
+            assert!(has_write_access(&pool, "bob/shared", &bob).await.unwrap());
+        });
+    }
+}

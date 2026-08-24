@@ -6,6 +6,7 @@
 pub mod access_token_repo;
 pub mod repo_access_repo;
 pub mod repository_repo;
+pub mod ssh_key_repo;
 pub mod user_repo;
 
 #[cfg(test)]
@@ -14,6 +15,7 @@ mod tests;
 pub use access_token_repo::AccessTokenRepo;
 pub use repo_access_repo::RepoAccessRepo;
 pub use repository_repo::RepositoryRepo;
+pub use ssh_key_repo::SshKeyRepo;
 pub use user_repo::UserRepo;
 
 use std::time::Duration;

@@ -6,6 +6,7 @@ members = [
     "crates/edda-git",
     "crates/edda-auth",
     "crates/edda-http",
+    "crates/edda-ssh",
     "crates/edda-telemetry",
     "app/edda-web",
 ]
@@ -25,12 +26,14 @@ edda-db = { path = "crates/edda-db" }
 edda-git = { path = "crates/edda-git" }
 edda-auth = { path = "crates/edda-auth" }
 edda-http = { path = "crates/edda-http" }
+edda-ssh = { path = "crates/edda-ssh" }
 edda-telemetry = { path = "crates/edda-telemetry" }
 
 argon2 = "0.5.3"
 axum = "0.8.9"
 axum-login = "0.18.0"
 base64 = "0.22.1"
+bytes = "1.12.1"
 dioxus = "0.7.1"
 dioxus-free-icons = "0.10.0"
 flate2 = "1.1.9"
@@ -43,6 +46,13 @@ opentelemetry-appender-tracing = "0.32.0"
 opentelemetry-otlp = { version = "0.32.0", default-features = false }
 opentelemetry-semantic-conventions = "0.32.1"
 opentelemetry_sdk = "0.32.1"
+# Matches the version russh's own examples use for host-key generation
+# (`russh`'s published `Cargo.toml` dev-dependencies) — needed for
+# `ssh_key::PrivateKey::random`'s `CryptoRng` bound.
+rand = { version = "0.10", features = ["thread_rng"] }
+# `ring` crypto backend selected over the `aws-lc-rs` default — see
+# `crates/edda-ssh/Cargo.toml`'s doc comment and plan.local.md §23.
+russh = { version = "0.63", default-features = false, features = ["ring", "rsa"] }
 serde = "1.0.229"
 serde_json = "1.0.145"
 sha2 = "0.10.9"

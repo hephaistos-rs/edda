@@ -6,7 +6,7 @@ mod shared;
 mod ui;
 
 use ui::layouts::Navbar;
-use ui::pages::{Home, Login, Repo, Signup};
+use ui::pages::{Home, Login, Repo, Settings, Signup};
 
 #[derive(Debug, Clone, Routable, PartialEq)]
 #[rustfmt::skip]
@@ -14,6 +14,8 @@ enum Route {
     #[layout(Navbar)]
     #[route("/")]
     Home {},
+    #[route("/settings")]
+    Settings {},
     #[route("/:owner/:name")]
     Repo { owner: String, name: String },
     #[route("/signup")]
@@ -68,10 +70,12 @@ fn main() {
     // lock rather than moved in directly.
     let telemetry_guard = std::sync::Arc::new(tokio::sync::Mutex::new(Some(telemetry_guard)));
     let shutdown_watcher_started = std::sync::Arc::new(std::sync::Once::new());
+    let ssh_server_started = std::sync::Arc::new(std::sync::Once::new());
 
     dioxus::server::serve(move || {
         let telemetry_guard = telemetry_guard.clone();
         let shutdown_watcher_started = shutdown_watcher_started.clone();
+        let ssh_server_started = ssh_server_started.clone();
         async move {
             let pool = edda_db::pool().await?;
 
@@ -102,15 +106,53 @@ fn main() {
             });
 
             let state = edda_http::AppState {
-                pool,
-                store,
-                locks,
-                authz,
+                pool: pool.clone(),
+                store: store.clone(),
+                locks: locks.clone(),
+                authz: authz.clone(),
                 backend,
             };
             let router = dioxus::server::router(App)
                 .merge(edda_http::router(state))
                 .layer(auth_layer);
+
+            // Same `Once`-guarded pattern as the shutdown watcher below,
+            // and for the same reason: this callback can re-run on
+            // dev-mode hot reload, and a second SSH listener must never
+            // try to bind the same port again.
+            ssh_server_started.call_once(|| {
+                let ssh_state = edda_ssh::SshState {
+                    pool,
+                    store,
+                    locks,
+                    authz,
+                };
+                tokio::spawn(async move {
+                    let ip: std::net::IpAddr = std::env::var("IP")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(std::net::IpAddr::from([127, 0, 0, 1]));
+                    let port: u16 = std::env::var("EDDA_SSH_PORT")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(2222);
+                    let data_dir = std::env::var("EDDA_DATA_DIR")
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|_| "./data".into());
+                    let host_key_path = data_dir.join("ssh_host_ed25519_key");
+
+                    tracing::info!(%ip, port, "starting git-over-SSH listener");
+                    if let Err(err) = edda_ssh::serve(
+                        ssh_state,
+                        std::net::SocketAddr::from((ip, port)),
+                        &host_key_path,
+                    )
+                    .await
+                    {
+                        tracing::error!(error = %err, "git-over-SSH listener stopped");
+                    }
+                });
+            });
 
             shutdown_watcher_started.call_once(|| {
                 let telemetry_guard = telemetry_guard.clone();

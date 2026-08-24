@@ -22,9 +22,47 @@ use crate::GitError;
 
 /// Walks every object reachable from `wants` (commits, their trees, and
 /// everything those trees reference) and serializes them into a pack.
-#[tracing::instrument(name = "git.build_pack", skip_all, err, fields(wants = wants.len()))]
+/// Equivalent to [`build_pack_excluding`] with an empty `haves` set —
+/// every pre-Phase-2 caller of this function keeps its exact behavior
+/// (send everything reachable from `wants`, full stop).
 pub fn build_pack(repo: &gix::Repository, wants: &[ObjectId]) -> Result<Vec<u8>, GitError> {
+    build_pack_excluding(repo, wants, &[])
+}
+
+/// Walks every object reachable from `wants`, *excluding* anything
+/// reachable from `haves` — the client's own claimed tips, i.e. objects it
+/// already has. This is the entire negotiation algorithm: an incremental
+/// `git fetch` sends its ref tips as `have` lines, and a server that
+/// actually honors them (rather than treating `wants` as "send full
+/// history," which is what `build_pack` alone did before Phase 2) responds
+/// with only the new objects. See `edda_git::protocol::parse_upload_pack_request`
+/// for where `haves` comes from on the wire.
+#[tracing::instrument(name = "git.build_pack", skip_all, err, fields(wants = wants.len(), haves = haves.len()))]
+pub fn build_pack_excluding(
+    repo: &gix::Repository,
+    wants: &[ObjectId],
+    haves: &[ObjectId],
+) -> Result<Vec<u8>, GitError> {
     let mut seen: HashSet<ObjectId> = HashSet::new();
+
+    // Mark everything reachable from `haves` as already-seen first, so the
+    // `wants` walk below never re-visits (or includes) it.
+    let mut have_queue: VecDeque<ObjectId> = haves.iter().copied().collect();
+    while let Some(id) = have_queue.pop_front() {
+        if !seen.insert(id) {
+            continue;
+        }
+        // A `have` the server doesn't actually recognize (client is ahead
+        // of us, or referencing history from elsewhere) isn't an error —
+        // there's just nothing further to exclude down that branch; the
+        // `wants` walk below will include the object again if it's
+        // genuinely reachable from a want too, which is always safe.
+        let Ok(object) = repo.find_object(id) else {
+            continue;
+        };
+        extend_queue_from(&mut have_queue, object.kind, &object.data)?;
+    }
+
     let mut queue: VecDeque<ObjectId> = wants.iter().copied().collect();
     let mut objects: Vec<(Kind, Vec<u8>)> = Vec::new();
 
@@ -35,26 +73,37 @@ pub fn build_pack(repo: &gix::Repository, wants: &[ObjectId]) -> Result<Vec<u8>,
         let object = repo
             .find_object(id)
             .map_err(|err| GitError::Git(err.to_string()))?;
-
-        match object.kind {
-            Kind::Commit => {
-                let commit = gix_object::CommitRef::from_bytes(&object.data, gix_hash::Kind::Sha1)
-                    .map_err(|err| GitError::Git(err.to_string()))?;
-                queue.push_back(commit.tree());
-                queue.extend(commit.parents());
-            }
-            Kind::Tree => {
-                let tree = gix_object::TreeRef::from_bytes(&object.data, gix_hash::Kind::Sha1)
-                    .map_err(|err| GitError::Git(err.to_string()))?;
-                queue.extend(tree.entries.iter().map(|entry| entry.oid.to_owned()));
-            }
-            Kind::Blob | Kind::Tag => {}
-        }
-
+        extend_queue_from(&mut queue, object.kind, &object.data)?;
         objects.push((object.kind, object.data.clone()));
     }
 
     serialize_pack(&objects)
+}
+
+/// Shared by both the `haves` exclusion walk and the `wants` inclusion
+/// walk in [`build_pack_excluding`]: given one already-fetched object,
+/// pushes whatever it references (a commit's tree and parents; a tree's
+/// entries) onto `queue`.
+fn extend_queue_from(
+    queue: &mut VecDeque<ObjectId>,
+    kind: Kind,
+    data: &[u8],
+) -> Result<(), GitError> {
+    match kind {
+        Kind::Commit => {
+            let commit = gix_object::CommitRef::from_bytes(data, gix_hash::Kind::Sha1)
+                .map_err(|err| GitError::Git(err.to_string()))?;
+            queue.push_back(commit.tree());
+            queue.extend(commit.parents());
+        }
+        Kind::Tree => {
+            let tree = gix_object::TreeRef::from_bytes(data, gix_hash::Kind::Sha1)
+                .map_err(|err| GitError::Git(err.to_string()))?;
+            queue.extend(tree.entries.iter().map(|entry| entry.oid.to_owned()));
+        }
+        Kind::Blob | Kind::Tag => {}
+    }
+    Ok(())
 }
 
 fn serialize_pack(objects: &[(Kind, Vec<u8>)]) -> Result<Vec<u8>, GitError> {

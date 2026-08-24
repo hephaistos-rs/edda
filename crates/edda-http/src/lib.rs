@@ -5,6 +5,7 @@
 mod access_routes;
 mod auth_routes;
 mod git_http;
+mod ssh_key_routes;
 mod state;
 
 pub use state::AppState;
@@ -26,6 +27,7 @@ pub fn router(state: AppState) -> Router {
         .merge(git_http::routes())
         .merge(auth_routes::routes())
         .merge(access_routes::routes())
+        .merge(ssh_key_routes::routes())
         .route("/healthz", get(healthz));
 
     with_http_observability(routes).with_state(state)

@@ -20,6 +20,7 @@ edda-db = { workspace = true, optional = true }
 edda-domain = { workspace = true, optional = true }
 edda-git = { workspace = true, optional = true }
 edda-http = { workspace = true, optional = true }
+edda-ssh = { workspace = true, optional = true }
 edda-telemetry = { workspace = true, optional = true }
 gloo-net = { workspace = true, features = ["json"], optional = true }
 serde = { workspace = true, features = ["derive"] }
@@ -53,6 +54,7 @@ server = [
     "dep:edda-domain",
     "dep:edda-git",
     "dep:edda-http",
+    "dep:edda-ssh",
     "dep:edda-telemetry",
     "dep:sqlx",
     "dep:tokio",

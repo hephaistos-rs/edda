@@ -5,9 +5,11 @@
 //! decision tests this crate deliberately doesn't duplicate (this module
 //! tests persistence and schema behavior, not authorization policy).
 
-use edda_domain::{RepoRole, Repository, RepositoryId, RepositoryOwner, User, UserId, Visibility};
+use edda_domain::{
+    RepoRole, Repository, RepositoryId, RepositoryOwner, SshKeyId, User, UserId, Visibility,
+};
 
-use crate::{AccessTokenRepo, RepoAccessRepo, RepositoryRepo, UserRepo};
+use crate::{AccessTokenRepo, RepoAccessRepo, RepositoryRepo, SshKeyRepo, UserRepo};
 
 async fn insert_user(pool: &sqlx::SqlitePool, username: &str) -> UserId {
     let id = UserId::new();
@@ -219,6 +221,127 @@ async fn an_access_token_authenticates_back_to_its_owning_user_and_scope() {
     assert_eq!(scope, edda_domain::RepositoryScope::All);
 
     assert!(AccessTokenRepo::find_by_hash(&pool, "not-a-real-hash")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn an_ssh_key_resolves_back_to_its_owning_user() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+
+    SshKeyRepo::insert(
+        &pool,
+        SshKeyId::new(),
+        alice,
+        "SHA256:deadbeef",
+        "ssh-ed25519 AAAA... laptop",
+        "laptop",
+    )
+    .await
+    .unwrap();
+
+    let user = SshKeyRepo::find_by_fingerprint(&pool, "SHA256:deadbeef")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(user.id, alice);
+
+    assert!(
+        SshKeyRepo::find_by_fingerprint(&pool, "SHA256:not-registered")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn the_same_fingerprint_cannot_be_registered_twice() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let bob = insert_user(&pool, "bob").await;
+
+    SshKeyRepo::insert(
+        &pool,
+        SshKeyId::new(),
+        alice,
+        "SHA256:shared",
+        "ssh-ed25519 AAAA... k1",
+        "k1",
+    )
+    .await
+    .unwrap();
+    let err = SshKeyRepo::insert(
+        &pool,
+        SshKeyId::new(),
+        bob,
+        "SHA256:shared",
+        "ssh-ed25519 AAAA... k2",
+        "k2",
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        crate::ssh_key_repo::InsertSshKeyError::FingerprintTaken
+    ));
+}
+
+#[tokio::test]
+async fn revoking_an_ssh_key_is_scoped_to_its_owner() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let bob = insert_user(&pool, "bob").await;
+
+    let key_id = SshKeyId::new();
+    SshKeyRepo::insert(
+        &pool,
+        key_id,
+        alice,
+        "SHA256:alice-key",
+        "ssh-ed25519 AAAA... k",
+        "k",
+    )
+    .await
+    .unwrap();
+
+    // Bob can't revoke Alice's key by guessing its id.
+    assert!(!SshKeyRepo::revoke(&pool, bob, key_id).await.unwrap());
+    assert!(SshKeyRepo::find_by_fingerprint(&pool, "SHA256:alice-key")
+        .await
+        .unwrap()
+        .is_some());
+
+    assert!(SshKeyRepo::revoke(&pool, alice, key_id).await.unwrap());
+    assert!(SshKeyRepo::find_by_fingerprint(&pool, "SHA256:alice-key")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn deleting_a_user_cascades_their_ssh_keys() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    SshKeyRepo::insert(
+        &pool,
+        SshKeyId::new(),
+        alice,
+        "SHA256:alice-key",
+        "ssh-ed25519 AAAA... k",
+        "k",
+    )
+    .await
+    .unwrap();
+
+    let alice_id_text = alice.to_string();
+    sqlx::query!("DELETE FROM users WHERE id = ?", alice_id_text)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert!(SshKeyRepo::find_by_fingerprint(&pool, "SHA256:alice-key")
         .await
         .unwrap()
         .is_none());

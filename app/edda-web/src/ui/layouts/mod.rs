@@ -116,6 +116,7 @@ pub fn Navbar() -> Element {
                     AuthState::Checking => rsx! { span { class: "opacity-0", "…" } },
                     AuthState::LoggedIn(user) => rsx! {
                         span { class: "font-mono text-ink", "{user.username}" }
+                        Link { to: Route::Settings {}, class: "no-underline hover:text-ink", "settings" }
                         button {
                             r#type: "button",
                             class: "no-underline hover:text-ink",

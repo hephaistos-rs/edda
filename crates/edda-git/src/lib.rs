@@ -1,4 +1,6 @@
 pub mod pack;
+pub mod pktline;
+pub mod protocol;
 pub mod store;
 
 use std::collections::HashMap;
@@ -59,7 +61,7 @@ impl LockRegistry {
 /// `edda_telemetry::metrics`). Kept as a one-line call at each instrumented
 /// git boundary so a span's name and its matching metric label can't drift
 /// apart.
-fn record_git_op<T>(
+pub(crate) fn record_git_op<T>(
     operation: &'static str,
     start: std::time::Instant,
     result: &Result<T, GitError>,
@@ -343,7 +345,10 @@ fn open_and_resolve<'repo>(
 }
 
 #[tracing::instrument(name = "git.open", skip_all, err, fields(repo.name = %name))]
-fn open_repo_dir(store: &dyn RepoStore, name: &str) -> Result<gix::Repository, GitError> {
+pub(crate) fn open_repo_dir(
+    store: &dyn RepoStore,
+    name: &str,
+) -> Result<gix::Repository, GitError> {
     let start = std::time::Instant::now();
     let result = (|| {
         validate_name(name)?;

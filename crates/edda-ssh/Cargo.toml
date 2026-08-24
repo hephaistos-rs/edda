@@ -1,0 +1,41 @@
+[package]
+name = "edda-ssh"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+# Git-over-SSH transport — owns SSH-specific concerns only (server/session
+# lifecycle, public-key authentication, exec-command parsing, channel I/O
+# framing). Delegates every actual git operation to `edda-git::protocol`
+# (shared verbatim with `edda-http`'s bridge) and every access decision to
+# `edda-auth::AuthorizationService` — this crate must never reimplement
+# either. See plan.local.md §17 Phase 2.
+[dependencies]
+bytes = { workspace = true }
+edda-auth = { workspace = true }
+edda-db = { workspace = true }
+edda-domain = { workspace = true }
+edda-git = { workspace = true }
+gix = { workspace = true }
+rand = { workspace = true }
+# `russh`'s default features pull in `aws-lc-rs` (→ `aws-lc-sys`, a
+# cmake-built C dependency). Selecting the `ring` crypto backend instead —
+# see plan.local.md §23 (the crypto-backend choice explicitly left open
+# there, resolved here) and §10's characterization of `ring` as "largely
+# pure Rust with some bundled, `cc`-compiled assembly," a materially
+# lighter native footprint than a full external C-library build. `rsa` is
+# kept (real SSH clients still commonly hold RSA keys); `flate2`
+# (SSH-transport-level compression, unrelated to git's own zlib usage) is
+# dropped since nothing requires it.
+russh = { workspace = true }
+sqlx = { workspace = true, features = ["sqlite"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+tracing = { workspace = true }
+
+# Only the integration test module (`src/tests.rs`) needs a real TCP
+# listener, `#[tokio::test]`, and `gix_object`'s `Kind` directly — kept as
+# dev-dependencies so the shipped library doesn't carry them.
+[dev-dependencies]
+gix-object = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "net", "macros", "time"] }

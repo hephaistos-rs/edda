@@ -6,14 +6,19 @@ authors.workspace = true
 
 # Git repository storage and gix-backed operations — server-only,
 # transport-agnostic (see plan.local.md §3.3/§8). Both `edda-http`'s
-# git-over-HTTP bridge and a future `edda-ssh`'s git-over-SSH bridge call
-# into this crate; it knows nothing about either transport.
+# git-over-HTTP bridge and `edda-ssh`'s git-over-SSH bridge call into this
+# crate's `protocol` module for the actual smart-protocol request/response
+# orchestration; it knows nothing about either transport (no `axum`, no
+# `russh`) — `bytes::Bytes` is a generic, transport-agnostic buffer type,
+# not an HTTP- or SSH-specific one, so depending on it directly here (the
+# same type both transports already hand around) doesn't violate that.
 [dependencies]
+bytes = { workspace = true }
 edda-domain = { workspace = true }
 edda-telemetry = { workspace = true }
 flate2 = { workspace = true }
 gix = { workspace = true }
 gix-hash = { workspace = true, features = ["sha1"] }
 gix-object = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "rt"] }
 tracing = { workspace = true }

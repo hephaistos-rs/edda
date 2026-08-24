@@ -2,14 +2,14 @@
 
 Self-hosted git platform with a terminal-native, developer-console interface. Host and browse your own repositories — clone and push with a normal `git` client — without depending on GitHub, GitLab, or any other third-party hosting.
 
-Built for solo developers and small teams who want full control and privacy over their code. Deployment is deliberately low-friction: a single self-contained binary, SQLite for storage, and nothing external required to get running.
+Built for solo developers and small teams who want full control and privacy over their code. Deployment is deliberately low-friction: a single self-contained binary, SQLite for storage, and nothing external *required* to get running. PostgreSQL is supported as an optional backend for larger or longer-lived deployments — see [Database backend](#database-backend).
 
 ## Features
 
 - **Real git hosting** — a git smart-HTTP implementation (built directly on [`gix`](https://github.com/GitoxideLabs/gitoxide), no `git` subprocess) serves clone and push over plain HTTP.
 - **Web UI** — repository listing with search, file/tree browsing, file viewing, and commit history, in a dense, keyboard-first interface (see `DESIGN.md`).
 - **Accounts and access** — email/password signup and login, plus revocable personal access tokens for authenticating `git push`/`git clone` over HTTP.
-- **Single-binary deploy** — SQLite-backed, no required external services (no mandatory Postgres, Redis, etc.).
+- **Single-binary deploy** — SQLite-backed by default, no required external services (no mandatory Postgres, Redis, etc.); PostgreSQL is available as an opt-in backend, not a requirement.
 - **Built-in observability** — structured logs, distributed traces, and metrics out of the box, exportable via OpenTelemetry (see [Observability](#observability)).
 
 ## Status
@@ -44,6 +44,21 @@ Runtime behavior is controlled by environment variables — none of them are rea
 
 See `.env.example` for the full list, including the observability variables documented below.
 
+### Database backend
+
+SQLite is the default and requires no setup — it's what `cargo run --features server` gives you with no further configuration. PostgreSQL is available as an optional backend for larger or longer-lived deployments, chosen at **build time** (not runtime) because it's what lets Edda keep `sqlx`'s compile-time-checked queries against either backend rather than giving that up for runtime flexibility:
+
+```bash
+# Default — SQLite, zero config:
+cargo run --features server
+
+# PostgreSQL instead — requires EDDA_DATABASE_URL, no local default exists:
+EDDA_DATABASE_URL=postgres://user:pass@host/dbname \
+  cargo run --no-default-features --features web,server,postgres
+```
+
+MySQL/MariaDB is not supported — see `plan.local.md` §17 Phase 3 for why (in short: this schema's one-owner-per-repository invariant relies on a partial unique index, which SQLite and PostgreSQL both support natively and MySQL/MariaDB doesn't).
+
 ## Development
 
 First-time setup: `cp .env.example .env` — needed for `sqlx`'s query macros to use the committed `.sqlx/` cache instead of requiring a live database at build time.
@@ -69,14 +84,14 @@ I/O-performing "shell" crates around it, and a composition root
 ```
 crates/
 ├─ edda-domain/     # entities, invariants, pure authorization/business-rule functions — no I/O
-├─ edda-db/         # sqlx pool, embedded migrations, one repository struct per aggregate
+├─ edda-db/         # sqlx pool (SQLite default / PostgreSQL optional, one compiled in at a time), embedded migrations, one repository struct per aggregate
 ├─ edda-git/        # repository storage and gix-backed operations — transport-agnostic
 ├─ edda-auth/       # authentication (passwords/sessions/tokens) and the authorization service
 ├─ edda-http/       # axum app: git smart-HTTP bridge, account/token/collaborator routes
 └─ edda-telemetry/  # tracing/OpenTelemetry setup, see below
 app/
 └─ edda-web/        # the composition root: main.rs, Dioxus server functions, UI (components/layouts/pages)
-migrations/          # SQL migration history, applied by edda-db (kept at the workspace root for `sqlx-cli` convenience)
+migrations/          # SQL migration history — sqlite/ and postgres/ subdirectories, applied by edda-db (kept at the workspace root for `sqlx-cli` convenience)
 ```
 
 `edda-web` is the only package built for both the wasm32 client and the native server (Dioxus fullstack's own constraint) — every other crate above is server-only, pulled in by `edda-web` behind its `server` feature, and never enters the wasm/web client build; see `app/edda-web/Cargo.toml`'s feature list.
@@ -88,7 +103,7 @@ The `server` build is instrumented with [`tracing`](https://docs.rs/tracing) thr
 ### What Edda produces
 
 - **Structured logs**: every request, and the meaningful operations inside it (`repository.get`, `git.read_tree`, `authentication.login`, ...) emit structured `tracing` events, printed to stdout — pretty-printed in debug builds, JSON in release builds (override with `EDDA_LOG_FORMAT=pretty|json`).
-- **Distributed traces**: nested spans following the real work a request does, e.g. `HTTP GET /api/repos/{name}/commits` → `repository.commits` → `git.open` → `git.resolve_revision` → `git.read_commit_log`. Git object-store operations (`gix`), server functions, and the raw git-HTTP clone/push bridge are all instrumented; SQLite query timing comes from `sqlx`'s own built-in `tracing` instrumentation rather than a redundant custom wrapper.
+- **Distributed traces**: nested spans following the real work a request does, e.g. `HTTP GET /api/repos/{name}/commits` → `repository.commits` → `git.open` → `git.resolve_revision` → `git.read_commit_log`. Git object-store operations (`gix`), server functions, and the raw git-HTTP clone/push bridge are all instrumented; database query timing (SQLite or PostgreSQL, whichever is compiled in) comes from `sqlx`'s own built-in `tracing` instrumentation rather than a redundant custom wrapper.
 - **Metrics**: two histograms only, `edda.http.server.request.duration` and `edda.git.operation.duration`, both with low-cardinality attributes (`operation`/`status`/`http.route`/`http.method`/`http.status_code` — never a repository name or id).
 - **Log/trace correlation**: when OTel export is enabled, `tracing` events are bridged to OTel logs and automatically carry the active `trace_id`/`span_id`, so a log line in Grafana/Loki links straight to its trace in Tempo.
 

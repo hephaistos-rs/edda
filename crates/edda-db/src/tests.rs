@@ -11,7 +11,7 @@ use edda_domain::{
 
 use crate::{AccessTokenRepo, RepoAccessRepo, RepositoryRepo, SshKeyRepo, UserRepo};
 
-async fn insert_user(pool: &sqlx::SqlitePool, username: &str) -> UserId {
+async fn insert_user(pool: &crate::DbPool, username: &str) -> UserId {
     let id = UserId::new();
     UserRepo::insert(pool, id, username, &format!("{username}@example.com"), "x")
         .await
@@ -336,7 +336,13 @@ async fn deleting_a_user_cascades_their_ssh_keys() {
     .unwrap();
 
     let alice_id_text = alice.to_string();
+    #[cfg(feature = "sqlite")]
     sqlx::query!("DELETE FROM users WHERE id = ?", alice_id_text)
+        .execute(&pool)
+        .await
+        .unwrap();
+    #[cfg(feature = "postgres")]
+    sqlx::query!("DELETE FROM users WHERE id = $1", alice_id_text)
         .execute(&pool)
         .await
         .unwrap();

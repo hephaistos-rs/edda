@@ -1,8 +1,7 @@
 use axum_login::{AuthUser, AuthnBackend};
 use serde::Deserialize;
-use sqlx::SqlitePool;
 
-use edda_db::UserRepo;
+use edda_db::{DbPool, UserRepo};
 use edda_domain::User;
 
 use crate::password::verify_password;
@@ -57,15 +56,15 @@ impl From<argon2::password_hash::Error> for AuthError {
 
 #[derive(Clone)]
 pub struct Backend {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl Backend {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: DbPool) -> Self {
         Self { pool }
     }
 
-    pub fn pool(&self) -> &SqlitePool {
+    pub fn pool(&self) -> &DbPool {
         &self.pool
     }
 }

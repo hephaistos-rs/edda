@@ -15,19 +15,29 @@ axum = { workspace = true, optional = true }
 axum-login = { workspace = true, optional = true }
 dioxus = { workspace = true, features = ["router", "fullstack"] }
 dioxus-free-icons = { workspace = true, features = ["lucide"] }
-edda-auth = { workspace = true, optional = true }
-edda-db = { workspace = true, optional = true }
+# `default-features = false` on every one of these that itself depends on
+# `edda-db`: backend selection (this file's `sqlite`/`postgres` features,
+# below) must be the composition root's decision alone, not forced by any
+# dependent crate's own default (plan.local.md §17 Phase 3).
+edda-auth = { workspace = true, default-features = false, optional = true }
+edda-db = { workspace = true, default-features = false, optional = true }
 edda-domain = { workspace = true, optional = true }
 edda-git = { workspace = true, optional = true }
-edda-http = { workspace = true, optional = true }
-edda-ssh = { workspace = true, optional = true }
+edda-http = { workspace = true, default-features = false, optional = true }
+edda-ssh = { workspace = true, default-features = false, optional = true }
 edda-telemetry = { workspace = true, optional = true }
 gloo-net = { workspace = true, features = ["json"], optional = true }
 serde = { workspace = true, features = ["derive"] }
-sqlx = { workspace = true, features = ["sqlite"], optional = true }
+# No driver feature hardcoded — comes transitively from whichever of this
+# crate's own `sqlite`/`postgres` features is active (below).
+sqlx = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync", "rt", "signal", "time"], optional = true }
 tower-sessions = { workspace = true, optional = true }
-tower-sessions-sqlx-store = { workspace = true, features = ["sqlite"], optional = true }
+# No driver feature hardcoded here either — `tower-sessions-sqlx-store`
+# gates its `SqliteStore`/`PostgresStore` types behind its own
+# `sqlite`/`postgres` features (not auto-derived from `sqlx`'s), so this
+# crate's own `sqlite`/`postgres` features (below) select explicitly.
+tower-sessions-sqlx-store = { workspace = true, optional = true }
 # Not optional: `tracing`'s macros (`info!`, `#[instrument]`, ...) are used
 # from server-only code paths, but the facade itself is tiny and
 # side-effect-free to depend on — Dioxus already pulls it in transitively
@@ -41,7 +51,7 @@ tracing = { workspace = true }
 web-time = { workspace = true }
 
 [features]
-default = ["web"]
+default = ["web", "sqlite"]
 web = ["dioxus/web", "dep:gloo-net"]
 desktop = ["dioxus/desktop"]
 mobile = ["dioxus/mobile"]
@@ -60,4 +70,26 @@ server = [
     "dep:tokio",
     "dep:tower-sessions",
     "dep:tower-sessions-sqlx-store",
+]
+# Exactly one of these is meant to be active in a `server` build — see
+# `edda-db`'s own `compile_error!` guard, which fires workspace-wide if
+# both (or neither) end up enabled. `sqlite` is the zero-config default,
+# unchanged from before this phase; `postgres` requires `EDDA_DATABASE_URL`
+# and is opted into with `--no-default-features --features postgres,web,server`
+# (or `desktop`/`mobile` in place of `web`). Plan.local.md §17 Phase 3.
+sqlite = [
+    "edda-db?/sqlite",
+    "edda-auth?/sqlite",
+    "edda-http?/sqlite",
+    "edda-ssh?/sqlite",
+    "sqlx?/sqlite",
+    "tower-sessions-sqlx-store?/sqlite",
+]
+postgres = [
+    "edda-db?/postgres",
+    "edda-auth?/postgres",
+    "edda-http?/postgres",
+    "edda-ssh?/postgres",
+    "sqlx?/postgres",
+    "tower-sessions-sqlx-store?/postgres",
 ]

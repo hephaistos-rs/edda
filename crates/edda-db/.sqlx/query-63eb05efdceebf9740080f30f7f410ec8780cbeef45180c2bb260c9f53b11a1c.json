@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM repo_access WHERE repository_id = $1 AND user_id = $2 AND role != 'owner'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "63eb05efdceebf9740080f30f7f410ec8780cbeef45180c2bb260c9f53b11a1c"
+}

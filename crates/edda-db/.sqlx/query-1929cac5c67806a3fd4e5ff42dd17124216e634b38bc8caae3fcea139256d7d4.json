@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO repo_access (repository_id, user_id, role, added_at) VALUES (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "1929cac5c67806a3fd4e5ff42dd17124216e634b38bc8caae3fcea139256d7d4"
+}

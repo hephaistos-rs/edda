@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE ssh_keys SET last_used_at = ? WHERE fingerprint = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "7c9ebc6f2d2717f29de51c3ef286764552bb2bce6bbf6d43decea1ff69898dca"
+}

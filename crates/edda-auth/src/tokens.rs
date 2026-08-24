@@ -6,9 +6,8 @@
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use base64::Engine;
 use sha2::{Digest, Sha256};
-use sqlx::SqlitePool;
 
-use edda_db::AccessTokenRepo;
+use edda_db::{AccessTokenRepo, DbPool};
 use edda_domain::{AccessToken, AccessTokenId, RepositoryScope, User, UserId};
 
 const TOKEN_PREFIX: &str = "edda_pat_";
@@ -41,7 +40,7 @@ fn hash_token(raw: &str) -> String {
 /// Creates a token for `user_id`. The raw token is returned once, here —
 /// only its hash is ever stored, so this is the only chance to see it.
 pub async fn create(
-    pool: &SqlitePool,
+    pool: &DbPool,
     user_id: UserId,
     name: &str,
 ) -> Result<(String, AccessToken), TokenError> {
@@ -69,12 +68,12 @@ pub async fn create(
     ))
 }
 
-pub async fn list(pool: &SqlitePool, user_id: UserId) -> Result<Vec<AccessToken>, TokenError> {
+pub async fn list(pool: &DbPool, user_id: UserId) -> Result<Vec<AccessToken>, TokenError> {
     Ok(AccessTokenRepo::list_for_user(pool, user_id).await?)
 }
 
 pub async fn revoke(
-    pool: &SqlitePool,
+    pool: &DbPool,
     user_id: UserId,
     token_id: AccessTokenId,
 ) -> Result<bool, TokenError> {
@@ -83,7 +82,7 @@ pub async fn revoke(
 
 /// Looks a raw token up by its hash and, if it matches, returns the user
 /// it belongs to and the token's scope.
-pub async fn authenticate(pool: &SqlitePool, raw_token: &str) -> Option<(User, RepositoryScope)> {
+pub async fn authenticate(pool: &DbPool, raw_token: &str) -> Option<(User, RepositoryScope)> {
     if !raw_token.starts_with(TOKEN_PREFIX) {
         return None;
     }

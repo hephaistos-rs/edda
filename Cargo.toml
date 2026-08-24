@@ -22,11 +22,21 @@ authors = ["Damianko135 <139293484+Damianko135@users.noreply.github.com>"]
 # version — see plan.local.md §3 for the workspace-crate rationale.
 [workspace.dependencies]
 edda-domain = { path = "crates/edda-domain" }
-edda-db = { path = "crates/edda-db" }
+# `default-features = false` here, not just on individual consumers' own
+# dependency edges: Cargo ignores a consumer's `default-features = false`
+# override on a workspace-inherited dependency unless the
+# `workspace.dependencies` entry itself declares a `default-features`
+# value (a real Cargo restriction, hit while wiring plan.local.md §17
+# Phase 3's backend-selection feature graph — confirmed via `cargo`'s own
+# "this could become a hard error in the future" warning). Each of these
+# four crates has its own `[features] default = ["sqlite"]` that
+# re-enables `edda-db`'s `sqlite` feature explicitly, so nothing loses
+# today's zero-config default by this changing here.
+edda-db = { path = "crates/edda-db", default-features = false }
 edda-git = { path = "crates/edda-git" }
-edda-auth = { path = "crates/edda-auth" }
-edda-http = { path = "crates/edda-http" }
-edda-ssh = { path = "crates/edda-ssh" }
+edda-auth = { path = "crates/edda-auth", default-features = false }
+edda-http = { path = "crates/edda-http", default-features = false }
+edda-ssh = { path = "crates/edda-ssh", default-features = false }
 edda-telemetry = { path = "crates/edda-telemetry" }
 
 argon2 = "0.5.3"

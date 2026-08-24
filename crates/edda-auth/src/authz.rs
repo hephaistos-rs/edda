@@ -3,9 +3,7 @@
 //! plan.local.md §7.2 — this module must never decide an outcome itself,
 //! only assemble the inputs a decision in `edda_domain::access` needs.
 
-use sqlx::SqlitePool;
-
-use edda_db::{RepoAccessRepo, RepositoryRepo};
+use edda_db::{DbPool, RepoAccessRepo, RepositoryRepo};
 use edda_domain::{
     can_administer_repository, can_manage_repository_danger_zone, can_read_repository,
     can_write_repository, ActorContext, AuthzError, Repository,
@@ -13,11 +11,11 @@ use edda_domain::{
 
 #[derive(Clone)]
 pub struct AuthorizationService {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl AuthorizationService {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: DbPool) -> Self {
         Self { pool }
     }
 

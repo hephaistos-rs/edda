@@ -2379,7 +2379,6 @@ dependencies = [
  "gix-object",
  "rand 0.10.2",
  "russh",
- "sqlx",
  "thiserror 2.0.20",
  "tokio",
  "tracing",

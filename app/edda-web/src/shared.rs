@@ -26,12 +26,12 @@
 use std::sync::{Arc, OnceLock};
 
 use edda_auth::AuthorizationService;
+use edda_db::DbPool;
 use edda_git::store::RepoStore;
 use edda_git::LockRegistry;
-use sqlx::SqlitePool;
 
 pub struct SharedServerState {
-    pub pool: SqlitePool,
+    pub pool: DbPool,
     pub store: Arc<dyn RepoStore>,
     pub locks: Arc<LockRegistry>,
     pub authz: AuthorizationService,

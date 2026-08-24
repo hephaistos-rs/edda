@@ -79,9 +79,15 @@ fn main() {
         async move {
             let pool = edda_db::pool().await?;
 
-            // Session cookies persist in the same SQLite database as everything
-            // else — no separate store to run or lose track of.
+            // Session cookies persist in the same database as everything
+            // else — no separate store to run or lose track of. Store type
+            // follows whichever of this crate's `sqlite`/`postgres`
+            // features is active (plan.local.md §17 Phase 3) — exactly one
+            // is ever compiled in, so `session_store`'s type is unambiguous.
+            #[cfg(feature = "sqlite")]
             let session_store = tower_sessions_sqlx_store::SqliteStore::new(pool.clone());
+            #[cfg(feature = "postgres")]
+            let session_store = tower_sessions_sqlx_store::PostgresStore::new(pool.clone());
             session_store.migrate().await?;
             let session_layer = tower_sessions::SessionManagerLayer::new(session_store);
 

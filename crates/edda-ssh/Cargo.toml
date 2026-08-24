@@ -13,7 +13,10 @@ authors.workspace = true
 [dependencies]
 bytes = { workspace = true }
 edda-auth = { workspace = true }
-edda-db = { workspace = true }
+# `default-features = false`: see `edda-auth/Cargo.toml`'s identical note
+# — backend selection is the composition root's decision alone
+# (plan.local.md §17 Phase 3).
+edda-db = { workspace = true, default-features = false }
 edda-domain = { workspace = true }
 edda-git = { workspace = true }
 gix = { workspace = true }
@@ -28,7 +31,6 @@ rand = { workspace = true }
 # (SSH-transport-level compression, unrelated to git's own zlib usage) is
 # dropped since nothing requires it.
 russh = { workspace = true }
-sqlx = { workspace = true, features = ["sqlite"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }
 tracing = { workspace = true }
@@ -39,3 +41,8 @@ tracing = { workspace = true }
 [dev-dependencies]
 gix-object = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "net", "macros", "time"] }
+
+[features]
+default = ["sqlite"]
+sqlite = ["edda-db/sqlite"]
+postgres = ["edda-db/postgres"]

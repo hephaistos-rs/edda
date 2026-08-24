@@ -1,7 +1,5 @@
-use sqlx::SqlitePool;
-
 use edda_db::user_repo::InsertUserError;
-use edda_db::UserRepo;
+use edda_db::{DbPool, UserRepo};
 use edda_domain::validation::is_valid_username;
 use edda_domain::{User, UserId};
 
@@ -49,7 +47,7 @@ impl From<InsertUserError> for SignupError {
 // on a span even though `email` alone isn't as sensitive as a password.
 #[tracing::instrument(name = "authentication.signup", skip_all, err)]
 pub async fn signup(
-    pool: &SqlitePool,
+    pool: &DbPool,
     username: &str,
     email: &str,
     password: &str,

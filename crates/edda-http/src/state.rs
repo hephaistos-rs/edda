@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use edda_auth::{AuthorizationService, Backend};
+use edda_db::DbPool;
 use edda_git::store::RepoStore;
 use edda_git::LockRegistry;
-use sqlx::SqlitePool;
 
 /// Everything an `edda-http` handler needs, constructed once by the
 /// composition root (`edda-web`) and shared via axum's `State` extractor
@@ -12,7 +12,7 @@ use sqlx::SqlitePool;
 /// `LockRegistry`-equivalent) independently.
 #[derive(Clone)]
 pub struct AppState {
-    pub pool: SqlitePool,
+    pub pool: DbPool,
     pub store: Arc<dyn RepoStore>,
     pub locks: Arc<LockRegistry>,
     pub authz: AuthorizationService,

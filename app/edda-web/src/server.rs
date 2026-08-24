@@ -163,10 +163,12 @@ pub async fn create_repo(
         .await
         .map_err(|err| ServerFnError::new(err.to_string()))?;
 
-    if let Err(err) = edda_db::RepositoryRepo::insert(&shared.pool, &repository).await {
-        return Err(ServerFnError::new(err.to_string()));
-    }
-    edda_db::RepoAccessRepo::grant_owner(&shared.pool, repository.id, user.id)
+    // Inserting the row and granting its creator ownership happen inside
+    // one transaction (`insert_with_owner`, added in plan.local.md §17
+    // Phase 3) — previously two separate statements, which masked an
+    // atomicity gap SQLite's single-writer serialization happened to hide
+    // but PostgreSQL's real concurrency would not.
+    edda_db::RepositoryRepo::insert_with_owner(&shared.pool, &repository, user.id)
         .await
         .map_err(|err| ServerFnError::new(err.to_string()))?;
     Ok(())

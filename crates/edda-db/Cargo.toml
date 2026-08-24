@@ -6,13 +6,23 @@ authors.workspace = true
 
 # The only crate in the workspace allowed to contain `sqlx::query!` — see
 # plan.local.md §3.3/§16 (smell S3). Exposes narrow, intention-revealing
-# repository structs; never exposes a raw query or a `SqlitePool` method
-# beyond what those structs need internally.
+# repository structs; never exposes a raw query or a backend-specific pool
+# type beyond what those structs need internally (`DbPool`).
+#
+# Exactly one of `sqlite`/`postgres` below is compiled in at a time
+# (plan.local.md §17 Phase 3) — `sqlx::query!` cannot be compile-time-
+# checked against two backends in one build, so backend selection is a
+# Cargo feature (build-time), not a runtime config value.
 [dependencies]
 edda-domain = { workspace = true }
 serde_json = { workspace = true }
-sqlx = { workspace = true, features = ["sqlite", "runtime-tokio", "migrate", "macros"] }
+sqlx = { workspace = true, features = ["runtime-tokio", "migrate", "macros"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
+
+[features]
+default = ["sqlite"]
+sqlite = ["sqlx/sqlite"]
+postgres = ["sqlx/postgres"]

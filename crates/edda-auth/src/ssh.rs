@@ -5,10 +5,9 @@
 //! used at this boundary.
 
 use russh::keys::{HashAlg, PublicKey};
-use sqlx::SqlitePool;
 
 use edda_db::ssh_key_repo::InsertSshKeyError;
-use edda_db::SshKeyRepo;
+use edda_db::{DbPool, SshKeyRepo};
 use edda_domain::{SshKey, SshKeyId, User, UserId};
 
 #[derive(Debug, thiserror::Error)]
@@ -45,7 +44,7 @@ pub fn fingerprint(key: &PublicKey) -> String {
 /// `russh::keys`' own OpenSSH-format parser (`review.local.md`'s
 /// dependency policy: no hand-rolled key-format parsing).
 pub async fn add(
-    pool: &SqlitePool,
+    pool: &DbPool,
     user_id: UserId,
     title: &str,
     public_key_openssh: &str,
@@ -72,15 +71,11 @@ pub async fn add(
     })
 }
 
-pub async fn list(pool: &SqlitePool, user_id: UserId) -> Result<Vec<SshKey>, sqlx::Error> {
+pub async fn list(pool: &DbPool, user_id: UserId) -> Result<Vec<SshKey>, sqlx::Error> {
     SshKeyRepo::list_for_user(pool, user_id).await
 }
 
-pub async fn revoke(
-    pool: &SqlitePool,
-    user_id: UserId,
-    key_id: SshKeyId,
-) -> Result<bool, sqlx::Error> {
+pub async fn revoke(pool: &DbPool, user_id: UserId, key_id: SshKeyId) -> Result<bool, sqlx::Error> {
     SshKeyRepo::revoke(pool, user_id, key_id).await
 }
 
@@ -89,7 +84,7 @@ pub async fn revoke(
 /// delegates to. `None` for an unregistered key; the caller rejects the
 /// same way regardless of *why* (unknown fingerprint vs. any other
 /// reason), so this deliberately doesn't distinguish those cases.
-pub async fn authenticate(pool: &SqlitePool, key: &PublicKey) -> Option<User> {
+pub async fn authenticate(pool: &DbPool, key: &PublicKey) -> Option<User> {
     let fp = fingerprint(key);
     SshKeyRepo::find_by_fingerprint(pool, &fp)
         .await

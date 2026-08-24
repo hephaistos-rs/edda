@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.id, r.owner_type, r.owner_id, r.name, r.description, r.visibility, u.username as owner_username\n               FROM repositories r JOIN users u ON u.id = r.owner_id AND r.owner_type = 'user'\n               ORDER BY u.username, r.name",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "owner_type",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "owner_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "name",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "visibility",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "owner_username",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "a38e7cedf4d74f34df7bcfa452ff2a6c426170cb8d8b39cd3e390c037e65474f"
+}

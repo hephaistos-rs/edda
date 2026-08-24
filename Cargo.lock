@@ -1960,35 +1960,109 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 name = "edda"
 version = "0.1.0"
 dependencies = [
- "argon2",
  "axum",
  "axum-login",
- "base64",
  "dioxus",
  "dioxus-free-icons",
+ "edda-auth",
+ "edda-db",
+ "edda-domain",
+ "edda-git",
+ "edda-http",
+ "edda-telemetry",
+ "gloo-net 0.7.0",
+ "serde",
+ "sqlx",
+ "tokio",
+ "tower-sessions",
+ "tower-sessions-sqlx-store",
+ "tracing",
+ "web-time",
+]
+
+[[package]]
+name = "edda-auth"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "axum-login",
+ "base64",
+ "edda-db",
+ "edda-domain",
+ "serde",
+ "sha2",
+ "sqlx",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
+name = "edda-db"
+version = "0.1.0"
+dependencies = [
+ "edda-domain",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "edda-domain"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.20",
+ "uuid",
+]
+
+[[package]]
+name = "edda-git"
+version = "0.1.0"
+dependencies = [
+ "edda-domain",
+ "edda-telemetry",
  "flate2",
  "gix",
  "gix-hash",
  "gix-object",
- "gloo-net 0.7.0",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "edda-http"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "axum-login",
+ "base64",
+ "edda-auth",
+ "edda-db",
+ "edda-domain",
+ "edda-git",
+ "edda-telemetry",
+ "gix",
+ "serde",
+ "sqlx",
+ "tokio",
+ "tower-http",
+ "tracing",
+]
+
+[[package]]
+name = "edda-telemetry"
+version = "0.1.0"
+dependencies = [
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
- "serde",
- "sha2",
- "sqlx",
- "thiserror 2.0.20",
  "tokio",
- "tower-http",
- "tower-sessions",
- "tower-sessions-sqlx-store",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "uuid",
- "web-time",
 ]
 
 [[package]]
@@ -8120,6 +8194,7 @@ checksum = "2cefc03fd367c0c6d4305de1b312cf00248c4114f4a0418ce6a6af769e3b0bd9"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 

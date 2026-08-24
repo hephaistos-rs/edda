@@ -1,0 +1,23 @@
+[package]
+name = "edda-auth"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+# Authentication (proving identity: passwords, sessions, tokens) and
+# authorization (deciding what an identity may do) — two modules in one
+# crate, not two crates; see plan.local.md §3.3/§3.4 for why that split
+# was rejected. `authz`'s job is strictly "fetch what edda-domain's pure
+# functions need, then call them" — it must never contain a permission
+# *decision* itself.
+[dependencies]
+argon2 = { workspace = true }
+axum-login = { workspace = true }
+base64 = { workspace = true }
+edda-db = { workspace = true }
+edda-domain = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+sha2 = { workspace = true }
+sqlx = { workspace = true, features = ["sqlite"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }

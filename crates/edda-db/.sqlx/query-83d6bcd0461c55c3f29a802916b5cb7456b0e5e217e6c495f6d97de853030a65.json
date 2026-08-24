@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO access_tokens (id, user_id, name, token_hash, repository_scope) VALUES (?, ?, ?, ?, ?) RETURNING created_at",
+  "describe": {
+    "columns": [
+      {
+        "name": "created_at",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "83d6bcd0461c55c3f29a802916b5cb7456b0e5e217e6c495f6d97de853030a65"
+}

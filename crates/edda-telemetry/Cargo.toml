@@ -1,0 +1,21 @@
+[package]
+name = "edda-telemetry"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+# Structured logging, tracing, and OpenTelemetry export setup. Owns no
+# domain-specific span/metric definitions of its own — every other crate
+# instruments itself with plain `tracing` (a normal external dependency,
+# not this crate) and calls this crate's `metrics::record_*` helpers; this
+# crate owns only the *mechanism*. See plan.local.md §3.3.
+[dependencies]
+opentelemetry = { workspace = true }
+opentelemetry-appender-tracing = { workspace = true }
+opentelemetry-otlp = { workspace = true, default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "metrics", "logs"] }
+opentelemetry-semantic-conventions = { workspace = true, features = ["semconv_experimental"] }
+opentelemetry_sdk = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json", "registry"] }

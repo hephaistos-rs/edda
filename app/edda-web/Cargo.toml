@@ -1,0 +1,61 @@
+[package]
+name = "edda"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+# The workspace's composition root — see plan.local.md §3.3. This is the
+# only package that needs to compile for both the wasm32 client and the
+# native server (Dioxus fullstack's own constraint), so it's also the only
+# package where every server-only dependency below must stay behind
+# `dep:`/the `server` feature, exactly as in the pre-restructuring
+# single-crate `Cargo.toml` this one replaces.
+[dependencies]
+axum = { workspace = true, optional = true }
+axum-login = { workspace = true, optional = true }
+dioxus = { workspace = true, features = ["router", "fullstack"] }
+dioxus-free-icons = { workspace = true, features = ["lucide"] }
+edda-auth = { workspace = true, optional = true }
+edda-db = { workspace = true, optional = true }
+edda-domain = { workspace = true, optional = true }
+edda-git = { workspace = true, optional = true }
+edda-http = { workspace = true, optional = true }
+edda-telemetry = { workspace = true, optional = true }
+gloo-net = { workspace = true, features = ["json"], optional = true }
+serde = { workspace = true, features = ["derive"] }
+sqlx = { workspace = true, features = ["sqlite"], optional = true }
+tokio = { workspace = true, features = ["sync", "rt", "signal", "time"], optional = true }
+tower-sessions = { workspace = true, optional = true }
+tower-sessions-sqlx-store = { workspace = true, features = ["sqlite"], optional = true }
+# Not optional: `tracing`'s macros (`info!`, `#[instrument]`, ...) are used
+# from server-only code paths, but the facade itself is tiny and
+# side-effect-free to depend on — Dioxus already pulls it in transitively
+# either way.
+tracing = { workspace = true }
+# Not optional: used from `ui/`, which compiles for both the wasm client and
+# the native server. Plain `std::time::SystemTime::now()` panics on
+# wasm32-unknown-unknown (no wall clock without a JS shim) — this is a
+# drop-in replacement that's `std::time` on every other target and backed by
+# `Date.now()` on wasm32.
+web-time = { workspace = true }
+
+[features]
+default = ["web"]
+web = ["dioxus/web", "dep:gloo-net"]
+desktop = ["dioxus/desktop"]
+mobile = ["dioxus/mobile"]
+server = [
+    "dioxus/server",
+    "dep:axum",
+    "dep:axum-login",
+    "dep:edda-auth",
+    "dep:edda-db",
+    "dep:edda-domain",
+    "dep:edda-git",
+    "dep:edda-http",
+    "dep:edda-telemetry",
+    "dep:sqlx",
+    "dep:tokio",
+    "dep:tower-sessions",
+    "dep:tower-sessions-sqlx-store",
+]

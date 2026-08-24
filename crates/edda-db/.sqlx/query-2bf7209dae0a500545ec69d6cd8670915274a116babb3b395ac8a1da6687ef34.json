@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM repo_access WHERE repository_id = ? AND user_id = ? AND role != 'owner'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "2bf7209dae0a500545ec69d6cd8670915274a116babb3b395ac8a1da6687ef34"
+}

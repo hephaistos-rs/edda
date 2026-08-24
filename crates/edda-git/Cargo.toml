@@ -1,0 +1,19 @@
+[package]
+name = "edda-git"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+# Git repository storage and gix-backed operations — server-only,
+# transport-agnostic (see plan.local.md §3.3/§8). Both `edda-http`'s
+# git-over-HTTP bridge and a future `edda-ssh`'s git-over-SSH bridge call
+# into this crate; it knows nothing about either transport.
+[dependencies]
+edda-domain = { workspace = true }
+edda-telemetry = { workspace = true }
+flate2 = { workspace = true }
+gix = { workspace = true }
+gix-hash = { workspace = true, features = ["sha1"] }
+gix-object = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }

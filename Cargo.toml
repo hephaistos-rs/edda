@@ -1,88 +1,59 @@
-[package]
-name = "edda"
-version = "0.1.0"
-authors = ["Damianko135 <139293484+Damianko135@users.noreply.github.com>"]
-edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[dependencies]
-argon2 = { version = "0.5.3", optional = true }
-axum = { version = "0.8.9", optional = true }
-base64 = { version = "0.22.1", optional = true }
-axum-login = { version = "0.18.0", optional = true }
-dioxus = { version = "0.7.1", features = ["router", "fullstack"] }
-dioxus-free-icons = { version = "0.10.0", features = ["lucide"] }
-flate2 = { version = "1.1.9", optional = true }
-# Server-only: reads/writes repos on disk. Kept optional so it never enters
-# the wasm client build (it wouldn't compile there, and doesn't need to).
-gix = { version = "0.86.0", optional = true }
-gix-hash = { version = "0.26.0", optional = true, features = ["sha1"] }
-gix-object = { version = "0.63.0", optional = true }
-gloo-net = { version = "0.7.0", features = ["json"], optional = true }
-# Server-only observability stack: tracing is the application's instrumentation
-# API; the opentelemetry* crates are purely an optional export path underneath
-# it (see src/telemetry). Versions verified as a mutually-compatible set
-# against docs.rs at implementation time, not copied from an old tutorial.
-opentelemetry = { version = "0.32.0", optional = true }
-opentelemetry-appender-tracing = { version = "0.32.0", optional = true }
-opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "metrics", "logs"], optional = true }
-opentelemetry-semantic-conventions = { version = "0.32.1", features = ["semconv_experimental"], optional = true }
-opentelemetry_sdk = { version = "0.32.1", optional = true }
-serde = { version = "1.0.229", features = ["derive"] }
-sha2 = { version = "0.10.9", optional = true }
-sqlx = { version = "0.8.6", features = ["sqlite", "runtime-tokio", "migrate", "macros"], optional = true }
-thiserror = { version = "2.0.20", optional = true }
-# "signal"/"time" are pulled in for this crate's own graceful-shutdown code
-# (src/main.rs) — cargo's feature unification means dioxus's own tokio usage
-# likely already enables them, but this crate shouldn't rely on that
-# implicitly for code it directly calls.
-tokio = { version = "1.53.1", features = ["sync", "rt", "signal", "time"], optional = true }
-tower-http = { version = "0.6.11", features = ["trace"], optional = true }
-tower-sessions = { version = "0.14.0", optional = true }
-tower-sessions-sqlx-store = { version = "0.15.0", features = ["sqlite"], optional = true }
-# Not optional: `tracing`'s macros (`info!`, `#[instrument]`, ...) are used
-# from server-only modules, but the facade itself is tiny and side-effect-free
-# to depend on — Dioxus already pulls it in transitively either way.
-tracing = "0.1.44"
-tracing-opentelemetry = { version = "0.33.0", optional = true }
-tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json", "registry"], optional = true }
-uuid = { version = "1.24.1", features = ["v7"], optional = true }
-# Not optional: used from `ui/`, which compiles for both the wasm client and
-# the native server. Plain `std::time::SystemTime::now()` panics on
-# wasm32-unknown-unknown (no wall clock without a JS shim) — this is a
-# drop-in replacement that's `std::time` on every other target and backed by
-# `Date.now()` on wasm32.
-web-time = "1.1.0"
-
-[features]
-default = ["web"]
-web = ["dioxus/web", "dep:gloo-net"]
-desktop = ["dioxus/desktop"]
-mobile = ["dioxus/mobile"]
-server = [
-    "dioxus/server",
-    "dep:gix",
-    "dep:axum",
-    "dep:base64",
-    "dep:tokio",
-    "dep:flate2",
-    "dep:gix-hash",
-    "dep:gix-object",
-    "dep:sqlx",
-    "dep:tower-sessions",
-    "dep:tower-sessions-sqlx-store",
-    "dep:axum-login",
-    "dep:argon2",
-    "dep:thiserror",
-    "dep:uuid",
-    "dep:sha2",
-    "dep:opentelemetry",
-    "dep:opentelemetry-appender-tracing",
-    "dep:opentelemetry-otlp",
-    "dep:opentelemetry-semantic-conventions",
-    "dep:opentelemetry_sdk",
-    "dep:tower-http",
-    "dep:tracing-opentelemetry",
-    "dep:tracing-subscriber",
+[workspace]
+resolver = "2"
+members = [
+    "crates/edda-domain",
+    "crates/edda-db",
+    "crates/edda-git",
+    "crates/edda-auth",
+    "crates/edda-http",
+    "crates/edda-telemetry",
+    "app/edda-web",
 ]
+default-members = ["app/edda-web"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Damianko135 <139293484+Damianko135@users.noreply.github.com>"]
+
+# Centralized so every crate that needs a shared dependency (e.g. `serde`
+# on both `edda-domain` and `edda-db`) references the same resolved
+# version — see plan.local.md §3 for the workspace-crate rationale.
+[workspace.dependencies]
+edda-domain = { path = "crates/edda-domain" }
+edda-db = { path = "crates/edda-db" }
+edda-git = { path = "crates/edda-git" }
+edda-auth = { path = "crates/edda-auth" }
+edda-http = { path = "crates/edda-http" }
+edda-telemetry = { path = "crates/edda-telemetry" }
+
+argon2 = "0.5.3"
+axum = "0.8.9"
+axum-login = "0.18.0"
+base64 = "0.22.1"
+dioxus = "0.7.1"
+dioxus-free-icons = "0.10.0"
+flate2 = "1.1.9"
+gix = "0.86.0"
+gix-hash = "0.26.0"
+gix-object = "0.63.0"
+gloo-net = "0.7.0"
+opentelemetry = "0.32.0"
+opentelemetry-appender-tracing = "0.32.0"
+opentelemetry-otlp = { version = "0.32.0", default-features = false }
+opentelemetry-semantic-conventions = "0.32.1"
+opentelemetry_sdk = "0.32.1"
+serde = "1.0.229"
+serde_json = "1.0.145"
+sha2 = "0.10.9"
+sqlx = "0.8.6"
+thiserror = "2.0.20"
+tokio = "1.53.1"
+tower-http = "0.6.11"
+tower-sessions = "0.14.0"
+tower-sessions-sqlx-store = "0.15.0"
+tracing = "0.1.44"
+tracing-opentelemetry = "0.33.0"
+tracing-subscriber = "0.3.23"
+uuid = "1.24.1"
+web-time = "1.1.0"

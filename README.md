@@ -49,10 +49,11 @@ See `.env.example` for the full list, including the observability variables docu
 First-time setup: `cp .env.example .env` — needed for `sqlx`'s query macros to use the committed `.sqlx/` cache instead of requiring a live database at build time.
 
 ```bash
+cd app/edda-web
 dx serve --platform web
 ```
 
-runs the client/server dev loop with hot reload. Use `--platform desktop` to run it as a desktop app instead. Tailwind is compiled automatically as of Dioxus 0.7 — no separate Tailwind install needed unless you want to customize the input/output paths (see `dioxus.toml`) or use Tailwind plugins, in which case install the [Tailwind CLI](https://tailwindcss.com/docs/installation/tailwind-cli) and run it directly:
+runs the client/server dev loop with hot reload — `dx` locates `Dioxus.toml` in the current directory, so this needs to run from `app/edda-web`, not the workspace root. Use `--platform desktop` to run it as a desktop app instead. Tailwind is compiled automatically as of Dioxus 0.7 — no separate Tailwind install needed unless you want to customize the input/output paths (see `app/edda-web/Dioxus.toml`) or use Tailwind plugins, in which case install the [Tailwind CLI](https://tailwindcss.com/docs/installation/tailwind-cli) and run it directly:
 
 ```bash
 npx @tailwindcss/cli -i ./input.css -o ./assets/tailwind.css --watch
@@ -60,20 +61,25 @@ npx @tailwindcss/cli -i ./input.css -o ./assets/tailwind.css --watch
 
 ### Project layout
 
+Edda is a Cargo workspace: a functional core of pure domain logic, thin
+I/O-performing "shell" crates around it, and a composition root
+(`app/edda-web`) that wires them together and hosts the Dioxus UI. See
+`plan.local.md` §2–§3 for the full architectural rationale.
+
 ```
-src/
-├─ main.rs        # entrypoints: native server (feature "server") and wasm/desktop client
-├─ server/        # Dioxus server functions — the typed RPC boundary between client and server
-├─ api/           # git smart-HTTP bridge (clone/push) — server-only
-├─ auth/          # accounts, sessions, personal access tokens — server-only
-├─ git/           # repository storage and gix-backed operations — server-only
-├─ db/            # SQLite pool setup — server-only
-├─ migrations/    # embedded SQL migrations — server-only
-├─ telemetry/     # tracing/OpenTelemetry setup — server-only, see below
-└─ ui/            # components, layouts, and pages — compiles for client and server
+crates/
+├─ edda-domain/     # entities, invariants, pure authorization/business-rule functions — no I/O
+├─ edda-db/         # sqlx pool, embedded migrations, one repository struct per aggregate
+├─ edda-git/        # repository storage and gix-backed operations — transport-agnostic
+├─ edda-auth/       # authentication (passwords/sessions/tokens) and the authorization service
+├─ edda-http/       # axum app: git smart-HTTP bridge, account/token/collaborator routes
+└─ edda-telemetry/  # tracing/OpenTelemetry setup, see below
+app/
+└─ edda-web/        # the composition root: main.rs, Dioxus server functions, UI (components/layouts/pages)
+migrations/          # SQL migration history, applied by edda-db (kept at the workspace root for `sqlx-cli` convenience)
 ```
 
-`server`-only modules never enter the wasm/web client build; see `Cargo.toml`'s feature list.
+`edda-web` is the only package built for both the wasm32 client and the native server (Dioxus fullstack's own constraint) — every other crate above is server-only, pulled in by `edda-web` behind its `server` feature, and never enters the wasm/web client build; see `app/edda-web/Cargo.toml`'s feature list.
 
 ## Observability
 

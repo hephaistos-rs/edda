@@ -1,5 +1,4 @@
--- MySQL/MariaDB counterpart of sqlite/20260824000003_repo_access.up.sql
--- (plan.local.md §17 Phase 3, revised 2026-08-25).
+-- MySQL/MariaDB counterpart of sqlite/20260824000003_repo_access.up.sql.
 --
 -- The one-owner-per-repository invariant: SQLite and PostgreSQL both
 -- enforce it with a partial/filtered unique index

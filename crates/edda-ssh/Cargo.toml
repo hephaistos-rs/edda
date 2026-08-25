@@ -9,7 +9,7 @@ authors.workspace = true
 # framing). Delegates every actual git operation to `edda-git::protocol`
 # (shared verbatim with `edda-http`'s bridge) and every access decision to
 # `edda-auth::AuthorizationService` — this crate must never reimplement
-# either. See plan.local.md §17 Phase 2.
+# either.
 [dependencies]
 bytes = { workspace = true }
 edda-auth = { workspace = true }
@@ -19,11 +19,10 @@ edda-git = { workspace = true }
 gix = { workspace = true }
 rand = { workspace = true }
 # `russh`'s default features pull in `aws-lc-rs` (→ `aws-lc-sys`, a
-# cmake-built C dependency). Selecting the `ring` crypto backend instead —
-# see plan.local.md §23 (the crypto-backend choice explicitly left open
-# there, resolved here) and §10's characterization of `ring` as "largely
-# pure Rust with some bundled, `cc`-compiled assembly," a materially
-# lighter native footprint than a full external C-library build. `rsa` is
+# cmake-built C dependency). Selecting the `ring` crypto backend instead,
+# since it's largely pure Rust with some bundled, `cc`-compiled assembly —
+# a materially lighter native footprint than a full external C-library
+# build. `rsa` is
 # kept (real SSH clients still commonly hold RSA keys); `flate2`
 # (SSH-transport-level compression, unrelated to git's own zlib usage) is
 # dropped since nothing requires it.

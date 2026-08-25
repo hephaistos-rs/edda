@@ -1,8 +1,8 @@
 use crate::ids::{RepositoryId, UserId};
 
 /// Who owns a repository. `User` is the only reachable variant until
-/// organizations exist (plan.local.md §17 Phase 7) — kept as an enum now,
-/// not a plain `UserId` column, so that a future `Organization` variant is
+/// organizations exist — kept as an enum now, not a plain `UserId`
+/// column, so that a future `Organization` variant is
 /// an additive change to this type rather than a breaking one everywhere
 /// `RepositoryOwner` is matched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +35,7 @@ impl Visibility {
 
 impl RepositoryOwner {
     /// `repositories.owner_type`'s stored value — only `"user"` is
-    /// reachable until organizations exist (plan.local.md §17 Phase 7).
+    /// reachable until organizations exist.
     pub const fn owner_type_db_str(self) -> &'static str {
         match self {
             RepositoryOwner::User(_) => "user",
@@ -53,8 +53,8 @@ impl RepositoryOwner {
 /// owns. Its `id`, not its `{owner}/{name}` URL/clone-path form (derived,
 /// and could change if the owning account is ever transferred in a later
 /// phase), is what every other entity (pull requests, issues, access
-/// grants) references. See plan.local.md §4.2/§16 (smell S5) for why this
-/// replaced the pre-restructuring filesystem-path-derived identity model.
+/// grants) references — a stable identity that survives an owner rename
+/// or transfer, unlike a filesystem-path-derived identity would.
 ///
 /// Deliberately excludes anything only `gix` can answer (default branch,
 /// branch count, emptiness, last commit) — those live in `edda-git`'s own

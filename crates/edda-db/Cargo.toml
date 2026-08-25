@@ -4,15 +4,15 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 
-# The only crate in the workspace allowed to issue SQL — see
-# plan.local.md §3.3/§16 (smell S3). Exposes narrow, intention-revealing
-# repository structs; never exposes a raw query or a backend-specific pool
-# type beyond what those structs need internally (`DbPool`).
+# The only crate in the workspace allowed to issue SQL. Exposes narrow,
+# intention-revealing repository structs; never exposes a raw query or a
+# backend-specific pool type beyond what those structs need internally
+# (`DbPool`).
 #
 # Backend (SQLite/PostgreSQL/MySQL-MariaDB) is a runtime choice — one
 # compiled binary, all three drivers linked in via `sqlx`'s `any` feature,
-# selected at connect time by `EDDA_DATABASE_URL`'s scheme (plan.local.md
-# §17 Phase 3, revised 2026-08-25). This is why `sqlx::query!` (compile-
+# selected at connect time by `EDDA_DATABASE_URL`'s scheme. This is why
+# `sqlx::query!` (compile-
 # time-checked, but tied to one fixed schema) isn't used here anymore —
 # every query goes through the runtime-checked `sqlx::query`/`query_as`
 # instead, so `macros` isn't needed and the `.sqlx/` offline cache from

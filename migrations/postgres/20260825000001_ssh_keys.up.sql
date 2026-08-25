@@ -1,5 +1,4 @@
--- PostgreSQL counterpart of sqlite/20260825000001_ssh_keys.up.sql
--- (plan.local.md §17 Phase 3).
+-- PostgreSQL counterpart of sqlite/20260825000001_ssh_keys.up.sql.
 CREATE TABLE ssh_keys (
     id            TEXT PRIMARY KEY NOT NULL,
     user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

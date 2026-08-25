@@ -1,11 +1,9 @@
 //! Persistence: pool setup, embedded migrations, and one narrow
 //! repository struct per aggregate. This is the only crate in the
-//! workspace that issues SQL — see this crate's `Cargo.toml` doc comment
-//! and plan.local.md §3.3/§16 (smell S3).
+//! workspace that issues SQL — see this crate's `Cargo.toml` doc comment.
 //!
 //! Backend (SQLite/PostgreSQL/MySQL-MariaDB) is a **runtime** choice, not
-//! a build-time one (plan.local.md §17 Phase 3, revised 2026-08-25):
-//! `DbPool` wraps `sqlx::AnyPool`, and every query is issued as a
+//! a build-time one: `DbPool` wraps `sqlx::AnyPool`, and every query is issued as a
 //! runtime-checked `sqlx::query`/`query_as` call rather than the
 //! compile-time-checked `sqlx::query!` macro — `sqlx::Any` cannot use
 //! that macro (it has no single fixed schema to check against at build

@@ -2,8 +2,7 @@
 //! lifecycle, public-key authentication, exec-command parsing, channel I/O
 //! framing — and delegates every actual git operation to
 //! `edda_git::protocol` (shared with `edda-http`'s bridge) and every
-//! access decision to `edda_auth::AuthorizationService`. See
-//! plan.local.md §17 Phase 2.
+//! access decision to `edda_auth::AuthorizationService`.
 
 mod command;
 mod handler;

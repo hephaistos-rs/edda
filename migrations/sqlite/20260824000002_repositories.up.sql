@@ -1,15 +1,13 @@
--- A repository is now a first-class row with a stable id, replacing the
--- pre-restructuring model where a repo's identity of record was its
--- `{owner}/{repo}` filesystem path (plan.local.md §4.2/§16 smell S5). The
--- `{owner}/{repo}` string is still how a repo is addressed in URLs and
--- clone paths, but it's derived (via a join to the owning account) and
--- enforced unique below, not treated as the primary key.
+-- A repository is a first-class row with a stable id — the `{owner}/{repo}`
+-- string is how a repo is addressed in URLs and clone paths, but it's
+-- derived (via a join to the owning account) and enforced unique below,
+-- not treated as the primary key.
 --
 -- `owner_type`/`owner_id` are a polymorphic reference rather than a plain
 -- `owner_id REFERENCES users(id)` foreign key: SQLite can't express a
 -- foreign key that targets one of two different tables depending on a
--- sibling column, and organizations don't exist yet (plan.local.md §17
--- Phase 7) to be the second target. Only `'user'` is accepted today; the
+-- sibling column, and organizations don't exist yet to be the second
+-- target. Only `'user'` is accepted today; the
 -- `CHECK` widens (and, ideally, a real foreign-key-shaped constraint is
 -- reconsidered) in the migration that introduces organizations.
 -- No `default_branch` (or any other column `gix` can answer): that data

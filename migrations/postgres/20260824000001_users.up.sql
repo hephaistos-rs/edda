@@ -1,5 +1,5 @@
--- PostgreSQL counterpart of sqlite/20260824000001_users.up.sql (plan.local.md
--- §17 Phase 3). No STRICT (Postgres is natively strictly typed). Case-
+-- PostgreSQL counterpart of sqlite/20260824000001_users.up.sql. No STRICT
+-- (Postgres is natively strictly typed). Case-
 -- insensitive uniqueness is index-based (LOWER(...)) rather than a
 -- COLLATE NOCASE column, to avoid requiring the citext extension.
 CREATE TABLE users (

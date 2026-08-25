@@ -1,7 +1,7 @@
--- PostgreSQL counterpart of sqlite/20260824000003_repo_access.up.sql
--- (plan.local.md §17 Phase 3). The one-owner-per-repository partial
--- unique index is supported natively by PostgreSQL (unlike MySQL/
--- MariaDB, per Phase 3's target-matrix decision) — kept unchanged.
+-- PostgreSQL counterpart of sqlite/20260824000003_repo_access.up.sql.
+-- The one-owner-per-repository partial unique index is supported
+-- natively by PostgreSQL (unlike MySQL/MariaDB, which needs the
+-- generated-column workaround in the mysql migration) — kept unchanged.
 CREATE TABLE repo_access (
     repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
     user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

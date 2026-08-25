@@ -1,6 +1,5 @@
--- MySQL/MariaDB counterpart of sqlite/20260824000002_repositories.up.sql
--- (plan.local.md §17 Phase 3, revised 2026-08-25). `description` is
--- `VARCHAR`, not `TEXT`: confirmed directly against `sqlx-mysql`'s
+-- MySQL/MariaDB counterpart of sqlite/20260824000002_repositories.up.sql.
+-- `description` is `VARCHAR`, not `TEXT`: confirmed directly against `sqlx-mysql`'s
 -- source (`any.rs`) that MySQL's wire protocol reports `TEXT` using the
 -- same column-type code as `BLOB`, which `sqlx`'s `Any` layer maps to
 -- `AnyTypeInfoKind::Blob` — decoding it as a Rust `String` then fails at

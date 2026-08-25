@@ -1,6 +1,6 @@
--- PostgreSQL counterpart of sqlite/20260824000004_access_tokens.up.sql
--- (plan.local.md §17 Phase 3). RETURNING (relied on by AccessTokenRepo)
--- is native to PostgreSQL — no change needed there.
+-- PostgreSQL counterpart of sqlite/20260824000004_access_tokens.up.sql.
+-- RETURNING (relied on by AccessTokenRepo) is native to PostgreSQL — no
+-- change needed there.
 CREATE TABLE access_tokens (
     id                TEXT PRIMARY KEY NOT NULL,
     user_id           TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

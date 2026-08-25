@@ -8,8 +8,7 @@ authors.workspace = true
 # collaborator-management routes, and cross-cutting middleware
 # (observability, health check). Handlers call into `edda-auth`'s
 # `AuthorizationService` and `edda-domain`'s pure functions for every
-# permission decision — they never re-derive access themselves. See
-# plan.local.md §3.3/§10.
+# permission decision — they never re-derive access themselves.
 [dependencies]
 axum = { workspace = true }
 axum-login = { workspace = true }
@@ -26,7 +25,7 @@ serde = { workspace = true, features = ["derive"] }
 # `sqlx::AnyPool` via `edda_db::DbPool`'s exposed `.any` field, so it
 # needs the `any` feature enabled — the concrete driver features come
 # from `edda-db`, which always compiles all three in (runtime backend
-# selection, plan.local.md §17 Phase 3).
+# selection).
 sqlx = { workspace = true, features = ["any"] }
 tower-http = { workspace = true, features = ["trace"] }
 tracing = { workspace = true }

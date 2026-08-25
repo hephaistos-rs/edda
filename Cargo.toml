@@ -19,7 +19,7 @@ authors = ["Damianko135 <139293484+Damianko135@users.noreply.github.com>"]
 
 # Centralized so every crate that needs a shared dependency (e.g. `serde`
 # on both `edda-domain` and `edda-db`) references the same resolved
-# version — see plan.local.md §3 for the workspace-crate rationale.
+# version.
 [workspace.dependencies]
 edda-domain = { path = "crates/edda-domain" }
 edda-db = { path = "crates/edda-db" }
@@ -52,7 +52,7 @@ opentelemetry_sdk = "0.32.1"
 # `ssh_key::PrivateKey::random`'s `CryptoRng` bound.
 rand = { version = "0.10", features = ["thread_rng"] }
 # `ring` crypto backend selected over the `aws-lc-rs` default — see
-# `crates/edda-ssh/Cargo.toml`'s doc comment and plan.local.md §23.
+# `crates/edda-ssh/Cargo.toml`'s doc comment for the rationale.
 russh = { version = "0.63", default-features = false, features = ["ring", "rsa"] }
 serde = "1.0.229"
 serde_json = "1.0.145"

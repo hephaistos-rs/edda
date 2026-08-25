@@ -1,7 +1,7 @@
--- PostgreSQL counterpart of sqlite/20260824000002_repositories.up.sql
--- (plan.local.md §17 Phase 3). Identical shape to the SQLite version — no
--- portability hazards in this table (see that file's comments for the
--- polymorphic-owner reasoning, unchanged here).
+-- PostgreSQL counterpart of sqlite/20260824000002_repositories.up.sql.
+-- Identical shape to the SQLite version — no portability hazards in this
+-- table (see that file's comments for the polymorphic-owner reasoning,
+-- unchanged here).
 CREATE TABLE repositories (
     id             TEXT PRIMARY KEY NOT NULL,
     owner_type     TEXT NOT NULL CHECK (owner_type IN ('user')),

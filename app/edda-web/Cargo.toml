@@ -4,16 +4,14 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 
-# The workspace's composition root — see plan.local.md §3.3. This is the
-# only package that needs to compile for both the wasm32 client and the
-# native server (Dioxus fullstack's own constraint), so it's also the only
-# package where every server-only dependency below must stay behind
-# `dep:`/the `server` feature, exactly as in the pre-restructuring
-# single-crate `Cargo.toml` this one replaces.
+# The workspace's composition root. This is the only package that needs
+# to compile for both the wasm32 client and the native server (Dioxus
+# fullstack's own constraint), so it's also the only package where every
+# server-only dependency below must stay behind `dep:`/the `server`
+# feature.
 [dependencies]
 # Only for `session_store::AnySessionStore`'s `SessionStore` impl, which
-# must match that trait's own `#[async_trait]` shape (plan.local.md §17
-# Phase 3, revised 2026-08-25).
+# must match that trait's own `#[async_trait]` shape.
 async-trait = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
 axum-login = { workspace = true, optional = true }
@@ -30,7 +28,7 @@ gloo-net = { workspace = true, features = ["json"], optional = true }
 serde = { workspace = true, features = ["derive"] }
 # Backend (SQLite/PostgreSQL/MySQL-MariaDB) is a runtime choice, selected
 # by `EDDA_DATABASE_URL`'s scheme — one compiled binary, all three
-# drivers linked in (plan.local.md §17 Phase 3, revised 2026-08-25).
+# drivers linked in.
 # `tower-sessions-sqlx-store`'s session store is the one place this crate
 # still needs a *concrete* (not `AnyPool`) typed pool — it doesn't
 # support `sqlx::Any` — so `main.rs` opens a second, small, typed

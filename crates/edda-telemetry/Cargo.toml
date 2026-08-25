@@ -8,7 +8,7 @@ authors.workspace = true
 # domain-specific span/metric definitions of its own — every other crate
 # instruments itself with plain `tracing` (a normal external dependency,
 # not this crate) and calls this crate's `metrics::record_*` helpers; this
-# crate owns only the *mechanism*. See plan.local.md §3.3.
+# crate owns only the *mechanism*.
 [dependencies]
 opentelemetry = { workspace = true }
 opentelemetry-appender-tracing = { workspace = true }

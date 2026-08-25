@@ -1,7 +1,7 @@
 //! The authorization *service*: fetches whatever `edda-domain`'s pure
-//! authorization functions need (via `edda-db`) and calls them. See
-//! plan.local.md §7.2 — this module must never decide an outcome itself,
-//! only assemble the inputs a decision in `edda_domain::access` needs.
+//! authorization functions need (via `edda-db`) and calls them. This
+//! module must never decide an outcome itself, only assemble the inputs
+//! a decision in `edda_domain::access` needs.
 
 use edda_db::{DbPool, RepoAccessRepo, RepositoryRepo};
 use edda_domain::{

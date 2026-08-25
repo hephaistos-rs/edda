@@ -31,9 +31,9 @@ pub fn routes() -> Router<AppState> {
 /// The over-the-wire shape of a logged-in identity. Deliberately its own
 /// type, not a re-export of `edda_domain::User` — `edda-http` is a
 /// server-only crate, so anything it exposes has to be independently
-/// mirrored by `edda-web`'s wasm-compiled client code anyway (see
-/// plan.local.md §10.2's DTO-boundary discussion, applied here at the
-/// crate boundary rather than only at the public-API boundary).
+/// mirrored by `edda-web`'s wasm-compiled client code anyway; keeping a
+/// dedicated DTO at the crate boundary (not just the public HTTP API)
+/// avoids leaking domain types into the wasm build.
 #[derive(Debug, Serialize)]
 struct CurrentUserDto {
     id: String,

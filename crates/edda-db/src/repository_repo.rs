@@ -76,14 +76,13 @@ impl RepositoryRepo {
     }
 
     /// Inserts the repository and grants its creator the `Owner` role
-    /// atomically, inside one transaction — found missing at this
-    /// crate's original call site during Phase 3's audit (plan.local.md
-    /// §17 Phase 3): it used to call `insert` and `RepoAccessRepo::
-    /// grant_owner` as two separate top-level statements, which SQLite's
-    /// single-writer serialization happened to mask but a server-grade
-    /// backend's real MVCC concurrency would not (a reader could observe
-    /// a repository that exists with zero access grants). Callers that
-    /// used to do both steps themselves should call this instead.
+    /// atomically, inside one transaction. Calling `insert` and
+    /// `RepoAccessRepo::grant_owner` as two separate top-level statements
+    /// would let SQLite's single-writer serialization mask an atomicity
+    /// gap that a server-grade backend's real MVCC concurrency would not
+    /// (a reader could observe a repository that exists with zero access
+    /// grants). Callers must go through this method rather than the two
+    /// steps separately.
     pub async fn insert_with_owner(
         pool: &DbPool,
         repository: &Repository,
@@ -177,7 +176,7 @@ impl RepositoryRepo {
     /// Resolves the `{owner_username}/{repo_name}` form used in URLs and
     /// clone paths back to a `Repository` row — joins through `users`
     /// since only `User`-owned repositories exist until organizations
-    /// land (plan.local.md §17 Phase 8).
+    /// land.
     pub async fn find_by_owner_username_and_name(
         pool: &DbPool,
         owner_username: &str,
@@ -237,8 +236,8 @@ impl RepositoryRepo {
     /// Every repository in the instance. `edda-http` filters this down to
     /// what the requesting actor may actually see (public repos plus any
     /// private repo they hold a grant on) — there is no per-owner or
-    /// per-visibility variant yet because nothing in Phase 1 needs one at
-    /// the instance's current expected scale (plan.local.md §5.8).
+    /// per-visibility variant yet because nothing needs one at the
+    /// instance's current expected scale.
     pub async fn list_all(pool: &DbPool) -> Result<Vec<Repository>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT id, owner_type, owner_id, name, description, visibility FROM repositories ORDER BY owner_id, name",

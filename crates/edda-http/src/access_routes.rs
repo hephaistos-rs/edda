@@ -49,13 +49,11 @@ struct CollaboratorDto {
     added_at: i64,
 }
 
-// Collaborator management stays Owner-only (`check_danger_zone`), matching
-// the pre-restructuring behavior exactly, even though the four-tier role
-// model's own target capability matrix (plan.local.md §4.2/§4.7) puts this
-// at Admin+ — nothing in Phase 1 grants Admin to anyone but the owner
-// (Owner already satisfies an Admin+ check), so this is a deliberately
-// conservative choice for this phase, not yet the final target; see the
-// Phase 1 completion report.
+// Collaborator management stays Owner-only (`check_danger_zone`) even
+// though the four-tier role model's own target capability matrix would
+// allow Admin+ here — nothing currently grants Admin to anyone but the
+// owner (Owner already satisfies an Admin+ check), so this is a
+// deliberately conservative choice, not yet the final target.
 #[tracing::instrument(name = "access.collaborator.add", skip_all, fields(repo.owner = %owner, repo.name = %name))]
 async fn add_collaborator(
     State(state): State<AppState>,

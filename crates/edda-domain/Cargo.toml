@@ -5,8 +5,8 @@ edition.workspace = true
 authors.workspace = true
 
 # This crate is the workspace's pure functional core: entities, invariants,
-# and authorization/business-rule decisions, with no I/O of any kind — see
-# plan.local.md §3.3. It must never gain a `sqlx`, `axum`, `gix`, or `tokio`
+# and authorization/business-rule decisions, with no I/O of any kind. It
+# must never gain a `sqlx`, `axum`, `gix`, or `tokio`
 # dependency; every other crate in the workspace may depend on it, and it
 # must never depend on any of them.
 [dependencies]

@@ -23,8 +23,9 @@ pub struct CommitDto {
 
 /// Combines a DB-level `edda_domain::Repository` (identity, description,
 /// visibility) with a git-level `edda_git::RepoSummary` (branch info, last
-/// commit) — the two now live in different crates (plan.local.md §5.1),
-/// so building this DTO is a join of both rather than a single `From`.
+/// commit) — the two live in different crates (database identity in
+/// `edda-db`, git-derived summary in `edda-git`), so building this DTO
+/// is a join of both rather than a single `From`.
 #[cfg(feature = "server")]
 fn repo_dto(
     repository: &edda_domain::Repository,
@@ -157,17 +158,16 @@ pub async fn create_repo(
     // Git-directory creation and the database row are two systems with no
     // shared transaction — create the git side first (cheap to leave
     // behind an empty bare repo if the DB insert then fails; the reverse,
-    // a DB row pointing at a repo that was never created, is worse) per
-    // plan.local.md §5.7/§9.2's ordering rule.
+    // a DB row pointing at a repo that was never created, is worse).
     edda_git::create_repo(shared.store.as_ref(), &shared.locks, &identity)
         .await
         .map_err(|err| ServerFnError::new(err.to_string()))?;
 
     // Inserting the row and granting its creator ownership happen inside
-    // one transaction (`insert_with_owner`, added in plan.local.md §17
-    // Phase 3) — previously two separate statements, which masked an
-    // atomicity gap SQLite's single-writer serialization happened to hide
-    // but PostgreSQL's real concurrency would not.
+    // one transaction (`insert_with_owner`) rather than two separate
+    // statements, which would mask an atomicity gap SQLite's
+    // single-writer serialization happens to hide but PostgreSQL's real
+    // concurrency would not.
     edda_db::RepositoryRepo::insert_with_owner(&shared.pool, &repository, user.id)
         .await
         .map_err(|err| ServerFnError::new(err.to_string()))?;
@@ -273,10 +273,8 @@ pub async fn delete_repo(owner: String, name: String) -> Result<(), ServerFnErro
         .await
         .map_err(|err| ServerFnError::new(err.to_string()))?;
     // No explicit "revoke all access grants" step: `repo_access` has an
-    // `ON DELETE CASCADE` foreign key to `repositories` now (plan.local.md
-    // §5.5), so this is structurally impossible to forget — unlike the
-    // pre-restructuring code, which had to remember to call
-    // `access::revoke_all` here as a separate step.
+    // `ON DELETE CASCADE` foreign key to `repositories`, so this is
+    // structurally impossible to forget.
     edda_db::RepositoryRepo::delete(&shared.pool, repository.id)
         .await
         .map_err(|err| ServerFnError::new(err.to_string()))?;

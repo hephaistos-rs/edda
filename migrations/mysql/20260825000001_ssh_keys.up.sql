@@ -1,6 +1,6 @@
--- MySQL/MariaDB counterpart of sqlite/20260825000001_ssh_keys.up.sql
--- (plan.local.md §17 Phase 3, revised 2026-08-25). `fingerprint`
--- (`SHA256:<base64>`) is bounded well under 128 characters in practice —
+-- MySQL/MariaDB counterpart of sqlite/20260825000001_ssh_keys.up.sql.
+-- `fingerprint` (`SHA256:<base64>`) is bounded well under 128 characters
+-- in practice —
 -- `VARCHAR(128)` so it can carry a plain `UNIQUE` constraint.
 -- `public_key` is `VARCHAR`, not `TEXT`, for the same `Any`-decodes-
 -- MySQL-`TEXT`-as-`BLOB` reason explained in the `repositories`

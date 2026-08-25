@@ -1,6 +1,4 @@
--- Deferred from Phase 1 to Phase 2, its actual consumer (plan.local.md
--- Phase 1 completion report, deviation #3) — there was no SSH transport to
--- authenticate against until now.
+-- Registered public keys for git-over-SSH authentication (`edda-ssh`).
 --
 -- `fingerprint` is globally unique (not scoped per-user): the same public
 -- key registered to two different accounts would make SSH authentication

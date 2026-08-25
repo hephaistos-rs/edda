@@ -5,8 +5,8 @@
 //! this module. A transport's own job shrinks to: authenticate, resolve
 //! which repository, read raw request bytes from its own I/O, call one of
 //! the functions here, and write the raw response bytes back via its own
-//! I/O. See plan.local.md §17 Phase 2: this exists specifically so SSH
-//! does not become a second implementation of the git wire protocol.
+//! I/O. This module exists specifically so SSH does not become a second
+//! implementation of the git wire protocol.
 //!
 //! The one place HTTP and SSH genuinely differ at the wire level is ref
 //! advertisement: HTTP's `info/refs?service=...` prepends a `# service=`
@@ -205,7 +205,7 @@ pub fn upload_pack_request_is_complete(body: &[u8]) -> bool {
 
 /// Runs upload-pack against an already-open repo: builds the pack for
 /// `request.wants` minus what's reachable from `request.haves` (real
-/// have/done negotiation — `review.local.md` gap G1), and returns the
+/// have/done negotiation, not a stubbed "send everything"), and returns the
 /// complete wire response (a `NAK` line followed by the raw pack bytes)
 /// ready to write directly to either transport's output.
 ///

@@ -41,8 +41,8 @@ pub fn fingerprint(key: &PublicKey) -> String {
 /// Parses and registers a new key for `user_id`. `public_key_openssh` is
 /// the single-line OpenSSH format (`ssh-ed25519 AAAA... comment`) a user
 /// pastes in from `~/.ssh/id_ed25519.pub` — parsing delegates entirely to
-/// `russh::keys`' own OpenSSH-format parser (`review.local.md`'s
-/// dependency policy: no hand-rolled key-format parsing).
+/// `russh::keys`' own OpenSSH-format parser — key-format parsing is not
+/// hand-rolled here.
 pub async fn add(
     pool: &DbPool,
     user_id: UserId,

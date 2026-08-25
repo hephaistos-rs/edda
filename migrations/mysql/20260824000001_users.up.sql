@@ -1,5 +1,5 @@
--- MySQL/MariaDB counterpart of sqlite/20260824000001_users.up.sql
--- (plan.local.md §17 Phase 3, revised 2026-08-25). No `STRICT` (neither
+-- MySQL/MariaDB counterpart of sqlite/20260824000001_users.up.sql.
+-- No `STRICT` (neither
 -- MySQL nor MariaDB has an equivalent table-level keyword — InnoDB is
 -- already strictly typed for these column types). IDs are UUIDv7-as-text,
 -- fixed at 36 characters, so `VARCHAR(36)` rather than `TEXT` — MySQL/

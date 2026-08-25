@@ -1,7 +1,7 @@
 //! Edda's pure functional core: entities, invariants, and the
 //! authorization/business-rule decisions built on top of them. No I/O, no
 //! framework types — see this crate's `Cargo.toml` for the dependency
-//! rule that keeps it that way. See plan.local.md §2.1/§3.3/§7.
+//! rule that keeps it that way.
 
 pub mod access;
 pub mod ids;

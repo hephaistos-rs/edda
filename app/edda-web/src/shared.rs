@@ -11,7 +11,7 @@
 //! `edda_http::router` is merged into with its state already applied.
 //!
 //! Every write path still needs to go through the *same* `LockRegistry`
-//! (plan.local.md §16, smell S8) regardless of whether the write is
+//! regardless of whether the write is
 //! triggered by a server function (this file) or an `edda-http` handler —
 //! that correctness property doesn't change just because the extraction
 //! mechanism differs. So this module holds the same values `main.rs`

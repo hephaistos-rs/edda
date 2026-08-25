@@ -61,9 +61,9 @@ EDDA_DATABASE_URL=mysql://user:pass@host/dbname cargo run --features server
 
 `EDDA_DATABASE_URL` unset falls back to a local SQLite file under `EDDA_DATA_DIR` — the same zero-config path as always. For PostgreSQL/MySQL there's no local default; the variable is required.
 
-**MySQL/MariaDB-specific note**: `tower-sessions-sqlx-store`'s MySQL session store creates its own `tower_sessions` schema (unlike its SQLite/PostgreSQL stores, which use a table in the connected database) — the configured database user needs `CREATE` privilege, or an operator pre-creates that schema and grants access to it specifically. Hit and documented while testing this against a real MariaDB instance; see `plan.local.md` §17 Phase 3.
+**MySQL/MariaDB-specific note**: `tower-sessions-sqlx-store`'s MySQL session store creates its own `tower_sessions` schema (unlike its SQLite/PostgreSQL stores, which use a table in the connected database) — the configured database user needs `CREATE` privilege, or an operator pre-creates that schema and grants access to it specifically. Confirmed against a real MariaDB instance.
 
-One disclosed trade-off of a single binary supporting all three backends at runtime: `sqlx`'s compile-time query checking (`query!`) can't work with the `sqlx::Any` driver that makes runtime backend selection possible, so `edda-db`'s queries are runtime-checked instead — a query/column mismatch is now a test failure, not a compile error. Mitigated by running the same test suite against all three backends (see `plan.local.md` §17 Phase 3 for the full reasoning).
+One disclosed trade-off of a single binary supporting all three backends at runtime: `sqlx`'s compile-time query checking (`query!`) can't work with the `sqlx::Any` driver that makes runtime backend selection possible, so `edda-db`'s queries are runtime-checked instead — a query/column mismatch is now a test failure, not a compile error. Mitigated by running the same test suite against all three backends.
 
 ## Development
 
@@ -85,7 +85,7 @@ npx @tailwindcss/cli -i ./input.css -o ./assets/tailwind.css --watch
 Edda is a Cargo workspace: a functional core of pure domain logic, thin
 I/O-performing "shell" crates around it, and a composition root
 (`app/edda-web`) that wires them together and hosts the Dioxus UI. See
-`plan.local.md` §2–§3 for the full architectural rationale.
+`AGENTS.md` for the full architectural rules.
 
 ```
 crates/

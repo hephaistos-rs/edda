@@ -1,6 +1,6 @@
 //! Repository access control: the four-tier role model, and the pure
 //! functions that decide whether a given actor may read/write/administer/
-//! manage-danger-zone a repository. See plan.local.md §7 — this is the
+//! manage-danger-zone a repository. This is the
 //! functional core of authorization: every function here takes
 //! already-fetched state and makes no I/O of its own. `edda-auth::authz`
 //! is the thin async layer that fetches that state (via `edda-db`) and
@@ -106,7 +106,7 @@ pub enum AuthzError {
     /// The target either doesn't exist, or its existence must not be
     /// distinguishable from "doesn't exist" for this actor (a private
     /// repository the actor has no grant on). Callers map this to an
-    /// HTTP 404, never a 403 — see plan.local.md §7.3.
+    /// HTTP 404, never a 403.
     #[error("not found")]
     NotFound,
     /// The actor's identity — and the target's existence — are already
@@ -150,10 +150,9 @@ pub fn can_administer_repository(
 
 /// Owner-only "danger zone" actions: delete, transfer, visibility change —
 /// deliberately a stricter tier than `can_administer_repository`, matching
-/// the four-tier model's own split between Admin and Owner (plan.local.md
-/// §4.2). This is a genuine tightening versus the pre-restructuring
-/// behavior, where any collaborator could delete a repository (see the
-/// Phase 1 completion report for the explicit note on this change).
+/// the four-tier model's own split between Admin and Owner. Any
+/// collaborator (Admin included) may administer a repository, but only
+/// its Owner may perform these irreversible or identity-changing actions.
 pub fn can_manage_repository_danger_zone(
     actor: &ActorContext,
     repository: &Repository,

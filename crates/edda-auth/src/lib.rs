@@ -1,5 +1,5 @@
 //! Authentication (`backend`, `password`, `signup`, `tokens`, `ssh`) and
-//! authorization (`authz`) — see plan.local.md §3.3/§6/§7.
+//! authorization (`authz`).
 
 pub mod authz;
 pub mod backend;

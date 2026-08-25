@@ -29,11 +29,11 @@ use store::RepoStore;
 /// something worth adding reference-counted eviction for.
 ///
 /// An explicit, constructed value (one instance shared via the
-/// composition root, `edda-web`, across both `edda-http` and a future
-/// `edda-ssh`) rather than a process-global `static` — see plan.local.md
-/// §16 (smell S8): a `static` registry is invisible plumbing that two
-/// independent test server instances in the same process would silently
-/// share, which is exactly the hazard an integration-test suite runs into.
+/// composition root, `edda-web`, across both `edda-http` and `edda-ssh`)
+/// rather than a process-global `static`: a `static` registry is
+/// invisible plumbing that two independent test server instances in the
+/// same process would silently share, which is exactly the hazard an
+/// integration-test suite runs into.
 #[derive(Default)]
 pub struct LockRegistry {
     locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
@@ -103,10 +103,8 @@ impl From<std::io::Error> for GitError {
 
 /// What only `gix` can answer about a repository. Deliberately excludes
 /// `description`/visibility, which are `edda-domain`/`edda-db` concerns
-/// now (the `Repository` entity, plan.local.md §4.2) — this crate has no
-/// business knowing about them, and the on-disk `description`/`private`
-/// marker files the pre-restructuring code kept next to each bare repo no
-/// longer exist.
+/// (the `Repository` entity) — this crate has no business knowing about
+/// them.
 pub struct RepoSummary {
     pub name: String,
     pub default_branch: Option<String>,
@@ -147,7 +145,7 @@ pub fn validated_repo_dir(store: &dyn RepoStore, name: &str) -> Result<PathBuf, 
 /// not this crate's concern (see `RepoSummary`'s doc comment) — a caller
 /// creating a repository writes the `edda_domain::Repository` row via
 /// `edda-db` in the same logical operation, in whichever order its own
-/// transaction/lock discipline requires (plan.local.md §5.7/§9.2).
+/// transaction/lock discipline requires.
 pub async fn create_repo(
     store: &dyn RepoStore,
     locks: &LockRegistry,

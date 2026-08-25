@@ -58,8 +58,8 @@ async fn wait_for_shutdown_signal() {
 /// merged with `edda_http::router` — the git-http bridge and account/token
 /// routes aren't server functions; they need to speak raw git wire
 /// protocol and plain REST, not typed RPC. This function is the workspace's
-/// one composition root (plan.local.md §3.3): every other crate is wired
-/// together here, and nowhere else.
+/// one composition root: every other crate is wired together here, and
+/// nowhere else.
 #[cfg(feature = "server")]
 fn main() {
     // Must run before `dioxus::server::serve(...)` — it installs a default
@@ -86,7 +86,7 @@ fn main() {
             // `session_store::connect` opens alongside `pool`'s `AnyPool`
             // — see that module's doc comment for why
             // `tower-sessions-sqlx-store` can't share the `AnyPool`
-            // directly (plan.local.md §17 Phase 3, revised 2026-08-25).
+            // directly.
             let session_store = session_store::connect(&pool).await?;
             let session_layer = tower_sessions::SessionManagerLayer::new(session_store);
 

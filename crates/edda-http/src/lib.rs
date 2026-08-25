@@ -1,6 +1,6 @@
 //! The axum application: git smart-HTTP bridge, account/token routes,
-//! collaborator routes, and cross-cutting middleware. See plan.local.md
-//! §3.3/§10 and this crate's `Cargo.toml` doc comment.
+//! collaborator routes, and cross-cutting middleware. See this crate's
+//! `Cargo.toml` doc comment.
 
 mod access_routes;
 mod auth_routes;

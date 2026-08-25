@@ -2,7 +2,7 @@
 //! git wire-protocol orchestration (parsing want/have/ref-update lines,
 //! building packs, applying ref updates) now lives in
 //! `edda_git::protocol`, shared verbatim with `edda-ssh`'s git-over-SSH
-//! bridge (plan.local.md §17 Phase 2) — this module's job is only:
+//! bridge — this module's job is only:
 //! resolve the repository from the URL, authenticate/authorize, read the
 //! request bytes, call `edda_git::protocol`, and frame the response as
 //! HTTP (status/headers/content-type). See `edda_git::protocol`'s own

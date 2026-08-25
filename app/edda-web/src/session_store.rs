@@ -2,8 +2,8 @@
 //! each need a *concrete* typed pool (`sqlx::SqlitePool`/`PgPool`/
 //! `MySqlPool`) — none of them support `sqlx::AnyPool`, which is what
 //! `edda_db::DbPool` deliberately erases to for backend-agnostic runtime
-//! selection (plan.local.md §17 Phase 3, revised 2026-08-25). Session
-//! storage is the one place in the composition root that still needs to
+//! selection. Session storage is the one place in the composition root
+//! that still needs to
 //! know which concrete backend is active: this module opens a second,
 //! small connection using the *same* `EDDA_DATABASE_URL` (typed this
 //! time), and wraps whichever store that produces behind one type so the

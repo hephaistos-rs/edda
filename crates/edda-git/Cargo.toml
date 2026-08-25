@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 
 # Git repository storage and gix-backed operations — server-only,
-# transport-agnostic (see plan.local.md §3.3/§8). Both `edda-http`'s
+# transport-agnostic. Both `edda-http`'s
 # git-over-HTTP bridge and `edda-ssh`'s git-over-SSH bridge call into this
 # crate's `protocol` module for the actual smart-protocol request/response
 # orchestration; it knows nothing about either transport (no `axum`, no

@@ -1,8 +1,5 @@
--- Phase 1 schema: authored fresh, not evolved from the pre-restructuring
--- history — there is no existing deployment to preserve (plan.local.md
--- §0/§19). This collapses what used to be two migrations (`users` plus a
--- later `users_username` backfill-and-widen) into one table, since there
--- are no existing rows that ever lacked a `username`.
+-- Authored as a single table (no separate `username` backfill migration)
+-- since there is no existing deployment to preserve.
 CREATE TABLE users (
     -- UUIDv7 (time-ordered), generated app-side and stored as text. Avoids
     -- leaking a guessable sequential id / user count, unlike AUTOINCREMENT.

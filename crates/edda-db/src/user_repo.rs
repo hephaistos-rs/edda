@@ -91,8 +91,7 @@ impl UserRepo {
         // Case-insensitive lookup: SQLite's `email` column is declared
         // `COLLATE NOCASE`, so a plain `=` already compares
         // case-insensitively there; PostgreSQL/MySQL compare on
-        // `LOWER(...)` against the matching functional index instead
-        // (plan.local.md §17 Phase 3).
+        // `LOWER(...)` against the matching functional index instead.
         let sql = match pool.backend {
             Backend::Sqlite => {
                 "SELECT id, username, email, password_hash FROM users WHERE email = ?"

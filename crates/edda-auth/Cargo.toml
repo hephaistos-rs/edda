@@ -6,8 +6,10 @@ authors.workspace = true
 
 # Authentication (proving identity: passwords, sessions, tokens) and
 # authorization (deciding what an identity may do) — two modules in one
-# crate, not two crates; see plan.local.md §3.3/§3.4 for why that split
-# was rejected. `authz`'s job is strictly "fetch what edda-domain's pure
+# crate, not two crates, since both are identity/permission concerns that
+# share the same persistence access and are used together at every
+# transport boundary; splitting them would only duplicate wiring without
+# a real architectural seam. `authz`'s job is strictly "fetch what edda-domain's pure
 # functions need, then call them" — it must never contain a permission
 # *decision* itself.
 [dependencies]
@@ -29,8 +31,8 @@ serde = { workspace = true, features = ["derive"] }
 sha2 = { workspace = true }
 # No `sqlite`/`postgres` driver feature: this crate only ever holds an
 # `edda_db::DbPool` (opaque to it) and uses `sqlx::Error` in its own error
-# enums, neither of which needs a specific backend driver compiled in here
-# — see plan.local.md §17 Phase 3.
+# enums, neither of which needs a specific backend driver compiled in
+# here.
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

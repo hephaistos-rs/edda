@@ -131,23 +131,48 @@ tracing-subscriber = "0.3.23"
 uuid = "1.24.1"
 web-time = "1.1.0"
 # WebAuthn/passkey second factor: deliberately NOT added as a dependency
-# here. `webauthn-rs` 0.5.5's `webauthn-rs-core` unconditionally depends on
-# `webauthn-attestation-ca` (not feature-gated — confirmed by inspecting
-# that crate's own `Cargo.toml`, disabling `webauthn-rs`'s default
-# `attestation` feature does not remove it), which depends on `openssl`/
-# `openssl-sys` — a native C dependency this workspace otherwise avoids
-# everywhere else (`ring` over `aws-lc-rs` for `russh`, `rust_crypto` for
-# `jsonwebtoken`, `fancy-regex` for `syntect`). Confirmed on this
-# workspace's own Windows/MSVC dev environment: `cargo check` fails
-# outright without a system OpenSSL install, and forcing `openssl`'s
-# `vendored` feature (building OpenSSL from source instead) also fails
-# here, since the available Perl lacks the CPAN modules OpenSSL's build
-# script needs. TOTP is this phase's required second-factor mechanism
-# (the exit criteria name it explicitly; WebAuthn does not appear in
-# them) — the WebAuthn *persistence* layer (`webauthn_credentials` table,
-# `edda_db::WebauthnRepo`, `edda_domain::WebauthnCredentialId`) is still
-# built and tested, ready for whenever this is revisited, but the actual
-# registration/authentication ceremony is deferred until either a build
-# environment with a working OpenSSL toolchain is available, an upstream
-# `webauthn-rs` release decouples attestation from the core dependency
-# graph, or an alternative crate is evaluated.
+# here. `webauthn-rs` 0.5.5's `webauthn-rs-core` has `default = []` (no
+# feature at all gates this) and unconditionally depends on
+# `webauthn-attestation-ca` (confirmed by reading both crates' actual
+# published `Cargo.toml`s), which itself unconditionally depends on
+# `openssl`/`openssl-sys` — a native C dependency this workspace otherwise
+# avoids everywhere else (`ring` over `aws-lc-rs` for `russh`,
+# `rust_crypto` for `jsonwebtoken`, `fancy-regex` for `syntect`).
+#
+# Three concrete fixes were tried and verified failing on this workspace's
+# own Windows/MSVC (`x86_64-pc-windows-msvc`) dev environment, each with a
+# real `cargo build` (not just `cargo check`, which doesn't invoke the
+# final link step and can mask this class of failure):
+#   1. No system OpenSSL install at all → `openssl-sys`'s build script
+#      fails outright looking for one.
+#   2. `OPENSSL_DIR` pointed at Strawberry Perl's bundled OpenSSL
+#      (`C:\Strawberry\c`, which does have real `libssl.a`/`libcrypto.a`
+#      and headers) → `cargo build` fails with "could not find native
+#      static library `libssl`": those archives are MinGW-format, and
+#      this toolchain's linker (MSVC `link.exe`) cannot consume them.
+#   3. `openssl = { features = ["vendored"] }` (build OpenSSL from
+#      source) with Strawberry Perl on `PATH` (which — unlike Git for
+#      Windows' bundled minimal Perl, the actual cause of an earlier,
+#      less precise version of this finding — does have the
+#      `Locale::Maketext::Simple` CPAN module OpenSSL's `Configure`
+#      needs) → still fails, earlier in the process: `Configure` itself
+#      aborts with a Perl error in its own `OpenSSL::Template` module
+#      (`Template.pm` line 41, "Compilation failed in require") before
+#      ever reaching a C compiler, so having Visual Studio 2022 (which
+#      this machine does) installed doesn't help either.
+#
+# A genuinely pure-Rust alternative exists — 1Password's `passkey` crate
+# (0.4.0; `passkey-authenticator`/`passkey-client`/`passkey-types`) has an
+# entirely openssl-free dependency tree (`p256`/RustCrypto, confirmed via
+# `cargo tree` in an isolated probe project) — but it is a different API
+# shape from `webauthn-rs`, and adopting it is a real implementation task
+# (registration/authentication ceremony, challenge/session plumbing, a
+# client-side `navigator.credentials` bridge), not a drop-in swap, so it
+# was not undertaken in this pass. TOTP is this phase's required
+# second-factor mechanism (the exit criteria name it explicitly; WebAuthn
+# does not appear in them) — the WebAuthn *persistence* layer
+# (`webauthn_credentials` table, `edda_db::WebauthnRepo`,
+# `edda_domain::WebauthnCredentialId`) is still built and tested, ready
+# for whenever this is revisited on top of `passkey` (or a future
+# `webauthn-rs` release that decouples attestation from its core
+# dependency graph, or a non-MSVC build environment).

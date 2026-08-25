@@ -247,6 +247,28 @@ async fn request_totp_disable() -> Result<(), String> {
     Err("not available during server rendering".to_string())
 }
 
+#[cfg(target_arch = "wasm32")]
+async fn fetch_oauth_enabled() -> bool {
+    // Best-effort: a network error or malformed body just means "don't
+    // show the linked-accounts section," never a hard error surfaced to
+    // the user — same reasoning as `login.rs`'s identical helper.
+    let Ok(response) = gloo_net::http::Request::get("/api/auth/oauth/enabled")
+        .send()
+        .await
+    else {
+        return false;
+    };
+    if !response.ok() {
+        return false;
+    }
+    response.json::<bool>().await.unwrap_or(false)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn fetch_oauth_enabled() -> bool {
+    false
+}
+
 /// Coarse "N days ago" — same reasoning as `repo.rs`'s own `relative_time`:
 /// this data only ever needs day-scale granularity, not a date-formatting
 /// dependency.
@@ -267,6 +289,7 @@ fn relative_time(unix_seconds: i64) -> String {
 #[component]
 pub fn Settings() -> Element {
     let mut keys = use_resource(fetch_keys);
+    let oauth_enabled = use_resource(fetch_oauth_enabled);
 
     let mut title = use_signal(String::new);
     let mut public_key = use_signal(String::new);
@@ -618,6 +641,19 @@ pub fn Settings() -> Element {
                             "disable 2FA"
                         }
                     }
+                }
+            }
+
+            if (*oauth_enabled.read()).unwrap_or(false) {
+                h1 { class: "mt-12 font-mono text-xl font-semibold text-ink", "Linked accounts" }
+                p { class: "mt-1 text-sm text-ink-muted",
+                    "Link an external SSO identity to sign in without a password. This never replaces "
+                    "your existing password login."
+                }
+                a {
+                    href: "/api/auth/oauth/link",
+                    class: "mt-4 inline-block border border-line px-3 py-1.5 font-mono text-sm text-ink-muted no-underline hover:text-ink",
+                    "link external account"
                 }
             }
         }

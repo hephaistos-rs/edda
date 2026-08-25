@@ -7,6 +7,7 @@ mod admin_routes;
 mod auth_routes;
 mod git_http;
 mod lfs;
+mod oauth_routes;
 mod ssh_key_routes;
 mod state;
 
@@ -29,6 +30,7 @@ pub fn router(state: AppState) -> Router {
         .merge(git_http::routes())
         .merge(lfs::routes())
         .merge(auth_routes::routes())
+        .merge(oauth_routes::routes())
         .merge(access_routes::routes())
         .merge(ssh_key_routes::routes())
         .merge(admin_routes::routes())

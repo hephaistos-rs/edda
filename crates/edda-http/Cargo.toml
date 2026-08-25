@@ -40,6 +40,15 @@ sha2 = { workspace = true }
 # selection).
 sqlx = { workspace = true, features = ["any"] }
 tower-http = { workspace = true, features = ["trace"] }
+# The `Session` extractor for `oauth_routes` — stashing the CSRF
+# token/nonce/PKCE verifier across the redirect round-trip to the external
+# identity provider. The session *store* and *layer* are still wired up
+# only by the composition root (`edda-web`'s `main.rs`); this crate only
+# needs the extractor type, which works against whatever layer is already
+# applied outside this router (same reasoning as `AuthSession` already
+# being used throughout `auth_routes`/`admin_routes` without this crate
+# ever constructing an `axum_login` layer itself).
+tower-sessions = { workspace = true }
 tracing = { workspace = true }
 
 # Only the LFS integration test (`tests/lfs_integration.rs`) needs: a real

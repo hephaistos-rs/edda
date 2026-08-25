@@ -18,14 +18,34 @@ use edda_auth::{Backend, Credentials as AuthCredentials};
 
 use crate::state::AppState;
 
+/// Best-effort audit logging — see `admin_routes::record`'s identical
+/// reasoning for why a logging failure must never fail the action it
+/// describes.
+async fn record(pool: &edda_db::DbPool, event_type: &str, actor_id: &str) {
+    let _ = edda_db::AuditEventRepo::insert(
+        pool,
+        edda_domain::AuditEventId::new(),
+        event_type,
+        Some(actor_id),
+        None,
+        None,
+        None,
+    )
+    .await;
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/auth/signup", post(signup))
         .route("/api/auth/login", post(login))
+        .route("/api/auth/login/totp", post(login_totp))
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/me", get(me))
         .route("/api/auth/tokens", post(create_token).get(list_tokens))
         .route("/api/auth/tokens/{id}/revoke", post(revoke_token))
+        .route("/api/auth/totp/enroll", post(totp_enroll))
+        .route("/api/auth/totp/activate", post(totp_activate))
+        .route("/api/auth/totp/disable", post(totp_disable))
 }
 
 /// The over-the-wire shape of a logged-in identity. Deliberately its own
@@ -39,6 +59,7 @@ struct CurrentUserDto {
     id: String,
     username: String,
     email: String,
+    is_admin: bool,
 }
 
 impl From<edda_domain::User> for CurrentUserDto {
@@ -47,6 +68,7 @@ impl From<edda_domain::User> for CurrentUserDto {
             id: user.id.to_string(),
             username: user.username,
             email: user.email,
+            is_admin: user.is_admin,
         }
     }
 }
@@ -96,6 +118,15 @@ async fn signup(
     Json(CurrentUserDto::from(user)).into_response()
 }
 
+/// Either a completed login or a "you still need a second factor"
+/// challenge — the client tells the two apart by which field is present.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum LoginResponse {
+    LoggedIn(CurrentUserDto),
+    NeedsTotp { pending_login_token: String },
+}
+
 // `skip_all`: `creds` carries a raw password — never a span field.
 #[tracing::instrument(name = "authentication.login", skip_all)]
 async fn login(mut auth: AuthSession<Backend>, Json(creds): Json<LoginBody>) -> Response {
@@ -104,6 +135,10 @@ async fn login(mut auth: AuthSession<Backend>, Json(creds): Json<LoginBody>) -> 
         password: creds.password,
     };
 
+    // `Backend::authenticate` already refuses a disabled account here
+    // (returns `Ok(None)`, indistinguishable from a wrong password) — see
+    // that function's own doc comment. Nothing extra is needed for that
+    // case at this layer.
     let session_user = match auth.authenticate(creds).await {
         Ok(Some(session_user)) => session_user,
         Ok(None) => {
@@ -117,11 +152,87 @@ async fn login(mut auth: AuthSession<Backend>, Json(creds): Json<LoginBody>) -> 
     };
 
     let user = session_user.user.clone();
+
+    // Password verified — but if this account has an *activated* TOTP
+    // credential, the session isn't established yet. A pending-login
+    // token (short-lived, HMAC-signed, scoped to this one user) stands in
+    // for "password already verified" until a second request presents a
+    // valid code to `/api/auth/login/totp`. See `edda_auth::totp`'s and
+    // `edda_auth::pending_login`'s own doc comments for the full
+    // reasoning — `axum_login::AuthnBackend::authenticate` has no room for
+    // this intermediate state, so it has to live at this route level
+    // instead of inside `authenticate` itself.
+    let auth_backend = auth.backend.clone();
+    let pool = auth_backend.pool();
+    let needs_totp = edda_auth::totp::is_activated(pool, user.id)
+        .await
+        .unwrap_or(false);
+    if needs_totp {
+        let pending_login_token = edda_auth::pending_login::issue(&user.id.to_string());
+        return Json(LoginResponse::NeedsTotp {
+            pending_login_token,
+        })
+        .into_response();
+    }
+
     if let Err(err) = auth.login(&session_user).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
     }
+    record(pool, "auth.login.success", &user.id.to_string()).await;
 
-    Json(CurrentUserDto::from(user)).into_response()
+    Json(LoginResponse::LoggedIn(CurrentUserDto::from(user))).into_response()
+}
+
+#[derive(Deserialize)]
+struct LoginTotpBody {
+    pending_login_token: String,
+    code: String,
+}
+
+/// Completes a login that `login` deferred for a second factor: verifies
+/// the pending-login token plus a TOTP/recovery code, then — only on
+/// success — actually establishes the session.
+#[tracing::instrument(name = "authentication.login.totp", skip_all)]
+async fn login_totp(
+    State(state): State<AppState>,
+    mut auth: AuthSession<Backend>,
+    Json(body): Json<LoginTotpBody>,
+) -> Response {
+    let Some(user_id_str) = edda_auth::pending_login::verify(&body.pending_login_token) else {
+        return (StatusCode::UNAUTHORIZED, "that login attempt has expired").into_response();
+    };
+    let Ok(user_id) = user_id_str.parse::<edda_domain::UserId>() else {
+        return (StatusCode::UNAUTHORIZED, "that login attempt has expired").into_response();
+    };
+
+    let Some(row) = (match edda_db::UserRepo::find_by_id(&state.pool, user_id).await {
+        Ok(row) => row,
+        Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }) else {
+        return (StatusCode::UNAUTHORIZED, "that login attempt has expired").into_response();
+    };
+    if edda_auth::require_enabled(&row.user).is_err() {
+        return (StatusCode::UNAUTHORIZED, "that login attempt has expired").into_response();
+    }
+
+    match edda_auth::totp::verify(&state.pool, user_id, &row.user.email, &body.code).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::UNAUTHORIZED, "that code was incorrect").into_response(),
+        Err(err) => return (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
+    }
+
+    let Ok(Some(session_user)) = state.backend.get_user(&user_id.to_string()).await else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not resolve the session identity",
+        )
+            .into_response();
+    };
+    if let Err(err) = auth.login(&session_user).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+    }
+    record(&state.pool, "auth.login.success", &user_id.to_string()).await;
+    Json(CurrentUserDto::from(row.user)).into_response()
 }
 
 async fn logout(mut auth: AuthSession<Backend>) -> Response {
@@ -184,13 +295,21 @@ async fn create_token(
         return StatusCode::UNAUTHORIZED.into_response();
     };
     match edda_auth::tokens::create(&state.pool, session_user.user.id, &body.name).await {
-        Ok((raw, token)) => Json(CreatedTokenDto {
-            id: token.id.to_string(),
-            name: token.name,
-            token: raw,
-            created_at: token.created_at,
-        })
-        .into_response(),
+        Ok((raw, token)) => {
+            record(
+                &state.pool,
+                "auth.token.create",
+                &session_user.user.id.to_string(),
+            )
+            .await;
+            Json(CreatedTokenDto {
+                id: token.id.to_string(),
+                name: token.name,
+                token: raw,
+                created_at: token.created_at,
+            })
+            .into_response()
+        }
         Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
     }
 }
@@ -223,8 +342,85 @@ async fn revoke_token(
         return (StatusCode::NOT_FOUND, "no such token").into_response();
     };
     match edda_auth::tokens::revoke(&state.pool, session_user.user.id, token_id).await {
-        Ok(true) => StatusCode::OK.into_response(),
+        Ok(true) => {
+            record(
+                &state.pool,
+                "auth.token.revoke",
+                &session_user.user.id.to_string(),
+            )
+            .await;
+            StatusCode::OK.into_response()
+        }
         Ok(false) => (StatusCode::NOT_FOUND, "no such token").into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+#[derive(Serialize)]
+struct TotpEnrollDto {
+    secret_base32: String,
+    otpauth_uri: String,
+}
+
+/// Starts (or restarts) 2FA enrollment for the caller's own account. Does
+/// not gate login until `totp_activate` succeeds with a real code.
+async fn totp_enroll(State(state): State<AppState>, auth: AuthSession<Backend>) -> Response {
+    let Some(session_user) = auth.user else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    match edda_auth::totp::enroll(&state.pool, session_user.user.id, &session_user.user.email).await
+    {
+        Ok((secret_base32, otpauth_uri)) => Json(TotpEnrollDto {
+            secret_base32,
+            otpauth_uri,
+        })
+        .into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct TotpActivateBody {
+    code: String,
+}
+
+/// Recovery codes are returned here, once — see `edda_auth::totp::
+/// activate`'s own "shown once" doc comment for why nothing about this
+/// response is retrievable again afterward.
+#[derive(Serialize)]
+struct TotpActivateDto {
+    recovery_codes: Vec<String>,
+}
+
+#[tracing::instrument(name = "authentication.totp.activate", skip_all)]
+async fn totp_activate(
+    State(state): State<AppState>,
+    auth: AuthSession<Backend>,
+    Json(body): Json<TotpActivateBody>,
+) -> Response {
+    let Some(session_user) = auth.user else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    match edda_auth::totp::activate(
+        &state.pool,
+        session_user.user.id,
+        &session_user.user.email,
+        &body.code,
+    )
+    .await
+    {
+        Ok(recovery_codes) => Json(TotpActivateDto { recovery_codes }).into_response(),
+        Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
+    }
+}
+
+#[tracing::instrument(name = "authentication.totp.disable", skip_all)]
+async fn totp_disable(State(state): State<AppState>, auth: AuthSession<Backend>) -> Response {
+    let Some(session_user) = auth.user else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    match edda_auth::totp::disable(&state.pool, session_user.user.id).await {
+        Ok(()) => StatusCode::OK.into_response(),
         Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
     }
 }

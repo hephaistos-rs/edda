@@ -13,11 +13,18 @@ authors.workspace = true
 # functions need, then call them" — it must never contain a permission
 # *decision* itself.
 [dependencies]
+aes-gcm = { workspace = true }
 argon2 = { workspace = true }
 axum-login = { workspace = true }
 base64 = { workspace = true }
 edda-db = { workspace = true }
 edda-domain = { workspace = true }
+# Short-lived "pending 2FA" tokens (`pending_login`) — same crate/pattern
+# as the LFS transfer-auth tokens in `edda_http::lfs::transfer_auth`.
+jsonwebtoken = { workspace = true }
+oauth2 = { workspace = true }
+openidconnect = { workspace = true }
+rand = { workspace = true, features = ["thread_rng"] }
 # Only for `russh::keys` (= the `ssh_key` crate's types, re-exported) —
 # public-key parsing and fingerprinting are an authentication-credential
 # concern, the same category `argon2`/`sha2` already cover here, not an
@@ -28,6 +35,10 @@ edda-domain = { workspace = true }
 # could resolve to an incompatible type even at a semver-compatible version.
 russh = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+# WebAuthn's `Passkey` and OAuth's linked-identity bookkeeping are
+# persisted as opaque JSON blobs via `edda-db` — this crate does the
+# (de)serialization, `edda-db` just stores the resulting string.
+serde_json = { workspace = true }
 sha2 = { workspace = true }
 # No `sqlite`/`postgres` driver feature: this crate only ever holds an
 # `edda_db::DbPool` (opaque to it) and uses `sqlx::Error` in its own error
@@ -35,4 +46,11 @@ sha2 = { workspace = true }
 # here.
 sqlx = { workspace = true }
 thiserror = { workspace = true }
+totp-rs = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+# For the `oauth` module's real-HTTP mock-IdP round-trip test only.
+axum = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }

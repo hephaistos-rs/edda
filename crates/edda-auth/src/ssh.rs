@@ -86,8 +86,12 @@ pub async fn revoke(pool: &DbPool, user_id: UserId, key_id: SshKeyId) -> Result<
 /// reason), so this deliberately doesn't distinguish those cases.
 pub async fn authenticate(pool: &DbPool, key: &PublicKey) -> Option<User> {
     let fp = fingerprint(key);
-    SshKeyRepo::find_by_fingerprint(pool, &fp)
+    let user = SshKeyRepo::find_by_fingerprint(pool, &fp)
         .await
         .ok()
-        .flatten()
+        .flatten()?;
+    // Same reasoning as `tokens::authenticate`: a disabled account's SSH
+    // keys simply stop resolving, indistinguishable from an unknown key.
+    crate::require_enabled(&user).ok()?;
+    Some(user)
 }

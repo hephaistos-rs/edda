@@ -78,6 +78,13 @@ impl AuthnBackend for Backend {
         let Some(row) = UserRepo::find_by_email(&self.pool, &creds.email).await? else {
             return Ok(None);
         };
+        // A disabled account fails the same way a wrong password does —
+        // indistinguishable from "no such account," not a separate error,
+        // so a login attempt can't be used to probe whether an email is
+        // registered-but-disabled.
+        if crate::require_enabled(&row.user).is_err() {
+            return Ok(None);
+        }
         if verify_password(&creds.password, &row.password_hash) {
             Ok(Some(SessionUser {
                 user: row.user,

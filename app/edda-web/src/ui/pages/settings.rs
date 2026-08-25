@@ -17,6 +17,47 @@ struct AddSshKeyBody<'a> {
     public_key: &'a str,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct TokenDto {
+    id: String,
+    name: String,
+    created_at: i64,
+    #[allow(dead_code)]
+    last_used_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct CreatedTokenDto {
+    #[allow(dead_code)]
+    id: String,
+    #[allow(dead_code)]
+    name: String,
+    token: String,
+    #[allow(dead_code)]
+    created_at: i64,
+}
+
+#[derive(Serialize)]
+struct CreateTokenBody<'a> {
+    name: &'a str,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct TotpEnrollDto {
+    secret_base32: String,
+    otpauth_uri: String,
+}
+
+#[derive(Serialize)]
+struct TotpActivateBody<'a> {
+    code: &'a str,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct TotpActivateDto {
+    recovery_codes: Vec<String>,
+}
+
 // Same wasm32-only-fetch / server-side-stub split as every other hand-written
 // (non-server-function) API call in `ui/` — see `login.rs`'s doc comment.
 #[cfg(target_arch = "wasm32")]
@@ -81,6 +122,131 @@ async fn request_revoke_key(_id: &str) -> Result<(), String> {
     Err("not available during server rendering".to_string())
 }
 
+#[cfg(target_arch = "wasm32")]
+async fn fetch_tokens() -> Result<Vec<TokenDto>, String> {
+    let response = gloo_net::http::Request::get("/api/auth/tokens")
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+    if !response.ok() {
+        return Err(response
+            .text()
+            .await
+            .unwrap_or_else(|_| "couldn't load tokens".to_string()));
+    }
+    response.json().await.map_err(|err| err.to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn fetch_tokens() -> Result<Vec<TokenDto>, String> {
+    Err("not available during server rendering".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn request_create_token(body: &CreateTokenBody<'_>) -> Result<CreatedTokenDto, String> {
+    let request = gloo_net::http::Request::post("/api/auth/tokens")
+        .json(body)
+        .map_err(|err| err.to_string())?;
+    let response = request.send().await.map_err(|err| err.to_string())?;
+    if response.ok() {
+        response.json().await.map_err(|err| err.to_string())
+    } else {
+        Err(response
+            .text()
+            .await
+            .unwrap_or_else(|_| "couldn't create token".to_string()))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn request_create_token(_body: &CreateTokenBody<'_>) -> Result<CreatedTokenDto, String> {
+    Err("not available during server rendering".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn request_revoke_token(id: &str) -> Result<(), String> {
+    let response = gloo_net::http::Request::post(&format!("/api/auth/tokens/{id}/revoke"))
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+    if response.ok() {
+        Ok(())
+    } else {
+        Err(response
+            .text()
+            .await
+            .unwrap_or_else(|_| "couldn't revoke token".to_string()))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn request_revoke_token(_id: &str) -> Result<(), String> {
+    Err("not available during server rendering".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn request_totp_enroll() -> Result<TotpEnrollDto, String> {
+    let response = gloo_net::http::Request::post("/api/auth/totp/enroll")
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+    if response.ok() {
+        response.json().await.map_err(|err| err.to_string())
+    } else {
+        Err(response
+            .text()
+            .await
+            .unwrap_or_else(|_| "couldn't start enrollment".to_string()))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn request_totp_enroll() -> Result<TotpEnrollDto, String> {
+    Err("not available during server rendering".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn request_totp_activate(body: &TotpActivateBody<'_>) -> Result<TotpActivateDto, String> {
+    let request = gloo_net::http::Request::post("/api/auth/totp/activate")
+        .json(body)
+        .map_err(|err| err.to_string())?;
+    let response = request.send().await.map_err(|err| err.to_string())?;
+    if response.ok() {
+        response.json().await.map_err(|err| err.to_string())
+    } else {
+        Err(response
+            .text()
+            .await
+            .unwrap_or_else(|_| "that code was incorrect".to_string()))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn request_totp_activate(_body: &TotpActivateBody<'_>) -> Result<TotpActivateDto, String> {
+    Err("not available during server rendering".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn request_totp_disable() -> Result<(), String> {
+    let response = gloo_net::http::Request::post("/api/auth/totp/disable")
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+    if response.ok() {
+        Ok(())
+    } else {
+        Err(response
+            .text()
+            .await
+            .unwrap_or_else(|_| "couldn't disable 2FA".to_string()))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn request_totp_disable() -> Result<(), String> {
+    Err("not available during server rendering".to_string())
+}
+
 /// Coarse "N days ago" — same reasoning as `repo.rs`'s own `relative_time`:
 /// this data only ever needs day-scale granularity, not a date-formatting
 /// dependency.
@@ -128,6 +294,91 @@ pub fn Settings() -> Element {
                 Err(message) => add_error.set(Some(message)),
             }
             submitting.set(false);
+        });
+    };
+
+    let mut tokens = use_resource(fetch_tokens);
+    let mut token_name = use_signal(String::new);
+    let mut token_error = use_signal(|| Option::<String>::None);
+    let mut token_submitting = use_signal(|| false);
+    // The raw token is only ever available once, right after creation —
+    // never re-derivable from the list endpoint (which only ever returns
+    // the hash-backed metadata) — see `edda_auth::tokens::create`'s own
+    // "shown once" doc comment for why.
+    let mut just_created_token = use_signal(|| Option::<String>::None);
+
+    let on_create_token = move |event: FormEvent| {
+        event.prevent_default();
+        let name_value = token_name.read().clone();
+
+        token_submitting.set(true);
+        token_error.set(None);
+        spawn(async move {
+            let body = CreateTokenBody { name: &name_value };
+            match request_create_token(&body).await {
+                Ok(created) => {
+                    token_name.set(String::new());
+                    just_created_token.set(Some(created.token));
+                    tokens.restart();
+                }
+                Err(message) => token_error.set(Some(message)),
+            }
+            token_submitting.set(false);
+        });
+    };
+
+    // 2FA has no "current status" fetch endpoint — the settings page
+    // treats "not enrolled" as the default UI state and lets a completed
+    // enrollment replace it, matching how `just_created_token` above
+    // already handles a one-time, not-re-fetchable secret. A page reload
+    // resets back to the enrollment form even if 2FA is already active;
+    // this is a UI-completeness gap, not a security one (the server-side
+    // enforcement doesn't depend on this page's state).
+    let mut totp_enrollment = use_signal(|| Option::<TotpEnrollDto>::None);
+    let mut totp_code = use_signal(String::new);
+    let mut totp_error = use_signal(|| Option::<String>::None);
+    let mut totp_recovery_codes = use_signal(|| Option::<Vec<String>>::None);
+    let mut totp_busy = use_signal(|| false);
+
+    let on_start_totp_enroll = move |_| {
+        totp_busy.set(true);
+        totp_error.set(None);
+        spawn(async move {
+            match request_totp_enroll().await {
+                Ok(enrollment) => totp_enrollment.set(Some(enrollment)),
+                Err(message) => totp_error.set(Some(message)),
+            }
+            totp_busy.set(false);
+        });
+    };
+
+    let on_activate_totp = move |event: FormEvent| {
+        event.prevent_default();
+        let code = totp_code.read().clone();
+        totp_busy.set(true);
+        totp_error.set(None);
+        spawn(async move {
+            let body = TotpActivateBody { code: &code };
+            match request_totp_activate(&body).await {
+                Ok(activated) => {
+                    totp_enrollment.set(None);
+                    totp_code.set(String::new());
+                    totp_recovery_codes.set(Some(activated.recovery_codes));
+                }
+                Err(message) => totp_error.set(Some(message)),
+            }
+            totp_busy.set(false);
+        });
+    };
+
+    let on_disable_totp = move |_| {
+        totp_busy.set(true);
+        spawn(async move {
+            if request_totp_disable().await.is_ok() {
+                totp_recovery_codes.set(None);
+                totp_enrollment.set(None);
+            }
+            totp_busy.set(false);
         });
     };
 
@@ -213,6 +464,160 @@ pub fn Settings() -> Element {
                     None => rsx! {
                         p { class: "text-sm text-ink-muted", "loading…" }
                     },
+                }
+            }
+
+            h1 { class: "mt-12 font-mono text-xl font-semibold text-ink", "Personal access tokens" }
+            p { class: "mt-1 text-sm text-ink-muted",
+                "Use a token in place of your password for git-over-HTTPS or the API."
+            }
+
+            form { class: "mt-6 flex flex-col gap-3 border border-line p-4", onsubmit: on_create_token,
+                label { class: "flex flex-col gap-1 text-sm text-ink-muted",
+                    "name"
+                    input {
+                        r#type: "text",
+                        required: true,
+                        placeholder: "e.g. ci",
+                        class: "border border-line bg-surface px-2.5 py-1.5 font-mono text-sm text-ink focus:border-accent focus:outline-none",
+                        value: "{token_name}",
+                        oninput: move |event| token_name.set(event.value()),
+                    }
+                }
+                if let Some(message) = token_error() {
+                    p { class: "font-mono text-xs text-status-conflict", "{message}" }
+                }
+                button {
+                    r#type: "submit",
+                    disabled: token_submitting(),
+                    class: "self-start border border-accent bg-accent px-3 py-1.5 font-mono text-sm text-accent-ink disabled:opacity-60",
+                    if token_submitting() { "creating…" } else { "create token" }
+                }
+            }
+
+            if let Some(raw_token) = just_created_token() {
+                div { class: "mt-4 flex flex-col gap-2 border border-accent bg-surface p-4",
+                    p { class: "font-mono text-xs font-semibold text-ink",
+                        "Copy this token now — you won't be able to see it again."
+                    }
+                    div { class: "flex items-center gap-2",
+                        code { class: "flex-1 overflow-x-auto border border-line bg-canvas px-2 py-1.5 font-mono text-xs text-ink", "{raw_token}" }
+                        button {
+                            r#type: "button",
+                            class: "shrink-0 border border-line px-2 py-1.5 font-mono text-xs text-ink-muted hover:text-ink",
+                            onclick: move |_| just_created_token.set(None),
+                            "dismiss"
+                        }
+                    }
+                }
+            }
+
+            div { class: "mt-4",
+                match &*tokens.read() {
+                    Some(Ok(list)) if list.is_empty() => rsx! {
+                        p { class: "text-sm text-ink-muted italic", "no tokens yet" }
+                    },
+                    Some(Ok(list)) => rsx! {
+                        div { class: "divide-y divide-line border border-line",
+                            for tok in list.clone() {
+                                div { class: "flex items-center justify-between gap-4 px-4 py-3",
+                                    div { class: "min-w-0",
+                                        div { class: "font-mono text-sm text-ink", "{tok.name}" }
+                                        div { class: "truncate font-mono text-xs text-ink-muted", "created {relative_time(tok.created_at)}" }
+                                    }
+                                    button {
+                                        r#type: "button",
+                                        class: "shrink-0 font-mono text-xs text-ink-muted hover:text-status-conflict",
+                                        onclick: {
+                                            let id = tok.id.clone();
+                                            move |_| {
+                                                let id = id.clone();
+                                                spawn(async move {
+                                                    if request_revoke_token(&id).await.is_ok() {
+                                                        tokens.restart();
+                                                    }
+                                                });
+                                            }
+                                        },
+                                        "revoke"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    Some(Err(err)) => rsx! {
+                        p { class: "text-sm text-status-conflict", "{err}" }
+                    },
+                    None => rsx! {
+                        p { class: "text-sm text-ink-muted", "loading…" }
+                    },
+                }
+            }
+
+            h1 { class: "mt-12 font-mono text-xl font-semibold text-ink", "Two-factor authentication" }
+            p { class: "mt-1 text-sm text-ink-muted",
+                "Require a time-based code from an authenticator app on every login."
+            }
+
+            if let Some(codes) = totp_recovery_codes() {
+                div { class: "mt-4 flex flex-col gap-2 border border-accent bg-surface p-4",
+                    p { class: "font-mono text-xs font-semibold text-ink",
+                        "2FA is now active. Save these recovery codes — each works once, and you won't see them again."
+                    }
+                    div { class: "grid grid-cols-2 gap-1 font-mono text-xs text-ink",
+                        for code in codes {
+                            code { class: "border border-line bg-canvas px-2 py-1", "{code}" }
+                        }
+                    }
+                }
+            } else if let Some(enrollment) = totp_enrollment() {
+                form { class: "mt-4 flex flex-col gap-3 border border-line p-4", onsubmit: on_activate_totp,
+                    p { class: "text-sm text-ink-muted",
+                        "Add this secret to your authenticator app, then enter the 6-digit code it shows."
+                    }
+                    code { class: "break-all border border-line bg-canvas px-2 py-1.5 font-mono text-xs text-ink", "{enrollment.secret_base32}" }
+                    label { class: "flex flex-col gap-1 text-sm text-ink-muted",
+                        "code"
+                        input {
+                            r#type: "text",
+                            required: true,
+                            placeholder: "123456",
+                            class: "border border-line bg-surface px-2.5 py-1.5 font-mono text-sm text-ink focus:border-accent focus:outline-none",
+                            value: "{totp_code}",
+                            oninput: move |event| totp_code.set(event.value()),
+                        }
+                    }
+                    if let Some(message) = totp_error() {
+                        p { class: "font-mono text-xs text-status-conflict", "{message}" }
+                    }
+                    button {
+                        r#type: "submit",
+                        disabled: totp_busy(),
+                        class: "self-start border border-accent bg-accent px-3 py-1.5 font-mono text-sm text-accent-ink disabled:opacity-60",
+                        if totp_busy() { "verifying…" } else { "confirm" }
+                    }
+                }
+            } else {
+                div { class: "mt-4",
+                    if let Some(message) = totp_error() {
+                        p { class: "mb-2 font-mono text-xs text-status-conflict", "{message}" }
+                    }
+                    div { class: "flex gap-3",
+                        button {
+                            r#type: "button",
+                            disabled: totp_busy(),
+                            class: "border border-accent bg-accent px-3 py-1.5 font-mono text-sm text-accent-ink disabled:opacity-60",
+                            onclick: on_start_totp_enroll,
+                            "enroll in 2FA"
+                        }
+                        button {
+                            r#type: "button",
+                            disabled: totp_busy(),
+                            class: "border border-line px-3 py-1.5 font-mono text-sm text-ink-muted hover:text-status-conflict disabled:opacity-60",
+                            onclick: on_disable_totp,
+                            "disable 2FA"
+                        }
+                    }
                 }
             }
         }

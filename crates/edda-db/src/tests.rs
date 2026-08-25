@@ -10,7 +10,10 @@ use edda_domain::{
     Visibility,
 };
 
-use crate::{AccessTokenRepo, LfsRepo, RepoAccessRepo, RepositoryRepo, SshKeyRepo, UserRepo};
+use crate::{
+    AccessTokenRepo, AuditEventRepo, LfsRepo, OAuthIdentityRepo, RepoAccessRepo, RepositoryRepo,
+    SshKeyRepo, TotpRepo, UserRepo, WebauthnRepo,
+};
 
 async fn insert_user(pool: &crate::DbPool, username: &str) -> UserId {
     let id = UserId::new();
@@ -448,4 +451,179 @@ async fn an_lfs_lock_blocks_a_second_lock_on_the_same_path_until_released() {
     LfsRepo::create_lock(&pool, LfsLockId::new(), repository.id, "asset.psd", bob)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn an_oauth_identity_resolves_back_to_its_linked_user() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+
+    OAuthIdentityRepo::insert(
+        &pool,
+        edda_domain::OAuthIdentityId::new(),
+        alice,
+        "test-idp",
+        "sub-123",
+    )
+    .await
+    .unwrap();
+
+    let identity = OAuthIdentityRepo::find_by_provider_subject(&pool, "test-idp", "sub-123")
+        .await
+        .unwrap()
+        .expect("identity round-trips");
+    assert_eq!(identity.user_id, alice);
+
+    assert!(
+        OAuthIdentityRepo::find_by_provider_subject(&pool, "test-idp", "no-such-subject")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let identities = OAuthIdentityRepo::list_for_user(&pool, alice)
+        .await
+        .unwrap();
+    assert_eq!(identities.len(), 1);
+
+    assert!(OAuthIdentityRepo::delete(&pool, alice, identity.id)
+        .await
+        .unwrap());
+    assert!(OAuthIdentityRepo::list_for_user(&pool, alice)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn a_totp_secret_is_not_activated_until_activate_is_called() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+
+    assert!(!TotpRepo::is_activated(&pool, alice).await.unwrap());
+
+    TotpRepo::upsert_secret(&pool, alice, b"ciphertext-bytes")
+        .await
+        .unwrap();
+    assert!(!TotpRepo::is_activated(&pool, alice).await.unwrap());
+
+    let (stored, activated_at) = TotpRepo::find_by_user(&pool, alice)
+        .await
+        .unwrap()
+        .expect("secret round-trips");
+    assert_eq!(stored, b"ciphertext-bytes");
+    assert!(activated_at.is_none());
+
+    TotpRepo::activate(&pool, alice).await.unwrap();
+    assert!(TotpRepo::is_activated(&pool, alice).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_totp_recovery_code_can_only_be_consumed_once() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+
+    TotpRepo::replace_recovery_codes(&pool, alice, &["hash-a".to_string(), "hash-b".to_string()])
+        .await
+        .unwrap();
+
+    assert!(TotpRepo::consume_recovery_code(&pool, alice, "hash-a")
+        .await
+        .unwrap());
+    assert!(!TotpRepo::consume_recovery_code(&pool, alice, "hash-a")
+        .await
+        .unwrap());
+    assert!(
+        !TotpRepo::consume_recovery_code(&pool, alice, "no-such-hash")
+            .await
+            .unwrap()
+    );
+    assert!(TotpRepo::consume_recovery_code(&pool, alice, "hash-b")
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn disabling_totp_removes_the_secret_and_every_recovery_code() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+
+    TotpRepo::upsert_secret(&pool, alice, b"ciphertext-bytes")
+        .await
+        .unwrap();
+    TotpRepo::replace_recovery_codes(&pool, alice, &["hash-a".to_string()])
+        .await
+        .unwrap();
+    TotpRepo::activate(&pool, alice).await.unwrap();
+
+    TotpRepo::delete(&pool, alice).await.unwrap();
+
+    assert!(TotpRepo::find_by_user(&pool, alice)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(!TotpRepo::consume_recovery_code(&pool, alice, "hash-a")
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn a_webauthn_credential_round_trips_and_can_be_revoked_by_its_owner() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let bob = insert_user(&pool, "bob").await;
+
+    let id = edda_domain::WebauthnCredentialId::new();
+    WebauthnRepo::insert(&pool, id, alice, "laptop", "{\"fake\":\"passkey\"}")
+        .await
+        .unwrap();
+
+    let creds = WebauthnRepo::list_for_user(&pool, alice).await.unwrap();
+    assert_eq!(creds.len(), 1);
+    assert_eq!(creds[0].label, "laptop");
+    assert!(creds[0].last_used_at.is_none());
+
+    WebauthnRepo::update_passkey(&pool, id, "{\"fake\":\"updated\"}")
+        .await
+        .unwrap();
+    let creds = WebauthnRepo::list_for_user(&pool, alice).await.unwrap();
+    assert!(creds[0].last_used_at.is_some());
+
+    // Bob can't revoke Alice's credential by guessing its id.
+    assert!(!WebauthnRepo::delete(&pool, bob, id).await.unwrap());
+    assert!(WebauthnRepo::delete(&pool, alice, id).await.unwrap());
+}
+
+#[tokio::test]
+async fn audit_events_list_most_recent_first() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+
+    AuditEventRepo::insert(
+        &pool,
+        edda_domain::AuditEventId::new(),
+        "auth.login.success",
+        Some(&alice.to_string()),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    AuditEventRepo::insert(
+        &pool,
+        edda_domain::AuditEventId::new(),
+        "auth.token.create",
+        Some(&alice.to_string()),
+        Some("access_token"),
+        None,
+        Some("{\"name\":\"ci\"}"),
+    )
+    .await
+    .unwrap();
+
+    let events = AuditEventRepo::list_recent(&pool, 10).await.unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].event_type, "auth.token.create");
+    assert_eq!(events[1].event_type, "auth.login.success");
 }

@@ -686,6 +686,7 @@ pub struct CurrentUser {
     pub id: String,
     pub username: String,
     pub email: String,
+    pub is_admin: bool,
 }
 
 #[cfg(feature = "server")]
@@ -695,6 +696,7 @@ impl From<edda_domain::User> for CurrentUser {
             id: user.id.to_string(),
             username: user.username,
             email: user.email,
+            is_admin: user.is_admin,
         }
     }
 }

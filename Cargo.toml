@@ -48,6 +48,10 @@ axum = "0.8.9"
 axum-login = "0.18.0"
 base64 = "0.22.1"
 bytes = "1.12.1"
+# Only for `edda-auth`'s OAuth/OIDC mock-identity-provider test fixture
+# (`openidconnect`'s own `CoreIdTokenClaims` timestamps are `chrono`
+# types) — not used by any non-test code in this workspace.
+chrono = "0.4.45"
 # GFM-compatible markdown -> HTML. Paired unconditionally with `ammonia`
 # below — every markdown render in this workspace must go through HTML
 # sanitization, no exceptions. `default-features = false` here: comrak's
@@ -115,8 +119,9 @@ syntect = { version = "5.3.0", default-features = false, features = ["default-fa
 thiserror = "2.0.20"
 tokio = "1.53.1"
 # TOTP (RFC 6238) enrollment/verification. `std` (default) + `gen_secret`
-# for server-side secret generation.
-totp-rs = { version = "6.0.0", features = ["gen_secret"] }
+# for server-side secret generation + `otpauth` for the `otpauth://` URI
+# manual-entry/QR string.
+totp-rs = { version = "6.0.0", features = ["gen_secret", "otpauth"] }
 tower-http = "0.6.11"
 tower-sessions = "0.14.0"
 tower-sessions-sqlx-store = "0.15.0"
@@ -125,7 +130,24 @@ tracing-opentelemetry = "0.33.0"
 tracing-subscriber = "0.3.23"
 uuid = "1.24.1"
 web-time = "1.1.0"
-# WebAuthn/passkey second factor (Kanidm-maintained). Default features
-# (no crate feature needed for the standard passkey registration/
-# authentication flow — verified live on docs.rs before adoption).
-webauthn-rs = "0.5.5"
+# WebAuthn/passkey second factor: deliberately NOT added as a dependency
+# here. `webauthn-rs` 0.5.5's `webauthn-rs-core` unconditionally depends on
+# `webauthn-attestation-ca` (not feature-gated — confirmed by inspecting
+# that crate's own `Cargo.toml`, disabling `webauthn-rs`'s default
+# `attestation` feature does not remove it), which depends on `openssl`/
+# `openssl-sys` — a native C dependency this workspace otherwise avoids
+# everywhere else (`ring` over `aws-lc-rs` for `russh`, `rust_crypto` for
+# `jsonwebtoken`, `fancy-regex` for `syntect`). Confirmed on this
+# workspace's own Windows/MSVC dev environment: `cargo check` fails
+# outright without a system OpenSSL install, and forcing `openssl`'s
+# `vendored` feature (building OpenSSL from source instead) also fails
+# here, since the available Perl lacks the CPAN modules OpenSSL's build
+# script needs. TOTP is this phase's required second-factor mechanism
+# (the exit criteria name it explicitly; WebAuthn does not appear in
+# them) — the WebAuthn *persistence* layer (`webauthn_credentials` table,
+# `edda_db::WebauthnRepo`, `edda_domain::WebauthnCredentialId`) is still
+# built and tested, ready for whenever this is revisited, but the actual
+# registration/authentication ceremony is deferred until either a build
+# environment with a working OpenSSL toolchain is available, an upstream
+# `webauthn-rs` release decouples attestation from the core dependency
+# graph, or an alternative crate is evaluated.

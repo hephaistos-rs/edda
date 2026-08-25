@@ -15,21 +15,29 @@
 //! stands in for that now (see `tests.rs`).
 
 pub mod access_token_repo;
+pub mod audit_event_repo;
 pub mod lfs_repo;
+pub mod oauth_identity_repo;
 pub mod repo_access_repo;
 pub mod repository_repo;
 pub mod ssh_key_repo;
+pub mod totp_repo;
 pub mod user_repo;
+pub mod webauthn_repo;
 
 #[cfg(test)]
 mod tests;
 
 pub use access_token_repo::AccessTokenRepo;
+pub use audit_event_repo::{AuditEvent, AuditEventRepo};
 pub use lfs_repo::{CreateLockError, LfsRepo};
+pub use oauth_identity_repo::OAuthIdentityRepo;
 pub use repo_access_repo::RepoAccessRepo;
 pub use repository_repo::RepositoryRepo;
 pub use ssh_key_repo::SshKeyRepo;
+pub use totp_repo::TotpRepo;
 pub use user_repo::UserRepo;
+pub use webauthn_repo::WebauthnRepo;
 
 use sqlx::any::{AnyPoolOptions, AnyRow};
 use sqlx::Row;

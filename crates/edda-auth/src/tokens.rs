@@ -87,8 +87,13 @@ pub async fn authenticate(pool: &DbPool, raw_token: &str) -> Option<(User, Repos
         return None;
     }
     let token_hash = hash_token(raw_token);
-    AccessTokenRepo::find_by_hash(pool, &token_hash)
+    let (user, scope) = AccessTokenRepo::find_by_hash(pool, &token_hash)
         .await
         .ok()
-        .flatten()
+        .flatten()?;
+    // Same "fails like an unknown credential, not a distinct error" reasoning
+    // as `Backend::authenticate` — a disabled account's tokens simply stop
+    // working, indistinguishable from a revoked/invalid token.
+    crate::require_enabled(&user).ok()?;
+    Some((user, scope))
 }

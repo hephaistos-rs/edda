@@ -6,14 +6,22 @@ authors.workspace = true
 
 # A thin binary that talks to `edda-db`/`edda-auth` directly, bypassing
 # HTTP entirely — instance administration (`edda-cli user create/list/
-# disable/delete`) run from the same host/container as the server, not a
-# remote API client. WIP
+# disable/enable/delete`) run from the same host/container as the server,
+# not a remote API client.
 [[bin]]
 name = "edda-cli"
 path = "src/main.rs"
 
 [dependencies]
+# Only for `argon2::password_hash::rand_core` — generating the
+# never-displayed random password `user create` assigns a new account.
+argon2 = { workspace = true }
 edda-auth = { workspace = true }
 edda-db = { workspace = true }
 edda-domain = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+# Only for the `AuthnBackend` trait itself, to drive the real login path
+# in `tests/disable_blocks_login.rs`.
+axum-login = { workspace = true }

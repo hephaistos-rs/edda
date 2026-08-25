@@ -3,6 +3,7 @@
 //! `Cargo.toml` doc comment.
 
 mod access_routes;
+mod admin_routes;
 mod auth_routes;
 mod git_http;
 mod lfs;
@@ -30,6 +31,7 @@ pub fn router(state: AppState) -> Router {
         .merge(auth_routes::routes())
         .merge(access_routes::routes())
         .merge(ssh_key_routes::routes())
+        .merge(admin_routes::routes())
         .route("/healthz", get(healthz));
 
     with_http_observability(routes).with_state(state)

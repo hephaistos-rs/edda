@@ -8,7 +8,7 @@ mod shared;
 mod ui;
 
 use ui::layouts::Navbar;
-use ui::pages::{Home, Login, Repo, Settings, Signup};
+use ui::pages::{Admin, Home, Login, Repo, Settings, Signup};
 
 #[derive(Debug, Clone, Routable, PartialEq)]
 #[rustfmt::skip]
@@ -18,6 +18,8 @@ enum Route {
     Home {},
     #[route("/settings")]
     Settings {},
+    #[route("/admin")]
+    Admin {},
     #[route("/:owner/:name")]
     Repo { owner: String, name: String },
     #[route("/signup")]

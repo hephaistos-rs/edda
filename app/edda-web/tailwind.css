@@ -62,3 +62,65 @@
     scrollbar-color: var(--color-line) var(--color-bg);
   }
 }
+
+/*
+ * Syntax-highlighting theme for `edda_render::syntax::highlight`'s output
+ * (`crates/edda-render/src/syntax.rs`). That module emits class-based HTML
+ * (`syntect::html::ClassStyle::Spaced` — one class per dotted scope
+ * segment, e.g. `keyword.control.rust` becomes `class="keyword control
+ * rust"`) specifically so the color theme is a CSS concern, swappable
+ * without re-rendering anything server-side — this block is that theme.
+ * Plain CSS, not `@theme` tokens: these selectors target TextMate-grammar
+ * scope names (a fixed vocabulary from `syntect`'s bundled syntaxes), not
+ * this design system's own semantic color tokens, though the *values*
+ * reuse the same palette for consistency with the rest of the UI.
+ */
+.edda-highlight,
+.edda-highlight code {
+  white-space: pre;
+}
+
+.edda-highlight .comment {
+  color: var(--color-ink-muted);
+  font-style: italic;
+}
+
+.edda-highlight .string,
+.edda-highlight .constant.character {
+  color: var(--color-status-clean);
+}
+
+.edda-highlight .constant.numeric,
+.edda-highlight .constant.language {
+  color: var(--color-status-ahead);
+}
+
+.edda-highlight .keyword,
+.edda-highlight .storage {
+  color: var(--color-accent);
+}
+
+.edda-highlight .entity.name.function,
+.edda-highlight .support.function {
+  color: var(--color-status-ahead);
+}
+
+.edda-highlight .entity.name.type,
+.edda-highlight .entity.name.class,
+.edda-highlight .support.type,
+.edda-highlight .support.class {
+  color: var(--color-status-clean);
+}
+
+.edda-highlight .variable {
+  color: var(--color-ink);
+}
+
+.edda-highlight .invalid {
+  color: var(--color-status-conflict);
+}
+
+.edda-highlight .punctuation,
+.edda-highlight .meta {
+  color: var(--color-ink);
+}

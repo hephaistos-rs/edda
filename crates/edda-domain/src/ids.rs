@@ -66,3 +66,8 @@ id_type!(RepositoryId);
 id_type!(AccessTokenId);
 id_type!(SshKeyId);
 id_type!(LfsLockId);
+id_type!(OAuthIdentityId);
+id_type!(WebauthnCredentialId);
+id_type!(TotpRecoveryCodeId);
+id_type!(PasswordResetTokenId);
+id_type!(AuditEventId);

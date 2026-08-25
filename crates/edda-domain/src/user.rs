@@ -11,4 +11,18 @@ pub struct User {
     pub id: UserId,
     pub username: String,
     pub email: String,
+    /// Instance-level administrator, distinct from any per-repository
+    /// `RepoRole` — grants access to instance administration (user
+    /// management, per `access::require_instance_admin`), not repository
+    /// access. Never checked as an ad hoc `if user.is_admin` outside that
+    /// function.
+    pub is_admin: bool,
+    /// When an administrator disabled this account, if ever. `None` means
+    /// enabled. Checked by `edda_auth::authn` before a login (of any
+    /// kind — password, token, SSH key, OAuth) succeeds. Deliberately
+    /// does not force-invalidate an already-established session when
+    /// set — only the *next* authentication attempt is refused, the same
+    /// "takes effect on the next auth attempt, not live-connection-
+    /// killing" behavior already used for revoking an SSH key or PAT.
+    pub disabled_at: Option<i64>,
 }

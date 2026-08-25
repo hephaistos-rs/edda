@@ -1,7 +1,12 @@
+pub mod diff;
 pub mod pack;
 pub mod pktline;
 pub mod protocol;
+pub mod search;
 pub mod store;
+
+pub use diff::{commit_diff, DiffHunk, DiffLine, FileDiff};
+pub use search::{search_tree, SearchMatch};
 
 use std::collections::HashMap;
 use std::fmt;
@@ -349,6 +354,15 @@ pub struct CommitLogEntry {
 
 const MAX_INLINE_BLOB_BYTES: usize = 1_000_000;
 
+/// The same coarse binary-detection heuristic git itself uses: a NUL byte
+/// anywhere in the first few KB means "binary." Shared by `read_blob`
+/// (`BlobContent::is_binary`), `diff::commit_diff` (`FileDiff::is_binary`),
+/// and `search::search_tree` (skipping binary files entirely) — one
+/// definition of "binary" for this crate, not three that could drift apart.
+pub(crate) fn is_binary_data(data: &[u8]) -> bool {
+    data.iter().take(8000).any(|&byte| byte == 0)
+}
+
 /// Sorted local branch names — shared by `repo_summary` (for `branch_count`),
 /// `open_and_resolve`'s unborn-HEAD fallback, and `list_branches` (for the
 /// UI's branch switcher), so there's exactly one place that defines what
@@ -528,7 +542,7 @@ pub fn read_blob(
             .map_err(|err| GitError::Git(err.to_string()))?;
         let data = std::mem::take(&mut object.data);
         let size = data.len() as u64;
-        let is_binary = data.iter().take(8000).any(|&byte| byte == 0);
+        let is_binary = is_binary_data(&data);
 
         let content = if is_binary || data.len() > MAX_INLINE_BLOB_BYTES {
             None

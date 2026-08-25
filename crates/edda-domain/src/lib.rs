@@ -6,6 +6,7 @@
 pub mod access;
 pub mod ids;
 pub mod lfs;
+pub mod oauth_identity;
 pub mod repository;
 pub mod ssh_key;
 pub mod token;
@@ -14,10 +15,15 @@ pub mod validation;
 
 pub use access::{
     can_administer_repository, can_manage_repository_danger_zone, can_read_repository,
-    can_write_repository, ActorContext, AuthzError, RepoAccess, RepoRole, RepositoryScope,
+    can_write_repository, require_instance_admin, ActorContext, AuthzError, RepoAccess, RepoRole,
+    RepositoryScope,
 };
-pub use ids::{AccessTokenId, LfsLockId, RepositoryId, SshKeyId, UserId};
+pub use ids::{
+    AccessTokenId, AuditEventId, LfsLockId, OAuthIdentityId, PasswordResetTokenId, RepositoryId,
+    SshKeyId, TotpRecoveryCodeId, UserId, WebauthnCredentialId,
+};
 pub use lfs::{LfsLock, LfsObject};
+pub use oauth_identity::OAuthIdentity;
 pub use repository::{Repository, RepositoryOwner, Visibility};
 pub use ssh_key::SshKey;
 pub use token::AccessToken;

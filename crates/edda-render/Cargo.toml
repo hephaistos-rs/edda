@@ -1,0 +1,22 @@
+[package]
+name = "edda-render"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+# Markdown-to-HTML and syntax-highlighting rendering — presentation logic,
+# not domain/business-rule logic, so it lives in its own crate rather than
+# in `edda-domain` (which stays a pure functional core with no heavy
+# dependencies — see that crate's own `Cargo.toml` doc comment). No I/O of
+# any kind: `syntect`'s bundled default syntax/theme sets and `comrak`/
+# `ammonia`'s parsers are all in-memory, so this crate needs no `tokio`, no
+# `sqlx`, nothing beyond the three rendering dependencies themselves.
+[dependencies]
+# GFM-to-HTML. Every render this crate produces from it is piped through
+# `ammonia` before being returned — see `markdown::render`'s doc comment.
+# `default-features = false` at the workspace level (see that entry's own
+# comment) — no override needed here since this crate doesn't want comrak's
+# defaults either.
+comrak = { workspace = true }
+ammonia = { workspace = true }
+syntect = { workspace = true }

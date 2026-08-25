@@ -4,7 +4,9 @@ members = [
     "crates/edda-domain",
     "crates/edda-db",
     "crates/edda-git",
+    "crates/edda-render",
     "crates/edda-auth",
+    "crates/edda-cli",
     "crates/edda-http",
     "crates/edda-ssh",
     "crates/edda-telemetry",
@@ -24,27 +26,71 @@ authors = ["Damianko135 <139293484+Damianko135@users.noreply.github.com>"]
 edda-domain = { path = "crates/edda-domain" }
 edda-db = { path = "crates/edda-db" }
 edda-git = { path = "crates/edda-git" }
+edda-render = { path = "crates/edda-render" }
 edda-auth = { path = "crates/edda-auth" }
+edda-cli = { path = "crates/edda-cli" }
 edda-http = { path = "crates/edda-http" }
 edda-ssh = { path = "crates/edda-ssh" }
 edda-telemetry = { path = "crates/edda-telemetry" }
 
+# Secret-at-rest encryption for the TOTP shared secret (`totp_secrets.
+# secret_ciphertext`) — see `crates/edda-auth/src/secret_box.rs`'s doc
+# comment. Verified live on crates.io before adoption (0.11.1,
+# 2026-08-21) and chosen for the same RustCrypto-family/pure-Rust
+# reasoning already applied to `sha2`/`argon2` in this workspace. Scoped
+# narrowly to the one secret that needs to be stored reversibly today;
+# webhook secrets and OAuth client secrets are separate, still-open
+# at-rest-encryption questions for whenever those features are built.
+aes-gcm = "0.11.1"
 argon2 = "0.5.3"
 async-trait = "0.1.92"
 axum = "0.8.9"
 axum-login = "0.18.0"
 base64 = "0.22.1"
 bytes = "1.12.1"
+# GFM-compatible markdown -> HTML. Paired unconditionally with `ammonia`
+# below — every markdown render in this workspace must go through HTML
+# sanitization, no exceptions. `default-features = false` here: comrak's
+# own defaults pull in `syntect` with its Oniguruma (C library) regex
+# backend for comrak's own optional code-fence-highlighting integration,
+# which this workspace doesn't use (`edda-render::syntax` does its own
+# highlighting against a separately pinned, pure-Rust-backend `syntect`
+# below) and which would otherwise silently defeat that pure-Rust choice
+# via Cargo's whole-graph feature unification. Cargo only lets a member
+# crate opt *into* a workspace dependency's default features, not out of
+# them, so the default has to be off here for `edda-render`'s `Cargo.toml`
+# to be able to leave it off.
+comrak = { version = "0.54.0", default-features = false }
 dioxus = "0.7.1"
 dioxus-free-icons = "0.10.0"
 flate2 = "1.1.9"
 gix = "0.86.0"
+# Owned actor-identity type (`Signature`), only needed directly by
+# `edda-git::diff`'s test fixtures for hand-building commits without
+# shelling out to `git` — `gix` itself depends on this transitively at the
+# same version already (confirmed via `cargo tree -p edda-git -i gix-actor`).
+# `edda-git::diff::commit_diff` itself uses `gix::Repository::
+# diff_tree_to_tree` (`gix`'s own wrapper around the tree-diff functionality
+# `gix-diff` provides), never a `gix_diff::`-namespaced type by name, so
+# `gix-diff` doesn't need its own direct dependency entry here.
+gix-actor = "0.41.2"
 gix-hash = "0.26.0"
 gix-object = "0.63.0"
 gloo-net = "0.7.0"
+# HTML sanitizer run on every `comrak` output — see that dependency's own
+# comment.
+ammonia = "4.1.4"
 # Only HMAC (`hmac`/`sha2`) is actually used here (HS256), but the crate
 # has no narrower "HMAC-only" feature to enable instead.
 jsonwebtoken = { version = "11.0.0", default-features = false, features = ["rust_crypto"] }
+# OAuth2/OIDC *consumer* login (`edda-auth::oauth`) — Edda authenticates
+# against external identity providers; it does not act as an OAuth/OIDC
+# provider itself. `openidconnect` pulls its own compatible `oauth2`
+# (5.0.0) transitively; both are named here for clarity, but direct
+# usage goes through `openidconnect`'s `CoreClient`, which is a strict
+# superset of the plain-OAuth2 flow this needs.
+oauth2 = "5.0.0"
+openidconnect = "4.0.1"
 opentelemetry = "0.32.0"
 opentelemetry-appender-tracing = "0.32.0"
 opentelemetry-otlp = { version = "0.32.0", default-features = false }
@@ -61,8 +107,16 @@ serde = "1.0.229"
 serde_json = "1.0.145"
 sha2 = "0.10.9"
 sqlx = "0.8.6"
+# `default-fancy` (fancy-regex backend), not `default-onig` — Onig is a C
+# library, and this workspace avoids native/C dependencies wherever a
+# pure-Rust alternative exists (the same preference already applied to
+# `russh`'s `ring` backend and `jsonwebtoken`'s `rust_crypto` backend).
+syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
 thiserror = "2.0.20"
 tokio = "1.53.1"
+# TOTP (RFC 6238) enrollment/verification. `std` (default) + `gen_secret`
+# for server-side secret generation.
+totp-rs = { version = "6.0.0", features = ["gen_secret"] }
 tower-http = "0.6.11"
 tower-sessions = "0.14.0"
 tower-sessions-sqlx-store = "0.15.0"
@@ -71,3 +125,7 @@ tracing-opentelemetry = "0.33.0"
 tracing-subscriber = "0.3.23"
 uuid = "1.24.1"
 web-time = "1.1.0"
+# WebAuthn/passkey second factor (Kanidm-maintained). Default features
+# (no crate feature needed for the standard passkey registration/
+# authentication flow — verified live on docs.rs before adoption).
+webauthn-rs = "0.5.5"

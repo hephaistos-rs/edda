@@ -123,6 +123,18 @@ pub(crate) fn get_opt_i64(row: &AnyRow, column: &str) -> Result<Option<i64>, sql
     row.try_get(column)
 }
 
+/// Reads an `INTEGER 0/1` flag column as a `bool` — see the admin/disable
+/// migration's comment for why these flags are `INTEGER`, not a native
+/// `BOOLEAN`, on every backend.
+pub(crate) fn get_bool(row: &AnyRow, column: &str) -> Result<bool, sqlx::Error> {
+    Ok(get_i64(row, column)? != 0)
+}
+
+/// Reads a `BLOB`/`BYTEA` column as raw bytes regardless of backend.
+pub(crate) fn get_bytes(row: &AnyRow, column: &str) -> Result<Vec<u8>, sqlx::Error> {
+    row.try_get(column)
+}
+
 /// Opens the configured backend's pool and applies any migrations that
 /// haven't run yet. Safe to call more than once per process — pool
 /// creation is cheap and idempotent.

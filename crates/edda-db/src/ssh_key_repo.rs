@@ -1,6 +1,6 @@
 use edda_domain::{SshKey, SshKeyId, User, UserId};
 
-use crate::{get_i64, get_opt_i64, get_string, Backend, DbPool};
+use crate::{get_bool, get_i64, get_opt_i64, get_string, Backend, DbPool};
 
 #[derive(Debug, thiserror::Error)]
 pub enum InsertSshKeyError {
@@ -114,12 +114,12 @@ impl SshKeyRepo {
     ) -> Result<Option<User>, sqlx::Error> {
         let select_sql = match pool.backend {
             Backend::Postgres => {
-                r#"SELECT u.id as user_id, u.username, u.email
+                r#"SELECT u.id as user_id, u.username, u.email, u.is_admin, u.disabled_at
                    FROM ssh_keys k JOIN users u ON u.id = k.user_id
                    WHERE k.fingerprint = $1"#
             }
             Backend::Sqlite | Backend::MySql => {
-                r#"SELECT u.id as user_id, u.username, u.email
+                r#"SELECT u.id as user_id, u.username, u.email, u.is_admin, u.disabled_at
                    FROM ssh_keys k JOIN users u ON u.id = k.user_id
                    WHERE k.fingerprint = ?"#
             }
@@ -149,6 +149,8 @@ impl SshKeyRepo {
                 .expect("stored user id is a valid UUID"),
             username: get_string(&row, "username")?,
             email: get_string(&row, "email")?,
+            is_admin: get_bool(&row, "is_admin")?,
+            disabled_at: get_opt_i64(&row, "disabled_at")?,
         }))
     }
 }

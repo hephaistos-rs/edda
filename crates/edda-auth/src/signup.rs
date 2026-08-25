@@ -68,5 +68,7 @@ pub async fn signup(
         id,
         username: username.to_string(),
         email: email.to_string(),
+        is_admin: false,
+        disabled_at: None,
     })
 }

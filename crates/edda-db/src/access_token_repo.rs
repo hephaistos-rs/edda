@@ -1,6 +1,6 @@
 use edda_domain::{AccessToken, AccessTokenId, RepositoryScope, User, UserId};
 
-use crate::{get_i64, get_opt_i64, get_string, Backend, DbPool};
+use crate::{get_bool, get_i64, get_opt_i64, get_string, Backend, DbPool};
 
 fn scope_to_json(scope: &RepositoryScope) -> String {
     serde_json::to_string(scope).expect("RepositoryScope always serializes")
@@ -113,12 +113,12 @@ impl AccessTokenRepo {
     ) -> Result<Option<(User, RepositoryScope)>, sqlx::Error> {
         let select_sql = match pool.backend {
             Backend::Postgres => {
-                r#"SELECT u.id as user_id, u.username, u.email, t.repository_scope
+                r#"SELECT u.id as user_id, u.username, u.email, u.is_admin, u.disabled_at, t.repository_scope
                    FROM access_tokens t JOIN users u ON u.id = t.user_id
                    WHERE t.token_hash = $1"#
             }
             Backend::Sqlite | Backend::MySql => {
-                r#"SELECT u.id as user_id, u.username, u.email, t.repository_scope
+                r#"SELECT u.id as user_id, u.username, u.email, u.is_admin, u.disabled_at, t.repository_scope
                    FROM access_tokens t JOIN users u ON u.id = t.user_id
                    WHERE t.token_hash = ?"#
             }
@@ -148,6 +148,8 @@ impl AccessTokenRepo {
                 .expect("stored user id is a valid UUID"),
             username: get_string(&row, "username")?,
             email: get_string(&row, "email")?,
+            is_admin: get_bool(&row, "is_admin")?,
+            disabled_at: get_opt_i64(&row, "disabled_at")?,
         };
         Ok(Some((
             user,

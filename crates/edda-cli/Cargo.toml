@@ -1,0 +1,19 @@
+[package]
+name = "edda-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+# A thin binary that talks to `edda-db`/`edda-auth` directly, bypassing
+# HTTP entirely — instance administration (`edda-cli user create/list/
+# disable/delete`) run from the same host/container as the server, not a
+# remote API client. WIP
+[[bin]]
+name = "edda-cli"
+path = "src/main.rs"
+
+[dependencies]
+edda-auth = { workspace = true }
+edda-db = { workspace = true }
+edda-domain = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

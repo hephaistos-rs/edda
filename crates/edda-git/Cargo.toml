@@ -24,4 +24,10 @@ tokio = { workspace = true, features = ["sync", "rt"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# `tree-editor`: only needed by `diff`'s test fixtures, which hand-build
+# commits (`gix::Repository::edit_tree`) rather than shelling out to `git` —
+# not needed by any non-test code in this crate, so scoped to dev-only here
+# rather than added to the main `gix` dependency above.
+gix = { workspace = true, features = ["tree-editor"] }
+gix-actor = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }

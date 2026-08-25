@@ -161,6 +161,23 @@ pub fn can_manage_repository_danger_zone(
     require_role(actor, repository, access, RepoRole::Owner)
 }
 
+/// The single centralized instance-administration check (user management,
+/// the admin UI/API) — every caller passes the already-resolved actor's
+/// `User::is_admin` flag rather than re-deriving admin-ness itself, so
+/// there is exactly one place that decides what "admin" means, matching
+/// the same discipline `can_administer_repository` already applies to
+/// repository-scoped roles. Deliberately takes a plain `bool`, not a
+/// `User`, so `edda-domain` doesn't need to know the shape of a session
+/// or token to make this decision — the caller has already resolved *who
+/// is asking* before reaching here.
+pub fn require_instance_admin(actor_is_admin: bool) -> Result<(), AuthzError> {
+    if actor_is_admin {
+        Ok(())
+    } else {
+        Err(AuthzError::Forbidden)
+    }
+}
+
 fn token_scope_permits(actor: &ActorContext, repository: &Repository) -> bool {
     match actor {
         ActorContext::Token { scope, .. } => scope.permits(repository),

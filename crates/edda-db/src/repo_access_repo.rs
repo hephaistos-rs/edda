@@ -1,6 +1,6 @@
 use edda_domain::{RepoAccess, RepoRole, RepositoryId, User, UserId};
 
-use crate::{get_i64, get_string, Backend, DbPool};
+use crate::{get_bool, get_i64, get_opt_i64, get_string, Backend, DbPool};
 
 /// One row of `list_collaborators`: the access grant plus enough of the
 /// grantee's identity to render a collaborator list without a second
@@ -130,12 +130,12 @@ impl RepoAccessRepo {
         let repository_id_text = repository_id.to_string();
         let sql = match pool.backend {
             Backend::Postgres => {
-                r#"SELECT u.id as user_id, u.username, u.email, a.role, a.added_at
+                r#"SELECT u.id as user_id, u.username, u.email, u.is_admin, u.disabled_at, a.role, a.added_at
                    FROM repo_access a JOIN users u ON u.id = a.user_id
                    WHERE a.repository_id = $1 ORDER BY a.added_at"#
             }
             Backend::Sqlite | Backend::MySql => {
-                r#"SELECT u.id as user_id, u.username, u.email, a.role, a.added_at
+                r#"SELECT u.id as user_id, u.username, u.email, u.is_admin, u.disabled_at, a.role, a.added_at
                    FROM repo_access a JOIN users u ON u.id = a.user_id
                    WHERE a.repository_id = ? ORDER BY a.added_at"#
             }
@@ -153,6 +153,8 @@ impl RepoAccessRepo {
                             .expect("stored user id is a valid UUID"),
                         username: get_string(&row, "username")?,
                         email: get_string(&row, "email")?,
+                        is_admin: get_bool(&row, "is_admin")?,
+                        disabled_at: get_opt_i64(&row, "disabled_at")?,
                     },
                     role: RepoRole::from_db_str(&get_string(&row, "role")?)
                         .expect("stored repo_access.role is one of the CHECK'd values"),

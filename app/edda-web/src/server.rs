@@ -368,17 +368,45 @@ pub struct BlobDto {
     pub size: u64,
     pub is_binary: bool,
     pub content: Option<String>,
+    /// Server-rendered HTML for `content`, already sanitized where that
+    /// matters: a README (see `is_readme_filename`) gets `edda_render::
+    /// markdown::render`'s GFM-to-sanitized-HTML output; any other
+    /// non-binary text file gets `edda_render::syntax::highlight`'s
+    /// syntax-highlighted markup instead. `None` for binary content and
+    /// for anything with no inline `content` at all (oversized files) —
+    /// the client falls back to plain-text `content` display whenever
+    /// this is `None`.
+    pub rendered_html: Option<String>,
+}
+
+/// `README`/`README.md`/`README.markdown`, case-insensitively — the same
+/// three spellings GitHub/Forgejo treat as a repo's rendered landing
+/// document. An exact-name match, not a substring/prefix one, so e.g.
+/// `readme-notes.md` is treated as a plain text file (syntax-highlighted,
+/// not markdown-rendered).
+#[cfg(feature = "server")]
+fn is_readme_filename(name: &str) -> bool {
+    matches!(
+        name.to_lowercase().as_str(),
+        "readme.md" | "readme.markdown" | "readme"
+    )
 }
 
 #[cfg(feature = "server")]
-impl From<edda_git::BlobContent> for BlobDto {
-    fn from(blob: edda_git::BlobContent) -> Self {
-        Self {
-            name: blob.name,
-            size: blob.size,
-            is_binary: blob.is_binary,
-            content: blob.content,
+fn blob_dto(blob: edda_git::BlobContent) -> BlobDto {
+    let rendered_html = match (&blob.content, blob.is_binary) {
+        (Some(content), false) if is_readme_filename(&blob.name) => {
+            Some(edda_render::markdown::render(content))
         }
+        (Some(content), false) => Some(edda_render::syntax::highlight(content, &blob.name)),
+        _ => None,
+    };
+    BlobDto {
+        name: blob.name,
+        size: blob.size,
+        is_binary: blob.is_binary,
+        content: blob.content,
+        rendered_html,
     }
 }
 
@@ -464,7 +492,7 @@ pub async fn get_blob(
     let identity = git_identity(&owner, &name);
     let blob = edda_git::read_blob(shared.store.as_ref(), &identity, branch.as_deref(), &path)
         .map_err(|err| ServerFnError::new(err.to_string()))?;
-    Ok(BlobDto::from(blob))
+    Ok(blob_dto(blob))
 }
 
 #[get("/api/repos/:owner/:name/branches", auth: axum_login::AuthSession<edda_auth::Backend>)]
@@ -490,6 +518,167 @@ pub async fn get_commit_log(
     let entries = edda_git::commit_log(shared.store.as_ref(), &identity, branch.as_deref(), 50)
         .map_err(|err| ServerFnError::new(err.to_string()))?;
     Ok(entries.into_iter().map(CommitLogEntryDto::from).collect())
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DiffLineKind {
+    Context,
+    Added,
+    Removed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DiffLineDto {
+    pub kind: DiffLineKind,
+    /// Syntax-highlighted markup for just this one line's text (see
+    /// `highlighted_line_html`) — not a whole `<pre><code>` block, since
+    /// the UI renders each line as its own row (added/removed/context
+    /// styling per row, per `DESIGN.md`'s never-color-alone rule), not a
+    /// single flowing code block.
+    pub html: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DiffHunkDto {
+    pub old_start: u32,
+    pub new_start: u32,
+    pub lines: Vec<DiffLineDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FileDiffDto {
+    pub old_path: Option<String>,
+    pub new_path: Option<String>,
+    pub is_binary: bool,
+    pub hunks: Vec<DiffHunkDto>,
+}
+
+/// `edda_render::syntax::highlight` always wraps its output in a shared
+/// `<pre class="edda-highlight"><code>...</code></pre>` fragment (a whole
+/// file's worth of highlighted lines, in the tree/blob view this was
+/// originally built for). A commit diff instead wants one syntax-
+/// highlighted fragment *per line*, each independently wrapped in its own
+/// added/removed/context row — so this strips that shared wrapper back off
+/// per call rather than adding a second public entry point to
+/// `edda-render` for "highlight, no wrapper." Safe to do with a plain
+/// string strip (not a general HTML-parsing concern) because the wrapper's
+/// exact text is this same workspace's own fixed format, not third-party
+/// markup whose shape this code would otherwise have to guess at.
+///
+/// A real limitation worth naming: highlighting one line at a time gives
+/// `syntect` no parser state carried over from the previous line, so a
+/// token that only makes sense in a multi-line context (an unterminated
+/// block comment or string, for instance) can highlight less accurately
+/// here than it would in `syntax::highlight`'s whole-file mode. Acceptable
+/// for a diff view — the exit criterion is "diffs render, syntax-
+/// highlighted, for a representative set of languages," not "every
+/// multi-line-token edge case highlights identically to a full-file view."
+#[cfg(feature = "server")]
+fn highlighted_line_html(text: &str, filename_hint: &str) -> String {
+    let wrapped = edda_render::syntax::highlight(text, filename_hint);
+    wrapped
+        .strip_prefix("<pre class=\"edda-highlight\"><code>")
+        .and_then(|rest| rest.strip_suffix("</code></pre>"))
+        .unwrap_or(wrapped.as_str())
+        .to_string()
+}
+
+#[cfg(feature = "server")]
+fn file_diff_dto(diff: edda_git::FileDiff) -> FileDiffDto {
+    let filename_hint = diff
+        .new_path
+        .clone()
+        .or_else(|| diff.old_path.clone())
+        .unwrap_or_default();
+    let hunks = diff
+        .hunks
+        .into_iter()
+        .map(|hunk| DiffHunkDto {
+            old_start: hunk.old_start,
+            new_start: hunk.new_start,
+            lines: hunk
+                .lines
+                .into_iter()
+                .map(|line| {
+                    let (kind, text) = match line {
+                        edda_git::DiffLine::Context(text) => (DiffLineKind::Context, text),
+                        edda_git::DiffLine::Added(text) => (DiffLineKind::Added, text),
+                        edda_git::DiffLine::Removed(text) => (DiffLineKind::Removed, text),
+                    };
+                    DiffLineDto {
+                        kind,
+                        html: highlighted_line_html(&text, &filename_hint),
+                    }
+                })
+                .collect(),
+        })
+        .collect();
+    FileDiffDto {
+        old_path: diff.old_path,
+        new_path: diff.new_path,
+        is_binary: diff.is_binary,
+        hunks,
+    }
+}
+
+/// `path` isn't part of this route: `commit_id` alone (plus the repo
+/// identity) is enough to compute a full commit's diff — see
+/// `edda_git::diff::commit_diff`'s comparison-point rule (first parent, or
+/// the empty tree for a root commit).
+#[get("/api/repos/:owner/:name/commits/:commit_id/diff", auth: axum_login::AuthSession<edda_auth::Backend>)]
+#[tracing::instrument(name = "repository.commit_diff", skip_all, err, fields(repo.owner = %owner, repo.name = %name, commit.id = %commit_id))]
+pub async fn get_commit_diff(
+    owner: String,
+    name: String,
+    commit_id: String,
+) -> Result<Vec<FileDiffDto>, ServerFnError> {
+    require_read_access(&auth, &owner, &name).await?;
+    let shared = crate::shared::get();
+    let identity = git_identity(&owner, &name);
+    let diffs = edda_git::commit_diff(shared.store.as_ref(), &identity, &commit_id)
+        .map_err(|err| ServerFnError::new(err.to_string()))?;
+    Ok(diffs.into_iter().map(file_diff_dto).collect())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SearchMatchDto {
+    pub path: String,
+    pub line_number: u32,
+    pub line: String,
+}
+
+#[cfg(feature = "server")]
+impl From<edda_git::SearchMatch> for SearchMatchDto {
+    fn from(search_match: edda_git::SearchMatch) -> Self {
+        Self {
+            path: search_match.path,
+            line_number: search_match.line_number,
+            line: search_match.line,
+        }
+    }
+}
+
+#[get("/api/repos/:owner/:name/search?branch&query", auth: axum_login::AuthSession<edda_auth::Backend>)]
+#[tracing::instrument(name = "repository.search", skip_all, err, fields(repo.owner = %owner, repo.name = %name, branch = branch.as_deref().unwrap_or("HEAD")))]
+pub async fn search_code(
+    owner: String,
+    name: String,
+    branch: Option<String>,
+    query: String,
+) -> Result<Vec<SearchMatchDto>, ServerFnError> {
+    require_read_access(&auth, &owner, &name).await?;
+    // An empty (or whitespace-only) query matches every line of every file
+    // via plain substring search — a full tree walk for a result nobody
+    // wants. Short-circuit before paying for it.
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let shared = crate::shared::get();
+    let identity = git_identity(&owner, &name);
+    let matches =
+        edda_git::search_tree(shared.store.as_ref(), &identity, branch.as_deref(), &query)
+            .map_err(|err| ServerFnError::new(err.to_string()))?;
+    Ok(matches.into_iter().map(SearchMatchDto::from).collect())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

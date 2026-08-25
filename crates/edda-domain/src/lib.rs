@@ -5,6 +5,7 @@
 
 pub mod access;
 pub mod ids;
+pub mod lfs;
 pub mod repository;
 pub mod ssh_key;
 pub mod token;
@@ -15,7 +16,8 @@ pub use access::{
     can_administer_repository, can_manage_repository_danger_zone, can_read_repository,
     can_write_repository, ActorContext, AuthzError, RepoAccess, RepoRole, RepositoryScope,
 };
-pub use ids::{AccessTokenId, RepositoryId, SshKeyId, UserId};
+pub use ids::{AccessTokenId, LfsLockId, RepositoryId, SshKeyId, UserId};
+pub use lfs::{LfsLock, LfsObject};
 pub use repository::{Repository, RepositoryOwner, Visibility};
 pub use ssh_key::SshKey;
 pub use token::AccessToken;

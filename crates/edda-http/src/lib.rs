@@ -5,6 +5,7 @@
 mod access_routes;
 mod auth_routes;
 mod git_http;
+mod lfs;
 mod ssh_key_routes;
 mod state;
 
@@ -25,6 +26,7 @@ use tower_http::trace::TraceLayer;
 pub fn router(state: AppState) -> Router {
     let routes = Router::new()
         .merge(git_http::routes())
+        .merge(lfs::routes())
         .merge(auth_routes::routes())
         .merge(access_routes::routes())
         .merge(ssh_key_routes::routes())

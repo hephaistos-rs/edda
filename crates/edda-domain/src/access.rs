@@ -207,6 +207,7 @@ mod tests {
             name: "demo".to_string(),
             description: None,
             visibility,
+            forked_from: None,
         }
     }
 

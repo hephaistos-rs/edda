@@ -3,8 +3,8 @@ use dioxus_free_icons::icons::ld_icons::{LdFile, LdFolder, LdLock, LdLockOpen, L
 use dioxus_free_icons::Icon;
 
 use crate::server::{
-    delete_repo, get_blob, get_branches, get_commit_log, get_repo, get_tree, set_repo_visibility,
-    update_repo,
+    delete_repo, fork_repo, get_blob, get_branches, get_commit_log, get_repo, get_tree,
+    set_repo_visibility, update_repo,
 };
 use crate::Route;
 
@@ -130,6 +130,8 @@ pub fn Repo(owner: String, name: String) -> Element {
     let mut description_error = use_signal(|| Option::<String>::None);
     let mut visibility_error = use_signal(|| Option::<String>::None);
     let mut visibility_pending = use_signal(|| false);
+    let mut fork_error = use_signal(|| Option::<String>::None);
+    let mut fork_pending = use_signal(|| false);
 
     let body = match repo() {
         Some(Ok(dto)) => {
@@ -200,8 +202,40 @@ pub fn Repo(owner: String, name: String) -> Element {
                             if is_private { "make public" } else { "make private" }
                         }
                     }
+                    if !is_owner {
+                        button {
+                            r#type: "button",
+                            class: "font-mono text-xs text-ink-muted underline hover:text-ink disabled:opacity-50",
+                            disabled: fork_pending(),
+                            onclick: {
+                                let owner = owner.clone();
+                                let name = name.clone();
+                                move |_| {
+                                    let owner = owner.clone();
+                                    let name = name.clone();
+                                    fork_pending.set(true);
+                                    spawn(async move {
+                                        match fork_repo(owner, name).await {
+                                            Ok((new_owner, new_name)) => {
+                                                fork_error.set(None);
+                                                navigator.push(Route::Repo { owner: new_owner, name: new_name });
+                                            }
+                                            Err(err) => {
+                                                fork_error.set(Some(err.to_string()));
+                                                fork_pending.set(false);
+                                            }
+                                        }
+                                    });
+                                }
+                            },
+                            "fork"
+                        }
+                    }
                 }
                 if let Some(message) = visibility_error() {
+                    p { class: "mt-1 font-mono text-xs text-status-conflict", "{message}" }
+                }
+                if let Some(message) = fork_error() {
                     p { class: "mt-1 font-mono text-xs text-status-conflict", "{message}" }
                 }
                 p { class: "mt-1 font-mono text-xs text-ink-muted", "{status_line}" }

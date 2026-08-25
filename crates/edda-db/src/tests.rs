@@ -6,10 +6,11 @@
 //! tests persistence and schema behavior, not authorization policy).
 
 use edda_domain::{
-    RepoRole, Repository, RepositoryId, RepositoryOwner, SshKeyId, User, UserId, Visibility,
+    LfsLockId, RepoRole, Repository, RepositoryId, RepositoryOwner, SshKeyId, User, UserId,
+    Visibility,
 };
 
-use crate::{AccessTokenRepo, RepoAccessRepo, RepositoryRepo, SshKeyRepo, UserRepo};
+use crate::{AccessTokenRepo, LfsRepo, RepoAccessRepo, RepositoryRepo, SshKeyRepo, UserRepo};
 
 async fn insert_user(pool: &crate::DbPool, username: &str) -> UserId {
     let id = UserId::new();
@@ -26,6 +27,7 @@ fn repo(owner: UserId, name: &str, visibility: Visibility) -> Repository {
         name: name.to_string(),
         description: None,
         visibility,
+        forked_from: None,
     }
 }
 
@@ -350,4 +352,100 @@ async fn deleting_a_user_cascades_their_ssh_keys() {
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn a_fork_persists_and_round_trips_its_forked_from_pointer() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let bob = insert_user(&pool, "bob").await;
+
+    let source = repo(alice, "upstream", Visibility::Public);
+    RepositoryRepo::insert(&pool, &source).await.unwrap();
+
+    let mut fork = repo(bob, "upstream", Visibility::Public);
+    fork.forked_from = Some(source.id);
+    RepositoryRepo::insert_with_owner(&pool, &fork, bob)
+        .await
+        .unwrap();
+
+    let found = RepositoryRepo::find_by_id(&pool, fork.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.forked_from, Some(source.id));
+
+    let found_source = RepositoryRepo::find_by_id(&pool, source.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found_source.forked_from, None);
+}
+
+#[tokio::test]
+async fn an_lfs_object_round_trips_by_repository_and_oid() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let repository = repo(alice, "assets", Visibility::Public);
+    RepositoryRepo::insert(&pool, &repository).await.unwrap();
+
+    let oid = "a".repeat(64);
+    assert!(LfsRepo::find_object(&pool, repository.id, &oid)
+        .await
+        .unwrap()
+        .is_none());
+
+    LfsRepo::insert_object(&pool, repository.id, &oid, 5000, "aa/aa/aaaa")
+        .await
+        .unwrap();
+
+    let found = LfsRepo::find_object(&pool, repository.id, &oid)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.size_bytes, 5000);
+    assert_eq!(found.storage_key, "aa/aa/aaaa");
+
+    // Content-addressed and immutable — inserting the same (repository,
+    // oid) again is a harmless no-op, not a conflict error.
+    LfsRepo::insert_object(&pool, repository.id, &oid, 5000, "aa/aa/aaaa")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn an_lfs_lock_blocks_a_second_lock_on_the_same_path_until_released() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let bob = insert_user(&pool, "bob").await;
+    let repository = repo(alice, "assets", Visibility::Public);
+    RepositoryRepo::insert(&pool, &repository).await.unwrap();
+
+    let lock_id = LfsLockId::new();
+    LfsRepo::create_lock(&pool, lock_id, repository.id, "asset.psd", alice)
+        .await
+        .unwrap();
+
+    let err = LfsRepo::create_lock(&pool, LfsLockId::new(), repository.id, "asset.psd", bob)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        crate::lfs_repo::CreateLockError::AlreadyLocked(_)
+    ));
+
+    let locks = LfsRepo::list_locks(&pool, repository.id).await.unwrap();
+    assert_eq!(locks.len(), 1);
+    assert_eq!(locks[0].owner_id, alice);
+
+    assert!(LfsRepo::delete_lock(&pool, lock_id).await.unwrap());
+    assert!(LfsRepo::list_locks(&pool, repository.id)
+        .await
+        .unwrap()
+        .is_empty());
+
+    // Now that it's released, someone else can take the same path.
+    LfsRepo::create_lock(&pool, LfsLockId::new(), repository.id, "asset.psd", bob)
+        .await
+        .unwrap();
 }

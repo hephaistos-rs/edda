@@ -68,6 +68,12 @@ pub struct Repository {
     pub name: String,
     pub description: Option<String>,
     pub visibility: Visibility,
+    /// The repository this one was forked from, if any. One-directional
+    /// only ("what is this a fork of," not "list every fork of X" — an
+    /// index on this column would support that query too, if it becomes
+    /// a real need); the fork itself is otherwise an ordinary independent
+    /// `Repository` row with its own access grants.
+    pub forked_from: Option<RepositoryId>,
 }
 
 impl Repository {

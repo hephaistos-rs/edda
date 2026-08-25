@@ -153,6 +153,7 @@ pub async fn create_repo(
         } else {
             edda_domain::Visibility::Public
         },
+        forked_from: None,
     };
 
     // Git-directory creation and the database row are two systems with no
@@ -279,6 +280,68 @@ pub async fn delete_repo(owner: String, name: String) -> Result<(), ServerFnErro
         .await
         .map_err(|err| ServerFnError::new(err.to_string()))?;
     Ok(())
+}
+
+/// Forks `owner/name` into a repository of the same name under the
+/// caller's own namespace. `name` is always kept as-is (no rename-on-fork
+/// UI yet) — a caller that already owns a same-named repository gets the
+/// same "already exists" error `create_repo` would give, which is the
+/// right outcome (this function is not a rename tool).
+#[post("/api/repos/:owner/:name/fork", auth: axum_login::AuthSession<edda_auth::Backend>)]
+#[tracing::instrument(name = "repository.fork", skip_all, err, fields(repo.owner = %owner, repo.name = %name))]
+pub async fn fork_repo(owner: String, name: String) -> Result<(String, String), ServerFnError> {
+    let shared = crate::shared::get();
+
+    let Some(session_user) = auth.user else {
+        return Err(ServerFnError::new("login required"));
+    };
+    let user = session_user.user;
+    let actor = edda_domain::ActorContext::User(user.id);
+
+    let source = shared
+        .authz
+        .repository_by_name(&owner, &name)
+        .await
+        .map_err(|err| ServerFnError::new(err.to_string()))?;
+    shared
+        .authz
+        .check_read(&actor, &source)
+        .await
+        .map_err(|err| ServerFnError::new(err.to_string()))?;
+
+    let source_identity = git_identity(&owner, &name);
+    let dest_identity = git_identity(&user.username, &name);
+    if source_identity == dest_identity {
+        return Err(ServerFnError::new("you already own this repository"));
+    }
+
+    // Git-directory copy and the database row follow the same
+    // "git side first" ordering `create_repo` uses, for the same reason:
+    // an orphaned bare repo with no matching row is harmless and cheap to
+    // clean up, while a row pointing at a repo that was never created is
+    // worse.
+    edda_git::fork_repo(
+        shared.store.as_ref(),
+        &shared.locks,
+        &source_identity,
+        &dest_identity,
+    )
+    .await
+    .map_err(|err| ServerFnError::new(err.to_string()))?;
+
+    let fork = edda_domain::Repository {
+        id: edda_domain::RepositoryId::new(),
+        owner: edda_domain::RepositoryOwner::User(user.id),
+        name: name.clone(),
+        description: source.description.clone(),
+        visibility: source.visibility,
+        forked_from: Some(source.id),
+    };
+    edda_db::RepositoryRepo::insert_with_owner(&shared.pool, &fork, user.id)
+        .await
+        .map_err(|err| ServerFnError::new(err.to_string()))?;
+
+    Ok((user.username, name))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

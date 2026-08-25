@@ -313,6 +313,7 @@ async fn upload_pack_over_ssh_streams_a_real_pack_for_an_authorized_read() {
             name: "demo".to_string(),
             description: None,
             visibility: Visibility::Public,
+            forked_from: None,
         },
     )
     .await
@@ -401,6 +402,7 @@ async fn upload_pack_over_ssh_hides_a_private_repo_the_actor_cannot_read() {
             name: "secret".to_string(),
             description: None,
             visibility: Visibility::Private,
+            forked_from: None,
         },
     )
     .await
@@ -460,6 +462,7 @@ async fn receive_pack_over_ssh_rejects_a_write_without_permission() {
             name: "demo".to_string(),
             description: None,
             visibility: Visibility::Public,
+            forked_from: None,
         },
     )
     .await

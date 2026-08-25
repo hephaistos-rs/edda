@@ -17,6 +17,7 @@ fn row_to_repository(
     name: String,
     description: Option<String>,
     visibility: String,
+    forked_from: Option<String>,
 ) -> Repository {
     let owner = match owner_type.as_str() {
         "user" => RepositoryOwner::User(owner_id.parse().expect("stored owner id is a valid UUID")),
@@ -31,6 +32,7 @@ fn row_to_repository(
         description,
         visibility: Visibility::from_db_str(&visibility)
             .expect("stored repositories.visibility is one of the CHECK'd values"),
+        forked_from: forked_from.map(|id| id.parse().expect("stored forked_from is a valid UUID")),
     }
 }
 
@@ -45,14 +47,15 @@ impl RepositoryRepo {
         let owner_type = repository.owner.owner_type_db_str();
         let owner_id = repository.owner.owner_id().to_string();
         let visibility = repository.visibility.as_db_str();
+        let forked_from = repository.forked_from.map(|id| id.to_string());
         let created_at = crate::now_unix();
 
         let sql = match pool.backend {
             Backend::Postgres => {
-                "INSERT INTO repositories (id, owner_type, owner_id, name, description, visibility, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)"
+                "INSERT INTO repositories (id, owner_type, owner_id, name, description, visibility, forked_from, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
             }
             Backend::Sqlite | Backend::MySql => {
-                "INSERT INTO repositories (id, owner_type, owner_id, name, description, visibility, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                "INSERT INTO repositories (id, owner_type, owner_id, name, description, visibility, forked_from, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
             }
         };
         let result = sqlx::query(sql)
@@ -62,6 +65,7 @@ impl RepositoryRepo {
             .bind(&repository.name)
             .bind(&repository.description)
             .bind(visibility)
+            .bind(&forked_from)
             .bind(created_at)
             .execute(&pool.any)
             .await;
@@ -92,16 +96,17 @@ impl RepositoryRepo {
         let owner_type = repository.owner.owner_type_db_str();
         let owner_id = repository.owner.owner_id().to_string();
         let visibility = repository.visibility.as_db_str();
+        let forked_from = repository.forked_from.map(|id| id.to_string());
         let created_at = crate::now_unix();
 
         let mut tx = pool.any.begin().await?;
 
         let insert_sql = match pool.backend {
             Backend::Postgres => {
-                "INSERT INTO repositories (id, owner_type, owner_id, name, description, visibility, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)"
+                "INSERT INTO repositories (id, owner_type, owner_id, name, description, visibility, forked_from, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
             }
             Backend::Sqlite | Backend::MySql => {
-                "INSERT INTO repositories (id, owner_type, owner_id, name, description, visibility, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                "INSERT INTO repositories (id, owner_type, owner_id, name, description, visibility, forked_from, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
             }
         };
         let result = sqlx::query(insert_sql)
@@ -111,6 +116,7 @@ impl RepositoryRepo {
             .bind(&repository.name)
             .bind(&repository.description)
             .bind(visibility)
+            .bind(&forked_from)
             .bind(created_at)
             .execute(&mut *tx)
             .await;
@@ -156,11 +162,11 @@ impl RepositoryRepo {
         let owner_id = owner.owner_id().to_string();
         let sql = match pool.backend {
             Backend::Postgres => {
-                r#"SELECT id, owner_type, owner_id, name, description, visibility
+                r#"SELECT id, owner_type, owner_id, name, description, visibility, forked_from
                    FROM repositories WHERE owner_type = $1 AND owner_id = $2 AND name = $3"#
             }
             Backend::Sqlite | Backend::MySql => {
-                r#"SELECT id, owner_type, owner_id, name, description, visibility
+                r#"SELECT id, owner_type, owner_id, name, description, visibility, forked_from
                    FROM repositories WHERE owner_type = ? AND owner_id = ? AND name = ?"#
             }
         };
@@ -184,13 +190,13 @@ impl RepositoryRepo {
     ) -> Result<Option<Repository>, sqlx::Error> {
         let sql = match pool.backend {
             Backend::Sqlite => {
-                r#"SELECT r.id, r.owner_type, r.owner_id, r.name, r.description, r.visibility
+                r#"SELECT r.id, r.owner_type, r.owner_id, r.name, r.description, r.visibility, r.forked_from
                    FROM repositories r
                    JOIN users u ON u.id = r.owner_id AND r.owner_type = 'user'
                    WHERE u.username = ? AND r.name = ?"#
             }
             Backend::Postgres => {
-                r#"SELECT r.id, r.owner_type, r.owner_id, r.name, r.description, r.visibility
+                r#"SELECT r.id, r.owner_type, r.owner_id, r.name, r.description, r.visibility, r.forked_from
                    FROM repositories r
                    JOIN users u ON u.id = r.owner_id AND r.owner_type = 'user'
                    WHERE LOWER(u.username) = LOWER($1) AND r.name = $2"#
@@ -199,7 +205,7 @@ impl RepositoryRepo {
             // stored `username_lower` shadow column instead (see the
             // mysql migration's comment on `idx_users_username_ci`).
             Backend::MySql => {
-                r#"SELECT r.id, r.owner_type, r.owner_id, r.name, r.description, r.visibility
+                r#"SELECT r.id, r.owner_type, r.owner_id, r.name, r.description, r.visibility, r.forked_from
                    FROM repositories r
                    JOIN users u ON u.id = r.owner_id AND r.owner_type = 'user'
                    WHERE u.username_lower = LOWER(?) AND r.name = ?"#
@@ -220,10 +226,10 @@ impl RepositoryRepo {
         let id_text = id.to_string();
         let sql = match pool.backend {
             Backend::Postgres => {
-                "SELECT id, owner_type, owner_id, name, description, visibility FROM repositories WHERE id = $1"
+                "SELECT id, owner_type, owner_id, name, description, visibility, forked_from FROM repositories WHERE id = $1"
             }
             Backend::Sqlite | Backend::MySql => {
-                "SELECT id, owner_type, owner_id, name, description, visibility FROM repositories WHERE id = ?"
+                "SELECT id, owner_type, owner_id, name, description, visibility, forked_from FROM repositories WHERE id = ?"
             }
         };
         let row = sqlx::query(sql)
@@ -240,7 +246,7 @@ impl RepositoryRepo {
     /// instance's current expected scale.
     pub async fn list_all(pool: &DbPool) -> Result<Vec<Repository>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, owner_type, owner_id, name, description, visibility FROM repositories ORDER BY owner_id, name",
+            "SELECT id, owner_type, owner_id, name, description, visibility, forked_from FROM repositories ORDER BY owner_id, name",
         )
         .fetch_all(&pool.any)
         .await?;
@@ -256,7 +262,7 @@ impl RepositoryRepo {
         pool: &DbPool,
     ) -> Result<Vec<(Repository, String)>, sqlx::Error> {
         let rows = sqlx::query(
-            r#"SELECT r.id, r.owner_type, r.owner_id, r.name, r.description, r.visibility, u.username as owner_username
+            r#"SELECT r.id, r.owner_type, r.owner_id, r.name, r.description, r.visibility, r.forked_from, u.username as owner_username
                FROM repositories r JOIN users u ON u.id = r.owner_id AND r.owner_type = 'user'
                ORDER BY u.username, r.name"#,
         )
@@ -330,5 +336,6 @@ fn row_to_repository_row(row: sqlx::any::AnyRow) -> Result<Repository, sqlx::Err
         get_string(&row, "name")?,
         get_opt_string(&row, "description")?,
         get_string(&row, "visibility")?,
+        get_opt_string(&row, "forked_from")?,
     ))
 }

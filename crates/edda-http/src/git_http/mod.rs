@@ -39,12 +39,12 @@ pub fn routes() -> Router<AppState> {
 /// bare repo-name (still needed separately for the DB-level
 /// `AuthorizationService` lookup, which resolves by owner *username* + repo
 /// name rather than by this filesystem-shaped identity).
-fn repo_names<'repo>(owner: &str, repo: &'repo str) -> Option<(String, &'repo str)> {
+pub(crate) fn repo_names<'repo>(owner: &str, repo: &'repo str) -> Option<(String, &'repo str)> {
     let name = repo.strip_suffix(".git")?;
     Some((format!("{owner}/{name}"), name))
 }
 
-fn not_found_response(owner: &str, repo: &str) -> Response {
+pub(crate) fn not_found_response(owner: &str, repo: &str) -> Response {
     (
         StatusCode::NOT_FOUND,
         format!("no repository named \"{owner}/{repo}\""),
@@ -52,7 +52,7 @@ fn not_found_response(owner: &str, repo: &str) -> Response {
         .into_response()
 }
 
-fn unauthorized_response(message: &'static str) -> Response {
+pub(crate) fn unauthorized_response(message: &'static str) -> Response {
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)
         .header("WWW-Authenticate", "Basic realm=\"edda\"")
@@ -68,7 +68,7 @@ fn unauthorized_response(message: &'static str) -> Response {
 /// callers put it in), falling back to a real account password only if
 /// neither is a token — same preference order a mature git host like
 /// Gitea uses.
-async fn resolve_actor(
+pub(crate) async fn resolve_actor(
     state: &AppState,
     auth: &AuthSession<Backend>,
     headers: &HeaderMap,
@@ -127,7 +127,7 @@ async fn resolve_actor(
 /// isn't allowed to read this repo gets 404, not 403 — a private repo's
 /// existence shouldn't be distinguishable from a repo that was never
 /// created (see `edda_domain::AuthzError`'s doc comment).
-async fn require_read_access(
+pub(crate) async fn require_read_access(
     state: &AppState,
     auth: &AuthSession<Backend>,
     headers: &HeaderMap,
@@ -147,7 +147,7 @@ async fn require_read_access(
     }
 }
 
-async fn require_write_access(
+pub(crate) async fn require_write_access(
     state: &AppState,
     auth: &AuthSession<Backend>,
     headers: &HeaderMap,
@@ -161,6 +161,22 @@ async fn require_write_access(
             Err(unauthorized_response("login required to push"))
         }
         Err(AuthzError::NotFound) => Err(not_found_response(owner, &repository.name)),
+        // An anonymous actor pushing to a *public* repo also needs a 401,
+        // not a 403: `can_write_repository` reports `Forbidden` here (not
+        // `NotFound`, since a public repo's existence isn't a secret) but
+        // the client still hasn't been asked to authenticate at all yet.
+        // A real `git push` embeds credentials in the remote URL but only
+        // sends them once a request has actually been challenged with
+        // 401 — the read-only `info/refs` request that precedes every
+        // push never gets that challenge for a public repo, so without
+        // this case the client never learns it needs to retry with
+        // credentials, and a 403 here is treated as terminal, not
+        // retryable. Only once the actor is a *known* identity (User or
+        // Token) that still lacks sufficient role does this mean "you
+        // authenticated, but you're not allowed" — a real 403.
+        Err(AuthzError::Forbidden) if matches!(actor, ActorContext::Anonymous) => {
+            Err(unauthorized_response("login required to push"))
+        }
         Err(AuthzError::Forbidden) => Err((
             StatusCode::FORBIDDEN,
             "you don't have write access to this repo",

@@ -17,6 +17,23 @@ pub trait RepoStore: Send + Sync {
 
     /// Full `{owner}/{repo}` identities of every repo currently in the store.
     fn list_repo_names(&self) -> std::io::Result<Vec<String>>;
+
+    /// Where one Git LFS object's bytes live on disk, nested under the
+    /// repo's own directory (`{repo_dir}/lfs/objects/{oid[0:2]}/{oid[2:4]}/
+    /// {oid}`, mirroring `git-lfs`'s own local storage layout) rather than
+    /// a separate top-level tree — a repo fork (a directory copy, see
+    /// `fork_repo`) then naturally carries its LFS objects along with it,
+    /// with no separate copy step. The default implementation is correct
+    /// for any store built on `repo_dir`; only overridden by an
+    /// implementation with a genuinely different physical layout.
+    fn lfs_object_path(&self, name: &str, oid: &str) -> PathBuf {
+        let base = self.repo_dir(name).join("lfs").join("objects");
+        if oid.len() >= 4 {
+            base.join(&oid[0..2]).join(&oid[2..4]).join(oid)
+        } else {
+            base.join(oid)
+        }
+    }
 }
 
 pub struct LocalFsStore {
@@ -31,6 +48,13 @@ impl LocalFsStore {
         Self {
             root: data_dir.join("repos"),
         }
+    }
+
+    /// Rooted at an explicit directory rather than derived from
+    /// `EDDA_DATA_DIR` — for tests and any other embedding that needs a
+    /// store without touching process-global environment state.
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
     }
 }
 

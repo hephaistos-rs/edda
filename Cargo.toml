@@ -42,6 +42,9 @@ gix = "0.86.0"
 gix-hash = "0.26.0"
 gix-object = "0.63.0"
 gloo-net = "0.7.0"
+# Only HMAC (`hmac`/`sha2`) is actually used here (HS256), but the crate
+# has no narrower "HMAC-only" feature to enable instead.
+jsonwebtoken = { version = "11.0.0", default-features = false, features = ["rust_crypto"] }
 opentelemetry = "0.32.0"
 opentelemetry-appender-tracing = "0.32.0"
 opentelemetry-otlp = { version = "0.32.0", default-features = false }

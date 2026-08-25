@@ -172,6 +172,80 @@ pub async fn create_repo(
     result
 }
 
+/// Forks `source_name` into a fresh `dest_name` by copying its whole bare
+/// repository directory (including any LFS objects nested under it, see
+/// `RepoStore::lfs_object_path`) — a naive, full-clone approach, not a
+/// storage-efficient shared-object one. Explicitly accepted for now: a
+/// storage-efficient fork (e.g. hardlinking or sharing the object store
+/// between a repo and its forks) is real engineering work with its own
+/// correctness hazards, and this naive approach is what every fork
+/// produces independently correct results from with the least new
+/// machinery.
+///
+/// Holds `source_name`'s lock for the duration of the copy, so a
+/// concurrent push to the source can't interleave with reading its files
+/// mid-copy — `dest_name` needs no lock of its own since nothing else can
+/// know about it until this function creates it (the existence check
+/// below is what actually prevents a name collision).
+pub async fn fork_repo(
+    store: &dyn RepoStore,
+    locks: &LockRegistry,
+    source_name: &str,
+    dest_name: &str,
+) -> Result<(), GitError> {
+    validate_name(source_name)?;
+    validate_name(dest_name)?;
+    let source_dir = store.repo_dir(source_name);
+    if !source_dir.exists() {
+        return Err(GitError::NotFound(source_name.to_string()));
+    }
+    let dest_dir = store.repo_dir(dest_name);
+    if dest_dir.exists() {
+        return Err(GitError::AlreadyExists(dest_name.to_string()));
+    }
+
+    let lock = locks.lock_for(source_name);
+    let _guard = lock.lock().await;
+
+    if let Some(parent) = dest_dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let span = tracing::info_span!("git.fork", repo.source = %source_name, repo.dest = %dest_name);
+    let _guard = span.enter();
+    let current_span = tracing::Span::current();
+    let start = std::time::Instant::now();
+    let result = tokio::task::spawn_blocking(move || {
+        current_span.in_scope(|| copy_dir_recursive(&source_dir, &dest_dir))
+    })
+    .await
+    .map_err(|_| GitError::Git("fork copy task panicked".to_string()))
+    .and_then(|result| result.map_err(GitError::from));
+    record_git_op("git.fork", start, &result);
+    result
+}
+
+/// Real disk I/O, potentially a lot of it for a large repository — run on
+/// the blocking pool by `fork_repo`, not called directly from async code.
+/// Symlinks aren't followed or recreated: a bare git repository has no
+/// legitimate reason to contain one, so silently skipping an unexpected
+/// symlink entry is safer than either following it outside `src` or
+/// failing the whole fork over it.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let dst_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &dst_path)?;
+        } else if file_type.is_file() {
+            std::fs::copy(entry.path(), &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
 pub async fn delete_repo(
     store: &dyn RepoStore,
     locks: &LockRegistry,
@@ -629,6 +703,83 @@ pub fn fix_unborn_head(dir: &Path) -> Result<(), GitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::LocalFsStore;
+
+    struct TestStore {
+        store: LocalFsStore,
+        root: PathBuf,
+    }
+
+    impl TestStore {
+        fn new(unique: &str) -> Self {
+            let root = std::env::temp_dir()
+                .join(format!("edda-git-lib-test-{unique}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            Self {
+                store: LocalFsStore::new(root.clone()),
+                root,
+            }
+        }
+    }
+
+    impl Drop for TestStore {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[tokio::test]
+    async fn fork_repo_copies_the_source_directory_including_nested_lfs_objects() {
+        let test = TestStore::new("fork-ok");
+        let locks = LockRegistry::new();
+        create_repo(&test.store, &locks, "alice/demo")
+            .await
+            .unwrap();
+
+        // A nested file mimicking where an LFS object would live (see
+        // `RepoStore::lfs_object_path`) — the fork copy has no LFS-specific
+        // logic of its own, so a plain nested file exercises the same
+        // recursive-copy path a real LFS object would take.
+        let lfs_dir = test.store.repo_dir("alice/demo").join("lfs/objects/ab/cd");
+        std::fs::create_dir_all(&lfs_dir).unwrap();
+        std::fs::write(lfs_dir.join("abcdef"), b"lfs content").unwrap();
+
+        fork_repo(&test.store, &locks, "alice/demo", "bob/demo")
+            .await
+            .unwrap();
+
+        assert!(test.store.repo_dir("bob/demo").join("HEAD").exists());
+        let copied = test
+            .store
+            .repo_dir("bob/demo")
+            .join("lfs/objects/ab/cd/abcdef");
+        assert_eq!(std::fs::read(copied).unwrap(), b"lfs content");
+    }
+
+    #[tokio::test]
+    async fn fork_repo_rejects_a_nonexistent_source() {
+        let test = TestStore::new("fork-missing-source");
+        let locks = LockRegistry::new();
+        let err = fork_repo(&test.store, &locks, "alice/missing", "bob/demo")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GitError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn fork_repo_rejects_an_existing_destination() {
+        let test = TestStore::new("fork-dest-exists");
+        let locks = LockRegistry::new();
+        create_repo(&test.store, &locks, "alice/demo")
+            .await
+            .unwrap();
+        create_repo(&test.store, &locks, "bob/demo").await.unwrap();
+
+        let err = fork_repo(&test.store, &locks, "alice/demo", "bob/demo")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GitError::AlreadyExists(_)));
+    }
 
     #[test]
     fn valid_owner_repo_identities() {

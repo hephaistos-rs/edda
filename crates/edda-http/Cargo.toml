@@ -19,7 +19,19 @@ edda-db = { workspace = true }
 edda-domain = { workspace = true }
 edda-git = { workspace = true }
 edda-telemetry = { workspace = true }
+# LFS transfer-auth tokens (short-lived HMAC-signed bearer tokens minting
+# access to exactly one upload/download URL) — see `lfs::transfer_auth`.
+jsonwebtoken = { workspace = true }
+# Only for the LFS transfer-auth HMAC secret, generated once per process
+# at startup (`lfs::transfer_auth`) — this crate has no other use for
+# randomness.
+rand = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+# Only for verifying an uploaded LFS object's content against its
+# claimed `oid` (a hex-encoded SHA-256 digest) — the same hash Git LFS
+# itself uses to name objects.
+sha2 = { workspace = true }
 # This crate's one direct `sqlx::query` use (the `/healthz` liveness
 # check, `SELECT 1`, identical on every backend) goes through
 # `sqlx::AnyPool` via `edda_db::DbPool`'s exposed `.any` field, so it
@@ -29,3 +41,19 @@ serde = { workspace = true, features = ["derive"] }
 sqlx = { workspace = true, features = ["any"] }
 tower-http = { workspace = true, features = ["trace"] }
 tracing = { workspace = true }
+
+# Only the LFS integration test (`tests/lfs_integration.rs`) needs: a real
+# Tokio runtime and TCP listener to run this crate's router as an actual
+# HTTP server a real `git`/`git-lfs` CLI can talk to; and a real
+# session/auth middleware layer (`router()` itself doesn't apply one — the
+# composition root does, see `edda-web`'s `main.rs` — so the test builds
+# an equivalent one, same as production, with its own throwaway SQLite
+# session store regardless of which backend the test's own `DbPool` uses,
+# since this test never exercises session-cookie auth, only the token
+# path — see the test's own comments).
+[dev-dependencies]
+axum-login = { workspace = true }
+sqlx = { workspace = true, features = ["sqlite"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
+tower-sessions = { workspace = true }
+tower-sessions-sqlx-store = { workspace = true, features = ["sqlite"] }

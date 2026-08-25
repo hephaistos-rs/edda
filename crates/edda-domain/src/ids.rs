@@ -65,3 +65,4 @@ id_type!(UserId);
 id_type!(RepositoryId);
 id_type!(AccessTokenId);
 id_type!(SshKeyId);
+id_type!(LfsLockId);

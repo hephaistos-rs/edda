@@ -2,6 +2,8 @@ use dioxus::prelude::*;
 
 mod server;
 #[cfg(feature = "server")]
+mod session_store;
+#[cfg(feature = "server")]
 mod shared;
 mod ui;
 
@@ -79,16 +81,13 @@ fn main() {
         async move {
             let pool = edda_db::pool().await?;
 
-            // Session cookies persist in the same database as everything
-            // else — no separate store to run or lose track of. Store type
-            // follows whichever of this crate's `sqlite`/`postgres`
-            // features is active (plan.local.md §17 Phase 3) — exactly one
-            // is ever compiled in, so `session_store`'s type is unambiguous.
-            #[cfg(feature = "sqlite")]
-            let session_store = tower_sessions_sqlx_store::SqliteStore::new(pool.clone());
-            #[cfg(feature = "postgres")]
-            let session_store = tower_sessions_sqlx_store::PostgresStore::new(pool.clone());
-            session_store.migrate().await?;
+            // Session cookies persist in the same configured database as
+            // everything else, via a second small typed connection
+            // `session_store::connect` opens alongside `pool`'s `AnyPool`
+            // — see that module's doc comment for why
+            // `tower-sessions-sqlx-store` can't share the `AnyPool`
+            // directly (plan.local.md §17 Phase 3, revised 2026-08-25).
+            let session_store = session_store::connect(&pool).await?;
             let session_layer = tower_sessions::SessionManagerLayer::new(session_store);
 
             let backend = edda_auth::Backend::new(pool.clone());

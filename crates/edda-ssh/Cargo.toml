@@ -13,10 +13,7 @@ authors.workspace = true
 [dependencies]
 bytes = { workspace = true }
 edda-auth = { workspace = true }
-# `default-features = false`: see `edda-auth/Cargo.toml`'s identical note
-# — backend selection is the composition root's decision alone
-# (plan.local.md §17 Phase 3).
-edda-db = { workspace = true, default-features = false }
+edda-db = { workspace = true }
 edda-domain = { workspace = true }
 edda-git = { workspace = true }
 gix = { workspace = true }
@@ -41,8 +38,3 @@ tracing = { workspace = true }
 [dev-dependencies]
 gix-object = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "net", "macros", "time"] }
-
-[features]
-default = ["sqlite"]
-sqlite = ["edda-db/sqlite"]
-postgres = ["edda-db/postgres"]

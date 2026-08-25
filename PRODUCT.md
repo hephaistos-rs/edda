@@ -8,7 +8,7 @@ web
 
 ## Stack
 
-Rust + Dioxus 0.7 (fullstack: server-rendered + hydrated web client), existing in the codebase. Persistence and deploy story confirmed: single self-contained binary, SQLite storage by default, no required external services to get started. PostgreSQL is supported as an optional backend (chosen at build time) for larger or longer-lived deployments — the "no required external services" story is about the default, not a ceiling.
+Rust + Dioxus 0.7 (fullstack: server-rendered + hydrated web client), existing in the codebase. Persistence and deploy story confirmed: single self-contained binary, SQLite storage by default, no required external services to get started. PostgreSQL and MySQL/MariaDB are both fully supported, first-class backends (chosen at runtime via configuration, not a rebuild) for larger or longer-lived deployments — the "no required external services" story is about the default, not a ceiling, and neither alternative backend is second-class relative to SQLite.
 
 ## Users
 
@@ -28,7 +28,7 @@ Self-hosted: the operator installs and runs the binary themselves (own server/VP
 
 ## Capabilities and Constraints
 
-- Deployment: single binary, SQLite-backed by default, no required external services (e.g. no mandatory external Postgres/Redis) to run. PostgreSQL is available as an optional, explicitly-chosen backend for operators who want it — never the default, never required.
+- Deployment: single binary, SQLite-backed by default, no required external services (e.g. no mandatory external Postgres/Redis) to run. PostgreSQL and MySQL/MariaDB are both available as explicitly-chosen, first-class backends for operators who want them — never the default, never required, but not lesser options either.
 - Codebase currently scaffolds (empty stubs, no logic yet): `api`, `auth`, `db`, `git`, `migrations`, `server` modules, plus a `ui` module for the frontend (`layouts`, `pages`, `components`).
 - Feature scope beyond core git hosting (PRs/issues/CI/etc.) is undecided — not yet confirmed.
 
@@ -39,7 +39,7 @@ None yet. No existing screenshots, testimonials, or reference deployments — th
 ## Product Principles
 
 - Self-host-first: assume the operator is running this themselves, not signing up for a hosted service.
-- Low-friction deploy: a single binary + SQLite should be enough to get running; don't require a services stack. A larger deployment may opt into PostgreSQL, but that's an option the operator reaches for, never a default imposed on them.
+- Low-friction deploy: a single binary + SQLite should be enough to get running; don't require a services stack. A larger deployment may opt into PostgreSQL or MySQL/MariaDB, but that's an option the operator reaches for, never a default imposed on them.
 - Privacy and control over the code being hosted are the reason this exists, not a side benefit.
 
 ## Accessibility & Inclusion

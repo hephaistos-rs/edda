@@ -2274,6 +2274,7 @@ dependencies = [
 name = "edda"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "axum-login",
  "dioxus",

@@ -14,14 +14,7 @@ authors.workspace = true
 argon2 = { workspace = true }
 axum-login = { workspace = true }
 base64 = { workspace = true }
-# `default-features = false`: `edda-db`'s own `sqlite` default must not be
-# forced on here — which backend is compiled in is decided exactly once,
-# by the composition root (`edda-web`), and every other crate in the
-# graph that depends on `edda-db` needs to stay out of that decision's
-# way so the top-level choice actually takes effect (plan.local.md §17
-# Phase 3). This crate's own `sqlite`/`postgres` features below exist
-# only so `cargo test -p edda-auth` still works standalone, unchanged.
-edda-db = { workspace = true, default-features = false }
+edda-db = { workspace = true }
 edda-domain = { workspace = true }
 # Only for `russh::keys` (= the `ssh_key` crate's types, re-exported) —
 # public-key parsing and fingerprinting are an authentication-credential
@@ -41,8 +34,3 @@ sha2 = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-
-[features]
-default = ["sqlite"]
-sqlite = ["edda-db/sqlite"]
-postgres = ["edda-db/postgres"]

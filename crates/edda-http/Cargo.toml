@@ -16,23 +16,17 @@ axum-login = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
 edda-auth = { workspace = true }
-# `default-features = false`: see `edda-auth/Cargo.toml`'s identical note
-# — backend selection is the composition root's decision alone
-# (plan.local.md §17 Phase 3).
-edda-db = { workspace = true, default-features = false }
+edda-db = { workspace = true }
 edda-domain = { workspace = true }
 edda-git = { workspace = true }
 edda-telemetry = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-# No driver feature hardcoded here either — this crate's one direct
-# `sqlx::query` use (the `/healthz` liveness check, `SELECT 1`, identical
-# on both backends) just needs *a* driver compiled in somewhere in the
-# graph, which `edda-db`'s chosen feature already provides transitively.
-sqlx = { workspace = true }
+# This crate's one direct `sqlx::query` use (the `/healthz` liveness
+# check, `SELECT 1`, identical on every backend) goes through
+# `sqlx::AnyPool` via `edda_db::DbPool`'s exposed `.any` field, so it
+# needs the `any` feature enabled — the concrete driver features come
+# from `edda-db`, which always compiles all three in (runtime backend
+# selection, plan.local.md §17 Phase 3).
+sqlx = { workspace = true, features = ["any"] }
 tower-http = { workspace = true, features = ["trace"] }
 tracing = { workspace = true }
-
-[features]
-default = ["sqlite"]
-sqlite = ["edda-db/sqlite", "sqlx/sqlite"]
-postgres = ["edda-db/postgres", "sqlx/postgres"]

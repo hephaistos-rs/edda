@@ -2,14 +2,14 @@
 
 Self-hosted git platform with a terminal-native, developer-console interface. Host and browse your own repositories — clone and push with a normal `git` client — without depending on GitHub, GitLab, or any other third-party hosting.
 
-Built for solo developers and small teams who want full control and privacy over their code. Deployment is deliberately low-friction: a single self-contained binary, SQLite for storage, and nothing external *required* to get running. PostgreSQL is supported as an optional backend for larger or longer-lived deployments — see [Database backend](#database-backend).
+Built for solo developers and small teams who want full control and privacy over their code. Deployment is deliberately low-friction: a single self-contained binary, SQLite for storage by default, and nothing external *required* to get running. PostgreSQL and MySQL/MariaDB are both fully supported, first-class alternatives for larger or longer-lived deployments — chosen through configuration, not a rebuild — see [Database backend](#database-backend).
 
 ## Features
 
 - **Real git hosting** — a git smart-HTTP implementation (built directly on [`gix`](https://github.com/GitoxideLabs/gitoxide), no `git` subprocess) serves clone and push over plain HTTP.
 - **Web UI** — repository listing with search, file/tree browsing, file viewing, and commit history, in a dense, keyboard-first interface (see `DESIGN.md`).
 - **Accounts and access** — email/password signup and login, plus revocable personal access tokens for authenticating `git push`/`git clone` over HTTP.
-- **Single-binary deploy** — SQLite-backed by default, no required external services (no mandatory Postgres, Redis, etc.); PostgreSQL is available as an opt-in backend, not a requirement.
+- **Single-binary deploy** — SQLite-backed by default, no required external services (no mandatory Postgres, Redis, etc.); PostgreSQL and MySQL/MariaDB are available as opt-in backends, selected at runtime through configuration, not a rebuild.
 - **Built-in observability** — structured logs, distributed traces, and metrics out of the box, exportable via OpenTelemetry (see [Observability](#observability)).
 
 ## Status
@@ -46,22 +46,28 @@ See `.env.example` for the full list, including the observability variables docu
 
 ### Database backend
 
-SQLite is the default and requires no setup — it's what `cargo run --features server` gives you with no further configuration. PostgreSQL is available as an optional backend for larger or longer-lived deployments, chosen at **build time** (not runtime) because it's what lets Edda keep `sqlx`'s compile-time-checked queries against either backend rather than giving that up for runtime flexibility:
+SQLite, PostgreSQL, and MySQL/MariaDB are all first-class, fully-tested backends — one compiled binary connects to whichever `EDDA_DATABASE_URL` names, at **runtime**, no rebuild required (matching how Forgejo's own `DB_TYPE=` config works). SQLite is only the zero-config *default*, not a "primary" database the other two are lesser fallbacks from:
 
 ```bash
 # Default — SQLite, zero config:
 cargo run --features server
 
-# PostgreSQL instead — requires EDDA_DATABASE_URL, no local default exists:
-EDDA_DATABASE_URL=postgres://user:pass@host/dbname \
-  cargo run --no-default-features --features web,server,postgres
+# PostgreSQL instead:
+EDDA_DATABASE_URL=postgres://user:pass@host/dbname cargo run --features server
+
+# MySQL/MariaDB instead:
+EDDA_DATABASE_URL=mysql://user:pass@host/dbname cargo run --features server
 ```
 
-MySQL/MariaDB is not supported — see `plan.local.md` §17 Phase 3 for why (in short: this schema's one-owner-per-repository invariant relies on a partial unique index, which SQLite and PostgreSQL both support natively and MySQL/MariaDB doesn't).
+`EDDA_DATABASE_URL` unset falls back to a local SQLite file under `EDDA_DATA_DIR` — the same zero-config path as always. For PostgreSQL/MySQL there's no local default; the variable is required.
+
+**MySQL/MariaDB-specific note**: `tower-sessions-sqlx-store`'s MySQL session store creates its own `tower_sessions` schema (unlike its SQLite/PostgreSQL stores, which use a table in the connected database) — the configured database user needs `CREATE` privilege, or an operator pre-creates that schema and grants access to it specifically. Hit and documented while testing this against a real MariaDB instance; see `plan.local.md` §17 Phase 3.
+
+One disclosed trade-off of a single binary supporting all three backends at runtime: `sqlx`'s compile-time query checking (`query!`) can't work with the `sqlx::Any` driver that makes runtime backend selection possible, so `edda-db`'s queries are runtime-checked instead — a query/column mismatch is now a test failure, not a compile error. Mitigated by running the same test suite against all three backends (see `plan.local.md` §17 Phase 3 for the full reasoning).
 
 ## Development
 
-First-time setup: `cp .env.example .env` — needed for `sqlx`'s query macros to use the committed `.sqlx/` cache instead of requiring a live database at build time.
+First-time setup: `cp .env.example .env`.
 
 ```bash
 cd app/edda-web
@@ -84,14 +90,14 @@ I/O-performing "shell" crates around it, and a composition root
 ```
 crates/
 ├─ edda-domain/     # entities, invariants, pure authorization/business-rule functions — no I/O
-├─ edda-db/         # sqlx pool (SQLite default / PostgreSQL optional, one compiled in at a time), embedded migrations, one repository struct per aggregate
+├─ edda-db/         # sqlx AnyPool (SQLite/PostgreSQL/MySQL-MariaDB, selected at runtime), embedded migrations, one repository struct per aggregate
 ├─ edda-git/        # repository storage and gix-backed operations — transport-agnostic
 ├─ edda-auth/       # authentication (passwords/sessions/tokens) and the authorization service
 ├─ edda-http/       # axum app: git smart-HTTP bridge, account/token/collaborator routes
 └─ edda-telemetry/  # tracing/OpenTelemetry setup, see below
 app/
 └─ edda-web/        # the composition root: main.rs, Dioxus server functions, UI (components/layouts/pages)
-migrations/          # SQL migration history — sqlite/ and postgres/ subdirectories, applied by edda-db (kept at the workspace root for `sqlx-cli` convenience)
+migrations/          # SQL migration history — sqlite/, postgres/, and mysql/ subdirectories, applied by edda-db (kept at the workspace root for `sqlx-cli` convenience)
 ```
 
 `edda-web` is the only package built for both the wasm32 client and the native server (Dioxus fullstack's own constraint) — every other crate above is server-only, pulled in by `edda-web` behind its `server` feature, and never enters the wasm/web client build; see `app/edda-web/Cargo.toml`'s feature list.

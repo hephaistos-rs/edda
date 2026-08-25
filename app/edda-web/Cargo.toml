@@ -11,33 +11,36 @@ authors.workspace = true
 # `dep:`/the `server` feature, exactly as in the pre-restructuring
 # single-crate `Cargo.toml` this one replaces.
 [dependencies]
+# Only for `session_store::AnySessionStore`'s `SessionStore` impl, which
+# must match that trait's own `#[async_trait]` shape (plan.local.md §17
+# Phase 3, revised 2026-08-25).
+async-trait = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
 axum-login = { workspace = true, optional = true }
 dioxus = { workspace = true, features = ["router", "fullstack"] }
 dioxus-free-icons = { workspace = true, features = ["lucide"] }
-# `default-features = false` on every one of these that itself depends on
-# `edda-db`: backend selection (this file's `sqlite`/`postgres` features,
-# below) must be the composition root's decision alone, not forced by any
-# dependent crate's own default (plan.local.md §17 Phase 3).
-edda-auth = { workspace = true, default-features = false, optional = true }
-edda-db = { workspace = true, default-features = false, optional = true }
+edda-auth = { workspace = true, optional = true }
+edda-db = { workspace = true, optional = true }
 edda-domain = { workspace = true, optional = true }
 edda-git = { workspace = true, optional = true }
-edda-http = { workspace = true, default-features = false, optional = true }
-edda-ssh = { workspace = true, default-features = false, optional = true }
+edda-http = { workspace = true, optional = true }
+edda-ssh = { workspace = true, optional = true }
 edda-telemetry = { workspace = true, optional = true }
 gloo-net = { workspace = true, features = ["json"], optional = true }
 serde = { workspace = true, features = ["derive"] }
-# No driver feature hardcoded — comes transitively from whichever of this
-# crate's own `sqlite`/`postgres` features is active (below).
-sqlx = { workspace = true, optional = true }
+# Backend (SQLite/PostgreSQL/MySQL-MariaDB) is a runtime choice, selected
+# by `EDDA_DATABASE_URL`'s scheme — one compiled binary, all three
+# drivers linked in (plan.local.md §17 Phase 3, revised 2026-08-25).
+# `tower-sessions-sqlx-store`'s session store is the one place this crate
+# still needs a *concrete* (not `AnyPool`) typed pool — it doesn't
+# support `sqlx::Any` — so `main.rs` opens a second, small, typed
+# connection alongside `edda_db::DbPool`'s `AnyPool` for sessions only,
+# picking whichever of `SqliteStore`/`PostgresStore`/`MySqlStore` matches
+# the same runtime-detected backend.
+sqlx = { workspace = true, features = ["any", "sqlite", "postgres", "mysql"], optional = true }
 tokio = { workspace = true, features = ["sync", "rt", "signal", "time"], optional = true }
 tower-sessions = { workspace = true, optional = true }
-# No driver feature hardcoded here either — `tower-sessions-sqlx-store`
-# gates its `SqliteStore`/`PostgresStore` types behind its own
-# `sqlite`/`postgres` features (not auto-derived from `sqlx`'s), so this
-# crate's own `sqlite`/`postgres` features (below) select explicitly.
-tower-sessions-sqlx-store = { workspace = true, optional = true }
+tower-sessions-sqlx-store = { workspace = true, features = ["sqlite", "postgres", "mysql"], optional = true }
 # Not optional: `tracing`'s macros (`info!`, `#[instrument]`, ...) are used
 # from server-only code paths, but the facade itself is tiny and
 # side-effect-free to depend on — Dioxus already pulls it in transitively
@@ -51,12 +54,13 @@ tracing = { workspace = true }
 web-time = { workspace = true }
 
 [features]
-default = ["web", "sqlite"]
+default = ["web"]
 web = ["dioxus/web", "dep:gloo-net"]
 desktop = ["dioxus/desktop"]
 mobile = ["dioxus/mobile"]
 server = [
     "dioxus/server",
+    "dep:async-trait",
     "dep:axum",
     "dep:axum-login",
     "dep:edda-auth",
@@ -70,26 +74,4 @@ server = [
     "dep:tokio",
     "dep:tower-sessions",
     "dep:tower-sessions-sqlx-store",
-]
-# Exactly one of these is meant to be active in a `server` build — see
-# `edda-db`'s own `compile_error!` guard, which fires workspace-wide if
-# both (or neither) end up enabled. `sqlite` is the zero-config default,
-# unchanged from before this phase; `postgres` requires `EDDA_DATABASE_URL`
-# and is opted into with `--no-default-features --features postgres,web,server`
-# (or `desktop`/`mobile` in place of `web`). Plan.local.md §17 Phase 3.
-sqlite = [
-    "edda-db?/sqlite",
-    "edda-auth?/sqlite",
-    "edda-http?/sqlite",
-    "edda-ssh?/sqlite",
-    "sqlx?/sqlite",
-    "tower-sessions-sqlx-store?/sqlite",
-]
-postgres = [
-    "edda-db?/postgres",
-    "edda-auth?/postgres",
-    "edda-http?/postgres",
-    "edda-ssh?/postgres",
-    "sqlx?/postgres",
-    "tower-sessions-sqlx-store?/postgres",
 ]

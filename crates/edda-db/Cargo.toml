@@ -4,25 +4,31 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 
-# The only crate in the workspace allowed to contain `sqlx::query!` — see
+# The only crate in the workspace allowed to issue SQL — see
 # plan.local.md §3.3/§16 (smell S3). Exposes narrow, intention-revealing
 # repository structs; never exposes a raw query or a backend-specific pool
 # type beyond what those structs need internally (`DbPool`).
 #
-# Exactly one of `sqlite`/`postgres` below is compiled in at a time
-# (plan.local.md §17 Phase 3) — `sqlx::query!` cannot be compile-time-
-# checked against two backends in one build, so backend selection is a
-# Cargo feature (build-time), not a runtime config value.
+# Backend (SQLite/PostgreSQL/MySQL-MariaDB) is a runtime choice — one
+# compiled binary, all three drivers linked in via `sqlx`'s `any` feature,
+# selected at connect time by `EDDA_DATABASE_URL`'s scheme (plan.local.md
+# §17 Phase 3, revised 2026-08-25). This is why `sqlx::query!` (compile-
+# time-checked, but tied to one fixed schema) isn't used here anymore —
+# every query goes through the runtime-checked `sqlx::query`/`query_as`
+# instead, so `macros` isn't needed and the `.sqlx/` offline cache from
+# the previous revision no longer applies.
 [dependencies]
 edda-domain = { workspace = true }
 serde_json = { workspace = true }
-sqlx = { workspace = true, features = ["runtime-tokio", "migrate", "macros"] }
+sqlx = { workspace = true, features = [
+    "any",
+    "sqlite",
+    "postgres",
+    "mysql",
+    "runtime-tokio",
+    "migrate",
+] }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
-
-[features]
-default = ["sqlite"]
-sqlite = ["sqlx/sqlite"]
-postgres = ["sqlx/postgres"]

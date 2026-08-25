@@ -336,14 +336,13 @@ async fn deleting_a_user_cascades_their_ssh_keys() {
     .unwrap();
 
     let alice_id_text = alice.to_string();
-    #[cfg(feature = "sqlite")]
-    sqlx::query!("DELETE FROM users WHERE id = ?", alice_id_text)
-        .execute(&pool)
-        .await
-        .unwrap();
-    #[cfg(feature = "postgres")]
-    sqlx::query!("DELETE FROM users WHERE id = $1", alice_id_text)
-        .execute(&pool)
+    let sql = match pool.backend {
+        crate::Backend::Postgres => "DELETE FROM users WHERE id = $1",
+        crate::Backend::Sqlite | crate::Backend::MySql => "DELETE FROM users WHERE id = ?",
+    };
+    sqlx::query(sql)
+        .bind(&alice_id_text)
+        .execute(&pool.any)
         .await
         .unwrap();
 

@@ -292,4 +292,84 @@ impl UserRepo {
         let result = sqlx::query(sql).bind(&id_text).execute(&pool.any).await?;
         Ok(result.rows_affected() > 0)
     }
+
+    /// Whether `id` wants email delivery of a notification, in addition to
+    /// the in-app one Edda always creates — the per-user opt-out toggled
+    /// from the settings page. Deliberately not a field on the core
+    /// `User` entity (that type is constructed as a struct literal across
+    /// many already-stable call sites in this workspace — auth fixtures,
+    /// tests — and this preference is only ever read by one narrow
+    /// consumer, the notification job handler, so a dedicated query avoids
+    /// widening `User` for a field almost nothing else needs). An unknown
+    /// `id` defaults to `true` (the column's own default) rather than
+    /// erroring — the caller (a job handler acting on a
+    /// `DomainEvent::UserMentioned` for a user id resolved moments
+    /// earlier) has already established the account exists.
+    pub async fn email_notifications_enabled(
+        pool: &DbPool,
+        id: UserId,
+    ) -> Result<bool, sqlx::Error> {
+        let id_text = id.to_string();
+        let sql = match pool.backend {
+            Backend::Postgres => "SELECT email_notifications_enabled FROM users WHERE id = $1",
+            Backend::Sqlite | Backend::MySql => {
+                "SELECT email_notifications_enabled FROM users WHERE id = ?"
+            }
+        };
+        let row = sqlx::query(sql)
+            .bind(&id_text)
+            .fetch_optional(&pool.any)
+            .await?;
+        match row {
+            Some(row) => get_bool(&row, "email_notifications_enabled"),
+            None => Ok(true),
+        }
+    }
+
+    /// Overwrites the stored password hash — used by the password-reset
+    /// consume flow (`edda_auth::password_reset::consume`). Session
+    /// invalidation on password change is automatic, not something this
+    /// call has to do itself: `axum_login`'s `SessionUser::
+    /// session_auth_hash` is derived from the stored hash, so any session
+    /// established under the old hash simply stops matching on its next
+    /// check — the same mechanism a settings-page password change would
+    /// rely on.
+    pub async fn update_password_hash(
+        pool: &DbPool,
+        id: UserId,
+        password_hash: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let id_text = id.to_string();
+        let sql = match pool.backend {
+            Backend::Postgres => "UPDATE users SET password_hash = $1 WHERE id = $2",
+            Backend::Sqlite | Backend::MySql => "UPDATE users SET password_hash = ? WHERE id = ?",
+        };
+        let result = sqlx::query(sql)
+            .bind(password_hash)
+            .bind(&id_text)
+            .execute(&pool.any)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn set_email_notifications_enabled(
+        pool: &DbPool,
+        id: UserId,
+        enabled: bool,
+    ) -> Result<bool, sqlx::Error> {
+        let id_text = id.to_string();
+        let flag = if enabled { 1i64 } else { 0i64 };
+        let sql = match pool.backend {
+            Backend::Postgres => "UPDATE users SET email_notifications_enabled = $1 WHERE id = $2",
+            Backend::Sqlite | Backend::MySql => {
+                "UPDATE users SET email_notifications_enabled = ? WHERE id = ?"
+            }
+        };
+        let result = sqlx::query(sql)
+            .bind(flag)
+            .bind(&id_text)
+            .execute(&pool.any)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
 }

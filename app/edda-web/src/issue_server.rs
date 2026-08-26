@@ -224,6 +224,20 @@ pub async fn add_issue_comment(
     )
     .await
     .map_err(|err| ServerFnError::new(err.to_string()))?;
+
+    crate::mentions::dispatch_mentions(
+        &shared.pool,
+        body.trim(),
+        user_id,
+        edda_domain::MentionSource::IssueComment { issue_id: issue.id },
+        &format!("You were mentioned on issue #{number}"),
+        &format!(
+            "You were mentioned in a comment on issue #{number} (\"{}\") in {owner}/{name}.",
+            issue.title
+        ),
+    )
+    .await;
+
     Ok(())
 }
 

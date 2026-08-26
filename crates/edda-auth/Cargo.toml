@@ -26,6 +26,9 @@ base64 = { workspace = true }
 coset = { workspace = true }
 edda-db = { workspace = true }
 edda-domain = { workspace = true }
+# Outgoing webhook payload signing (`webhook_signing`) — see that module's
+# doc comment.
+hmac = { workspace = true }
 # Short-lived "pending 2FA" tokens (`pending_login`) — same crate/pattern
 # as the LFS transfer-auth tokens in `edda_http::lfs::transfer_auth`.
 jsonwebtoken = { workspace = true }

@@ -7,7 +7,7 @@
 //! such restriction, so these routes live here.
 
 use axum::extract::{Json, Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
@@ -48,6 +48,98 @@ pub fn routes() -> Router<AppState> {
         .route("/api/auth/totp/enroll", post(totp_enroll))
         .route("/api/auth/totp/activate", post(totp_activate))
         .route("/api/auth/totp/disable", post(totp_disable))
+        .route(
+            "/api/auth/password-reset/request",
+            post(request_password_reset),
+        )
+        .route(
+            "/api/auth/password-reset/consume",
+            post(consume_password_reset),
+        )
+}
+
+/// Same `X-Forwarded-Proto`/`Host`-based reconstruction `edda_http::lfs`'s
+/// own `base_url` uses — kept as a separate small copy here rather than a
+/// shared helper: each call site's needs are trivial enough that a shared
+/// abstraction would cost more (an extra module boundary to look through)
+/// than it saves.
+fn base_url(headers: &HeaderMap) -> String {
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("http");
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("localhost");
+    format!("{scheme}://{host}")
+}
+
+#[derive(Deserialize)]
+struct RequestPasswordResetBody {
+    email: String,
+}
+
+/// Always responds `200` regardless of whether `email` matched a real
+/// account — the same information-hiding discipline this workspace
+/// already applies to private-repo existence (`AuthzError::NotFound`).
+/// An email is only actually enqueued when a real, enabled account
+/// matched.
+#[tracing::instrument(name = "authentication.password_reset.request", skip_all)]
+async fn request_password_reset(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<RequestPasswordResetBody>,
+) -> Response {
+    let outcome = edda_auth::password_reset::request(&state.pool, &body.email).await;
+    match outcome {
+        Ok(Some((user, raw_token))) => {
+            let reset_link = format!("{}/reset-password?token={raw_token}", base_url(&headers));
+            let subject = "Reset your Edda password".to_string();
+            let body_text = format!(
+                "Someone (hopefully you) requested a password reset for your Edda account.\n\n\
+                 Reset your password: {reset_link}\n\n\
+                 This link expires in one hour. If you didn't request this, you can ignore this email."
+            );
+            let _ = edda_jobs::enqueue(
+                &state.pool,
+                edda_domain::JobPayload::SendEmail {
+                    to_email: user.email,
+                    subject,
+                    body_text,
+                },
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+    StatusCode::OK.into_response()
+}
+
+#[derive(Deserialize)]
+struct ConsumePasswordResetBody {
+    token: String,
+    new_password: String,
+}
+
+#[tracing::instrument(name = "authentication.password_reset.consume", skip_all)]
+async fn consume_password_reset(
+    State(state): State<AppState>,
+    Json(body): Json<ConsumePasswordResetBody>,
+) -> Response {
+    match edda_auth::password_reset::consume(&state.pool, &body.token, &body.new_password).await {
+        Ok(user_id) => {
+            record(
+                &state.pool,
+                "auth.password_reset.consume",
+                &user_id.to_string(),
+            )
+            .await;
+            StatusCode::OK.into_response()
+        }
+        Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
+    }
 }
 
 /// The over-the-wire shape of a logged-in identity. Deliberately its own

@@ -25,6 +25,7 @@ use opentelemetry::KeyValue;
 struct Instruments {
     http_request_duration: Histogram<f64>,
     git_operation_duration: Histogram<f64>,
+    jobs_duration: Histogram<f64>,
 }
 
 static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
@@ -43,9 +44,15 @@ pub fn install(meter: &Meter) {
         .with_unit("ms")
         .with_description("Duration of git object-store operations (open, resolve, read, pack).")
         .build();
+    let jobs_duration = meter
+        .f64_histogram("edda.jobs.duration")
+        .with_unit("ms")
+        .with_description("Duration of background job handler executions (edda-jobs).")
+        .build();
     let _ = INSTRUMENTS.set(Instruments {
         http_request_duration,
         git_operation_duration,
+        jobs_duration,
     });
 }
 
@@ -74,6 +81,22 @@ pub fn record_git_operation(operation: &'static str, status: &'static str, durat
         duration.as_secs_f64() * 1000.0,
         &[
             KeyValue::new("operation", operation),
+            KeyValue::new("status", status),
+        ],
+    );
+}
+
+/// `job_kind` is `edda_domain::JobKind`'s own low-cardinality label (e.g.
+/// `"deliver_webhook"`), never a payload field — same cardinality
+/// discipline as `record_git_operation`.
+pub fn record_job(job_kind: &'static str, status: &'static str, duration: Duration) {
+    let Some(instruments) = INSTRUMENTS.get() else {
+        return;
+    };
+    instruments.jobs_duration.record(
+        duration.as_secs_f64() * 1000.0,
+        &[
+            KeyValue::new("job.kind", job_kind),
             KeyValue::new("status", status),
         ],
     );

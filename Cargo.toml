@@ -8,6 +8,7 @@ members = [
     "crates/edda-auth",
     "crates/edda-cli",
     "crates/edda-http",
+    "crates/edda-jobs",
     "crates/edda-ssh",
     "crates/edda-telemetry",
     "app/edda-web",
@@ -30,6 +31,7 @@ edda-render = { path = "crates/edda-render" }
 edda-auth = { path = "crates/edda-auth" }
 edda-cli = { path = "crates/edda-cli" }
 edda-http = { path = "crates/edda-http" }
+edda-jobs = { path = "crates/edda-jobs" }
 edda-ssh = { path = "crates/edda-ssh" }
 edda-telemetry = { path = "crates/edda-telemetry" }
 
@@ -84,9 +86,42 @@ gloo-net = "0.7.0"
 # HTML sanitizer run on every `comrak` output — see that dependency's own
 # comment.
 ammonia = "4.1.4"
+# Webhook payload signing (HMAC-SHA256, `edda_auth::webhook_signing`) — a
+# standalone dependency rather than reusing `jsonwebtoken`'s bundled HMAC:
+# that crate only exposes HMAC wrapped in its own JWT-shaped API (sign/
+# verify a `Header`+`Claims` pair), not a raw `sign(secret, payload) ->
+# digest` primitive, which is what an outgoing-webhook signature is.
+# RustCrypto family, matching `sha2`/`argon2`/`aes-gcm` already in this
+# tree. Pinned to `0.12`, not the newer `0.13`: `jsonwebtoken`'s
+# `rust_crypto` backend already pulls `hmac` 0.12 (paired with `digest`
+# 0.10, the same major version `sha2` 0.10 already uses everywhere in this
+# workspace) — `0.13` depends on `digest` 0.11 instead, which doesn't
+# implement the trait bounds `Hmac<Sha256>` needs against this workspace's
+# `sha2`-0.10-derived `Sha256` type, so it fails to compile as a second,
+# incompatible version rather than reusing the one already resolved.
+hmac = "0.12"
 # Only HMAC (`hmac`/`sha2`) is actually used here (HS256), but the crate
 # has no narrower "HMAC-only" feature to enable instead.
 jsonwebtoken = { version = "11.0.0", default-features = false, features = ["rust_crypto"] }
+# Outbound email (password-reset links, mention notifications,
+# `edda_web`'s job handlers) — an optional-but-first-class capability
+# (`AGENTS.md`'s dependency principle): Edda runs standalone with no SMTP
+# configured (the job handler no-ops, logging instead of failing, when
+# `EDDA_SMTP_*` isn't set), but sends real mail when it is. `rustls`-backed
+# (`tokio1-rustls-tls`), not `native-tls` (this crate's own default) — the
+# same native-C-dependency avoidance already applied throughout this
+# workspace; `default-features = false` drops `native-tls` so a member
+# crate opting into this workspace dependency can't accidentally re-enable
+# it (Cargo only lets a crate opt *into* a workspace dependency's default
+# features, never out of them, the same reasoning already documented next
+# to `comrak` above).
+lettre = { version = "0.11.23", default-features = false, features = [
+    "smtp-transport",
+    "tokio1",
+    "tokio1-rustls-tls",
+    "builder",
+    "pool",
+] }
 # OAuth2/OIDC *consumer* login (`edda-auth::oauth`) — Edda authenticates
 # against external identity providers; it does not act as an OAuth/OIDC
 # provider itself. `openidconnect` pulls its own compatible `oauth2`
@@ -104,6 +139,18 @@ opentelemetry_sdk = "0.32.1"
 # (`russh`'s published `Cargo.toml` dev-dependencies) — needed for
 # `ssh_key::PrivateKey::random`'s `CryptoRng` bound.
 rand = { version = "0.10", features = ["thread_rng"] }
+# Outbound HTTP for webhook delivery (`edda_web`'s job handlers) — pinned
+# to the `0.12` line, not the newer `0.13`, deliberately: `oauth2`/
+# `openidconnect` (already workspace dependencies) pull `reqwest` 0.12
+# transitively with `rustls-tls`'s `ring` crypto provider (confirmed via
+# `cargo tree -i ring`), matching this workspace's existing `ring`-over-
+# `aws-lc-rs` preference (`russh`'s own comment below) for free; `0.13`'s
+# `rustls` feature hardcodes the `aws-lc-rs` provider instead (verified via
+# a real `cargo build` in an isolated probe project) and would pull in a
+# second, redundant native-code TLS backend alongside the one already in
+# the graph. `default-features = false` drops `default-tls` (`native-tls`,
+# a C dependency this workspace avoids wherever a pure-Rust path exists).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 # `ring` crypto backend selected over the `aws-lc-rs` default — see
 # `crates/edda-ssh/Cargo.toml`'s doc comment for the rationale.
 russh = { version = "0.63", default-features = false, features = ["ring", "rsa"] }

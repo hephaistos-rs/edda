@@ -22,10 +22,23 @@ edda-db = { workspace = true, optional = true }
 edda-domain = { workspace = true, optional = true }
 edda-git = { workspace = true, optional = true }
 edda-http = { workspace = true, optional = true }
+# The job poller + handler registry (`main.rs`'s composition root builds
+# and registers the actual handler closures here — see that crate's own
+# `Cargo.toml` doc comment for why the logic lives here, not inside
+# `edda-jobs` itself).
+edda-jobs = { workspace = true, optional = true }
 edda-render = { workspace = true, optional = true }
 edda-ssh = { workspace = true, optional = true }
 edda-telemetry = { workspace = true, optional = true }
 gloo-net = { workspace = true, features = ["json"], optional = true }
+# Outbound webhook delivery (`job_handlers::deliver_webhook`) — see the
+# workspace `Cargo.toml`'s own comment on why `0.12`/`rustls-tls` over
+# `0.13`'s hardcoded `aws-lc-rs` provider.
+reqwest = { workspace = true, optional = true }
+# Outbound email (`job_handlers::send_email`, password-reset delivery) —
+# see the workspace `Cargo.toml`'s own comment for the `rustls`/
+# `native-tls`-avoidance reasoning.
+lettre = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 # Not optional: `ui/webauthn_js` passes the WebAuthn ceremony options/
 # response JSON through unopened (server and browser agree on the shape,
@@ -43,7 +56,8 @@ serde_json = { workspace = true }
 # picking whichever of `SqliteStore`/`PostgresStore`/`MySqlStore` matches
 # the same runtime-detected backend.
 sqlx = { workspace = true, features = ["any", "sqlite", "postgres", "mysql"], optional = true }
-tokio = { workspace = true, features = ["sync", "rt", "signal", "time"], optional = true }
+thiserror = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["sync", "rt", "signal", "time", "net"], optional = true }
 tower-sessions = { workspace = true, optional = true }
 tower-sessions-sqlx-store = { workspace = true, features = ["sqlite", "postgres", "mysql"], optional = true }
 # Not optional: `tracing`'s macros (`info!`, `#[instrument]`, ...) are used
@@ -73,10 +87,14 @@ server = [
     "dep:edda-domain",
     "dep:edda-git",
     "dep:edda-http",
+    "dep:edda-jobs",
     "dep:edda-render",
     "dep:edda-ssh",
     "dep:edda-telemetry",
+    "dep:lettre",
+    "dep:reqwest",
     "dep:sqlx",
+    "dep:thiserror",
     "dep:tokio",
     "dep:tower-sessions",
     "dep:tower-sessions-sqlx-store",

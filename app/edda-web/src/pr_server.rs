@@ -295,6 +295,22 @@ pub async fn add_pull_request_comment(
     )
     .await
     .map_err(|err| ServerFnError::new(err.to_string()))?;
+
+    crate::mentions::dispatch_mentions(
+        &shared.pool,
+        body.trim(),
+        user_id,
+        edda_domain::MentionSource::PullRequestComment {
+            pull_request_id: pr.id,
+        },
+        &format!("You were mentioned on pull request #{number}"),
+        &format!(
+            "You were mentioned in a comment on pull request #{number} (\"{}\") in {owner}/{name}.",
+            pr.title
+        ),
+    )
+    .await;
+
     Ok(())
 }
 
@@ -411,6 +427,27 @@ pub async fn merge_pull_request(
     edda_db::PullRequestRepo::update_state(&shared.pool, pr.id, &merged_state)
         .await
         .map_err(|err| ServerFnError::new(err.to_string()))?;
+
+    // Event emission happens *after* the state-changing transaction
+    // commits (§9.2/§12.1) — a webhook must never fire for a merge that
+    // subsequently rolled back, and by this point it hasn't. A dispatch
+    // failure here is logged, not propagated: the merge itself already
+    // fully succeeded, and the caller shouldn't see it reported as failed
+    // over a webhook fan-out issue.
+    let event = edda_domain::DomainEvent::PullRequestMerged {
+        pull_request_id: pr.id,
+        repository_id: repository.id,
+    };
+    let webhook_payload = serde_json::json!({
+        "action": "merged",
+        "repository": { "owner": owner, "name": name },
+        "pull_request": { "number": number, "title": pr.title },
+    })
+    .to_string();
+    if let Err(err) = edda_jobs::dispatch(&shared.pool, &event, Some(&webhook_payload), None).await
+    {
+        tracing::error!(error = %err, "failed to dispatch pull_request.merged webhook fan-out");
+    }
 
     Ok(())
 }

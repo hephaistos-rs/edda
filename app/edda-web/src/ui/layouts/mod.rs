@@ -116,6 +116,7 @@ pub fn Navbar() -> Element {
                     AuthState::Checking => rsx! { span { class: "opacity-0", "…" } },
                     AuthState::LoggedIn(user) => rsx! {
                         span { class: "font-mono text-ink", "{user.username}" }
+                        NotificationsLink {}
                         if user.is_admin {
                             Link { to: Route::Admin {}, class: "no-underline hover:text-ink", "admin" }
                         }
@@ -136,5 +137,29 @@ pub fn Navbar() -> Element {
         }
 
         Outlet::<Route> {}
+    }
+}
+
+/// The unread-notification count next to the nav link — reads from the
+/// same `Notification` entity the API exposes (§11.2's own rule against a
+/// separate frontend-only notification model), via the same server
+/// function `ui/pages/notifications.rs`'s page uses.
+#[component]
+fn NotificationsLink() -> Element {
+    let unread = use_resource(crate::notification_server::unread_notification_count);
+    let count = match &*unread.read() {
+        Some(Ok(count)) if *count > 0 => Some(*count),
+        _ => None,
+    };
+    rsx! {
+        Link {
+            to: Route::Notifications {},
+            class: "no-underline hover:text-ink",
+            if let Some(count) = count {
+                "notifications ({count})"
+            } else {
+                "notifications"
+            }
+        }
     }
 }

@@ -5,10 +5,12 @@ pub mod pktline;
 pub mod protocol;
 pub mod search;
 pub mod store;
+pub mod tags;
 
 pub use diff::{commit_diff, DiffHunk, DiffLine, FileDiff};
 pub use merge::{merge_branches, MergeOutcome};
 pub use search::{search_tree, SearchMatch};
+pub use tags::{create_tag, list_tags, resolve_tag};
 
 use std::collections::HashMap;
 use std::fmt;

@@ -1,9 +1,13 @@
-//! Symmetric at-rest encryption for the one secret this workspace needs to
+//! Symmetric at-rest encryption for secrets this workspace needs to
 //! *recover*, not just verify: a user's TOTP shared secret (`totp_secrets.
-//! secret_ciphertext`). Unlike a password hash or an access-token hash,
-//! this value has to be decrypted back to its original bytes on every
-//! login to compute a fresh 6-digit code, so it can't be a one-way hash
-//! the way every other credential in this workspace is stored.
+//! secret_ciphertext`) and, since Phase 7, a webhook's HMAC signing
+//! secret (`webhooks.secret_ciphertext`) — both have to be decrypted back
+//! to their original bytes (to compute a fresh 6-digit code; to sign an
+//! outgoing delivery) rather than merely verified, so neither can be a
+//! one-way hash the way every other credential in this workspace is
+//! stored. Nothing about the mechanism itself is TOTP-specific, so a
+//! second caller needing the same "encrypt now, decrypt later" property
+//! reuses it directly rather than growing a parallel implementation.
 //!
 //! Keyed by `EDDA_SECRET_KEY` — a 32-byte AES-256 key, hex-encoded (64 hex
 //! characters), read once at first use and cached for the process's

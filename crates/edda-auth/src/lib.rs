@@ -9,6 +9,7 @@ pub mod authz;
 pub mod backend;
 pub mod oauth;
 pub mod password;
+pub mod password_reset;
 pub mod pending_login;
 pub mod secret_box;
 pub mod signup;
@@ -16,6 +17,7 @@ pub mod ssh;
 pub mod tokens;
 pub mod totp;
 pub mod webauthn;
+pub mod webhook_signing;
 
 pub use authz::AuthorizationService;
 pub use backend::{AuthError, Backend, Credentials, SessionUser};

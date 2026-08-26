@@ -1,6 +1,9 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::notification_server::{
+    get_email_notifications_enabled, set_email_notifications_enabled,
+};
 use crate::ui::webauthn_js;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -542,6 +545,17 @@ pub fn Settings() -> Element {
         });
     };
 
+    let email_notifications_enabled = use_resource(get_email_notifications_enabled);
+    let mut email_notifications_busy = use_signal(|| false);
+    let on_toggle_email_notifications = move |event: FormEvent| {
+        let enabled = event.checked();
+        email_notifications_busy.set(true);
+        spawn(async move {
+            let _ = set_email_notifications_enabled(enabled).await;
+            email_notifications_busy.set(false);
+        });
+    };
+
     let mut webauthn_credentials = use_resource(fetch_webauthn_credentials);
     let mut webauthn_label = use_signal(String::new);
     let mut webauthn_error = use_signal(|| Option::<String>::None);
@@ -881,6 +895,21 @@ pub fn Settings() -> Element {
                         },
                     }
                 }
+            }
+
+            h1 { class: "mt-12 font-mono text-xl font-semibold text-ink", "Notifications" }
+            p { class: "mt-1 text-sm text-ink-muted",
+                "In-app notifications (mentions, review requests) are always created. This controls "
+                "whether Edda also emails you about them."
+            }
+            label { class: "mt-4 flex items-center gap-2 text-sm text-ink",
+                input {
+                    r#type: "checkbox",
+                    disabled: email_notifications_busy(),
+                    checked: (*email_notifications_enabled.read()).clone().and_then(|r| r.ok()).unwrap_or(true),
+                    onchange: on_toggle_email_notifications,
+                }
+                "email me about mentions and review requests"
             }
 
             if (*oauth_enabled.read()).unwrap_or(false) {

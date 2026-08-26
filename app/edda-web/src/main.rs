@@ -1,17 +1,27 @@
 use dioxus::prelude::*;
 
 mod issue_server;
+#[cfg(feature = "server")]
+mod job_handlers;
+#[cfg(feature = "server")]
+mod mentions;
+mod notification_server;
 mod pr_server;
+mod release_server;
 mod server;
 #[cfg(feature = "server")]
 mod session_store;
 #[cfg(feature = "server")]
 mod shared;
+#[cfg(feature = "server")]
+mod ssrf;
 mod ui;
+mod webhook_server;
 
 use ui::layouts::Navbar;
 use ui::pages::{
-    Admin, Home, IssueDetail, IssuesList, Login, PullDetail, PullsList, Repo, Settings, Signup,
+    Admin, Home, IssueDetail, IssuesList, Login, Notifications, PullDetail, PullsList,
+    ReleaseDetail, ReleasesList, Repo, ResetPassword, Settings, Signup, WebhooksSettings,
 };
 
 #[derive(Debug, Clone, Routable, PartialEq)]
@@ -22,6 +32,8 @@ enum Route {
     Home {},
     #[route("/settings")]
     Settings {},
+    #[route("/notifications")]
+    Notifications {},
     #[route("/admin")]
     Admin {},
     #[route("/:owner/:name/pulls")]
@@ -32,12 +44,20 @@ enum Route {
     IssuesList { owner: String, name: String },
     #[route("/:owner/:name/issues/:number")]
     IssueDetail { owner: String, name: String, number: i64 },
+    #[route("/:owner/:name/releases")]
+    ReleasesList { owner: String, name: String },
+    #[route("/:owner/:name/releases/:tag_name")]
+    ReleaseDetail { owner: String, name: String, tag_name: String },
+    #[route("/:owner/:name/settings/webhooks")]
+    WebhooksSettings { owner: String, name: String },
     #[route("/:owner/:name")]
     Repo { owner: String, name: String },
     #[route("/signup")]
     Signup {},
     #[route("/login")]
     Login {},
+    #[route("/reset-password?:token")]
+    ResetPassword { token: Option<String> },
 }
 
 const FAVICON: Asset = asset!("/assets/favicon.ico");
@@ -134,6 +154,37 @@ fn main() {
             let router = dioxus::server::router(App)
                 .merge(edda_http::router(state))
                 .layer(auth_layer);
+
+            // The job poller (§12.2): handler logic is registered here,
+            // in the composition root, because it needs `edda-auth`
+            // (secret decryption, HMAC signing) and an HTTP client —
+            // `edda-jobs` itself deliberately depends on neither (see
+            // that crate's own `Cargo.toml` doc comment).
+            let mailer = job_handlers::Mailer::from_env().map(std::sync::Arc::new);
+            if mailer.is_none() {
+                tracing::info!(
+                    "EDDA_SMTP_URL not set — email delivery (password reset, mention \
+                     notifications) is disabled; in-app notifications still work"
+                );
+            }
+            let mut handlers = edda_jobs::HandlerRegistry::new();
+            handlers.register(edda_domain::JobKind::SendEmail, {
+                let mailer = mailer.clone();
+                move |payload| job_handlers::send_email(mailer.clone(), payload)
+            });
+            handlers.register(edda_domain::JobKind::CreateNotification, {
+                let pool = pool.clone();
+                move |payload| job_handlers::create_notification(pool.clone(), payload)
+            });
+            handlers.register(edda_domain::JobKind::DeliverWebhook, {
+                let pool = pool.clone();
+                move |payload| job_handlers::deliver_webhook(pool.clone(), payload)
+            });
+            edda_jobs::spawn_poller(
+                pool.clone(),
+                std::sync::Arc::new(handlers),
+                edda_jobs::PollerConfig::default(),
+            );
 
             // Same `Once`-guarded pattern as the shutdown watcher below,
             // and for the same reason: this callback can re-run on

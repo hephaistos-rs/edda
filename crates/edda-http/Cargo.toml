@@ -10,7 +10,9 @@ authors.workspace = true
 # `AuthorizationService` and `edda-domain`'s pure functions for every
 # permission decision — they never re-derive access themselves.
 [dependencies]
-axum = { workspace = true }
+# `multipart`: release-asset upload (`release_assets::upload_asset`) —
+# not a default `axum` feature.
+axum = { workspace = true, features = ["multipart"] }
 axum-login = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
@@ -18,6 +20,13 @@ edda-auth = { workspace = true }
 edda-db = { workspace = true }
 edda-domain = { workspace = true }
 edda-git = { workspace = true }
+# The narrow `enqueue`/`dispatch` primitives only (password-reset email,
+# webhook/notification fan-out from `pull_request`/`issue` mutations
+# routed through this crate's git-protected-branch check) — never the
+# poller or handler registry, which need `edda-auth`/an HTTP client and
+# stay in `edda-web`'s composition root (see `crates/edda-jobs/Cargo.toml`
+# for why that dependency direction is fixed).
+edda-jobs = { workspace = true }
 edda-telemetry = { workspace = true }
 # LFS transfer-auth tokens (short-lived HMAC-signed bearer tokens minting
 # access to exactly one upload/download URL) — see `lfs::transfer_auth`.
@@ -39,6 +48,9 @@ sha2 = { workspace = true }
 # from `edda-db`, which always compiles all three in (runtime backend
 # selection).
 sqlx = { workspace = true, features = ["any"] }
+# Streaming release-asset upload/download (`release_assets`) — async file
+# I/O off the request-handling task.
+tokio = { workspace = true, features = ["fs", "io-util"] }
 tower-http = { workspace = true, features = ["trace"] }
 # The `Session` extractor for `oauth_routes` — stashing the CSRF
 # token/nonce/PKCE verifier across the redirect round-trip to the external
@@ -62,6 +74,13 @@ tracing = { workspace = true }
 # path — see the test's own comments).
 [dev-dependencies]
 axum-login = { workspace = true }
+# The release-asset integration test's client — real multipart upload and
+# a real GET download against the real router, the same "test against the
+# real client" approach the LFS/branch-protection integration tests use
+# (those use the real `git`/`git-lfs` CLI instead, since that's the real
+# client for those protocols; a release asset's real client is any plain
+# HTTP client, so `reqwest` stands in for one directly).
+reqwest = { workspace = true, features = ["multipart"] }
 sqlx = { workspace = true, features = ["sqlite"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
 tower-sessions = { workspace = true }

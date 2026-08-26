@@ -359,6 +359,9 @@ pub fn Login() -> Element {
                 "no account yet? "
                 Link { to: Route::Signup {}, class: "text-accent no-underline hover:underline", "create one" }
             }
+            p { class: "mt-1 font-mono text-xs text-ink-muted",
+                Link { to: Route::ResetPassword { token: None }, class: "text-accent no-underline hover:underline", "forgot your password?" }
+            }
         }
     }
 }

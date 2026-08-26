@@ -34,6 +34,18 @@ pub trait RepoStore: Send + Sync {
             base.join(oid)
         }
     }
+
+    /// Where one release asset's bytes live on disk, nested under the
+    /// repo's own directory the same way `lfs_object_path` is — a fork
+    /// (a directory copy) then naturally carries release assets along
+    /// with it too, with no separate copy step. `storage_key` is
+    /// `{release_id}/{filename}` (already-validated, non-path-traversing
+    /// components — see `edda_http`'s upload handler); this default
+    /// implementation only ever joins it under `releases/`, never
+    /// interprets it further.
+    fn release_asset_path(&self, name: &str, storage_key: &str) -> PathBuf {
+        self.repo_dir(name).join("releases").join(storage_key)
+    }
 }
 
 pub struct LocalFsStore {

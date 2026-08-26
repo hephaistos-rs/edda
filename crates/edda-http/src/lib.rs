@@ -4,10 +4,12 @@
 
 mod access_routes;
 mod admin_routes;
+mod api_v1;
 mod auth_routes;
 mod git_http;
 mod lfs;
 mod oauth_routes;
+mod release_assets;
 mod ssh_key_routes;
 mod state;
 mod webauthn_routes;
@@ -36,6 +38,8 @@ pub fn router(state: AppState) -> Router {
         .merge(access_routes::routes())
         .merge(ssh_key_routes::routes())
         .merge(admin_routes::routes())
+        .merge(release_assets::routes())
+        .merge(api_v1::routes())
         .route("/healthz", get(healthz));
 
     with_http_observability(routes).with_state(state)

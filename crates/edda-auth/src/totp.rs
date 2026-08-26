@@ -12,7 +12,7 @@ use argon2::password_hash::rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use totp_rs::{Algorithm, Builder, Secret, Totp};
 
-use edda_db::{DbPool, TotpRepo};
+use edda_db::{DbPool, PasswordResetTokenRepo, TotpRepo};
 use edda_domain::UserId;
 
 const RECOVERY_CODE_COUNT: usize = 8;
@@ -101,6 +101,10 @@ pub async fn activate(
     }
 
     TotpRepo::activate(pool, user_id).await?;
+    // §6 of the design: 2FA enrollment immediately invalidates outstanding
+    // password-reset tokens — a reset link issued before 2FA was enabled
+    // must not bypass the second factor the account now requires.
+    PasswordResetTokenRepo::invalidate_all_for_user(pool, user_id).await?;
 
     let raw_codes: Vec<String> = (0..RECOVERY_CODE_COUNT)
         .map(|_| generate_recovery_code())

@@ -446,6 +446,16 @@ pub fn Repo(owner: String, name: String) -> Element {
                                 class: "border-b-2 border-transparent px-1 pb-2 text-ink-muted no-underline hover:text-ink",
                                 "issues"
                             }
+                            Link {
+                                to: Route::ReleasesList { owner: owner.clone(), name: name.clone() },
+                                class: "border-b-2 border-transparent px-1 pb-2 text-ink-muted no-underline hover:text-ink",
+                                "releases"
+                            }
+                            Link {
+                                to: Route::WebhooksSettings { owner: owner.clone(), name: name.clone() },
+                                class: "border-b-2 border-transparent px-1 pb-2 text-ink-muted no-underline hover:text-ink",
+                                "webhooks"
+                            }
                         }
                         if let Some(Ok(names)) = &*branches.read() {
                             select {

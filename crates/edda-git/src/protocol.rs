@@ -15,6 +15,7 @@
 //! part (ref lines + flush); a caller that needs the service line adds it
 //! itself.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use bytes::Bytes;
@@ -298,11 +299,21 @@ pub fn parse_receive_pack_commands(body: &[u8]) -> Result<(Vec<RefCommand>, usiz
 /// repo/resolve the on-disk directory itself, since it also needs the
 /// directory for the lock — see `run_receive_pack` for the common case
 /// that does both).
+///
+/// `protected_refs` names every `refs/heads/{branch}` this push may not
+/// touch (empty — the common case — means no restriction). This crate
+/// has no notion of *why* a branch is protected or who's allowed to
+/// bypass it (no `edda-db`/`edda-domain` dependency, by design — see this
+/// crate's `Cargo.toml`); the caller (`edda-http`'s/`edda-ssh`'s receive-
+/// pack handler) resolves that against `BranchProtectionRule`s and the
+/// pushing actor's role *before* calling this, and simply passes an empty
+/// set when the actor is exempt.
 pub async fn apply_receive_pack(
     repo: gix::Repository,
     git_dir: PathBuf,
     commands: Vec<RefCommand>,
     pack_data: Bytes,
+    protected_refs: &HashSet<String>,
 ) -> Result<Vec<u8>, String> {
     if commands.is_empty() {
         return Err("no ref-update commands in request".to_string());
@@ -336,12 +347,16 @@ pub async fn apply_receive_pack(
 
     let mut results = Vec::with_capacity(commands.len());
     for command in &commands {
-        let outcome = apply_ref_update(
-            &git_dir,
-            &command.ref_name,
-            &command.old_id,
-            &command.new_id,
-        );
+        let outcome = if protected_refs.contains(&command.ref_name) {
+            Err("protected branch — push a pull request instead".to_string())
+        } else {
+            apply_ref_update(
+                &git_dir,
+                &command.ref_name,
+                &command.old_id,
+                &command.new_id,
+            )
+        };
         results.push((command.ref_name.clone(), outcome));
     }
 
@@ -368,12 +383,14 @@ pub async fn apply_receive_pack(
 /// Opens `name`, holds `locks`'s per-repo lock for the duration (a push is
 /// a write: it must not land while, say, someone deletes the repo out
 /// from under it via the web UI, or another push races it), and runs the
-/// complete receive-pack cycle against `body`.
+/// complete receive-pack cycle against `body`. See
+/// [`apply_receive_pack`]'s doc comment for `protected_refs`.
 pub async fn run_receive_pack(
     store: &dyn RepoStore,
     locks: &LockRegistry,
     name: &str,
     body: Bytes,
+    protected_refs: &HashSet<String>,
 ) -> Result<Vec<u8>, GitError> {
     let git_dir = crate::validated_repo_dir(store, name)?;
     let repo = gix::open(&git_dir).map_err(|err| GitError::Git(err.to_string()))?;
@@ -383,7 +400,7 @@ pub async fn run_receive_pack(
 
     let (commands, pos) = parse_receive_pack_commands(&body).map_err(GitError::Git)?;
     let pack_data = body.slice(pos..);
-    apply_receive_pack(repo, git_dir, commands, pack_data)
+    apply_receive_pack(repo, git_dir, commands, pack_data, protected_refs)
         .await
         .map_err(GitError::Git)
 }

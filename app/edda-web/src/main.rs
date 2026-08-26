@@ -1,5 +1,7 @@
 use dioxus::prelude::*;
 
+mod issue_server;
+mod pr_server;
 mod server;
 #[cfg(feature = "server")]
 mod session_store;
@@ -8,7 +10,9 @@ mod shared;
 mod ui;
 
 use ui::layouts::Navbar;
-use ui::pages::{Admin, Home, Login, Repo, Settings, Signup};
+use ui::pages::{
+    Admin, Home, IssueDetail, IssuesList, Login, PullDetail, PullsList, Repo, Settings, Signup,
+};
 
 #[derive(Debug, Clone, Routable, PartialEq)]
 #[rustfmt::skip]
@@ -20,6 +24,14 @@ enum Route {
     Settings {},
     #[route("/admin")]
     Admin {},
+    #[route("/:owner/:name/pulls")]
+    PullsList { owner: String, name: String },
+    #[route("/:owner/:name/pulls/:number")]
+    PullDetail { owner: String, name: String, number: i64 },
+    #[route("/:owner/:name/issues")]
+    IssuesList { owner: String, name: String },
+    #[route("/:owner/:name/issues/:number")]
+    IssueDetail { owner: String, name: String, number: i64 },
     #[route("/:owner/:name")]
     Repo { owner: String, name: String },
     #[route("/signup")]

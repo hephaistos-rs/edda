@@ -9,7 +9,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::branch_protection::BranchProtectionRule;
 use crate::ids::{RepositoryId, UserId};
+use crate::pull_request::{latest_reviews, PrReview, ReviewState};
 use crate::repository::Repository;
 
 /// Ranked low-to-high so `role >= minimum` is a valid permission check —
@@ -178,6 +180,46 @@ pub fn require_instance_admin(actor_is_admin: bool) -> Result<(), AuthzError> {
     }
 }
 
+/// Whether `actor` may merge a pull request into `repository`, given
+/// `protection` (the target branch's rule, if any) and the PR's
+/// `reviews`. This is strictly the *authorization* half of "can this PR
+/// be merged" — write access, plus the target branch's required-approval
+/// count if it's protected. Whether the PR's own state actually permits
+/// merging (already merged/closed, or has real git conflicts) is a
+/// business-rule/state-machine question, not an authorization one, and is
+/// the caller's responsibility to check separately (matching
+/// `AuthzError`'s own two-variant shape, which has no room to distinguish
+/// "you may never do this" from "this particular PR can't be merged right
+/// now").
+///
+/// A branch-protection rule's `required_approvals` is enforced uniformly
+/// — including for `RepoRole::Admin`/`Owner` actors — since a merge is a
+/// content-safety gate the rule exists specifically to enforce, unlike
+/// direct-push blocking (see `edda_git`'s own protected-branch check),
+/// where an admin bypass matches how mainstream git hosts default that
+/// specific control.
+pub fn can_merge_pull_request(
+    actor: &ActorContext,
+    repository: &Repository,
+    protection: Option<&BranchProtectionRule>,
+    reviews: &[PrReview],
+    access: Option<&RepoAccess>,
+) -> Result<(), AuthzError> {
+    can_write_repository(actor, repository, access)?;
+
+    let Some(rule) = protection else {
+        return Ok(());
+    };
+    let approvals = latest_reviews(reviews)
+        .into_iter()
+        .filter(|review| review.state == ReviewState::Approved)
+        .count();
+    if (approvals as i64) < rule.required_approvals {
+        return Err(AuthzError::Forbidden);
+    }
+    Ok(())
+}
+
 fn token_scope_permits(actor: &ActorContext, repository: &Repository) -> bool {
     match actor {
         ActorContext::Token { scope, .. } => scope.permits(repository),
@@ -308,6 +350,108 @@ mod tests {
             can_write_repository(&actor, &private, Some(&owner)).unwrap_err(),
             AuthzError::NotFound
         );
+    }
+
+    fn review(state: ReviewState) -> PrReview {
+        PrReview {
+            id: crate::ids::PrReviewId::new(),
+            pull_request_id: crate::ids::PullRequestId::new(),
+            reviewer_id: UserId::new(),
+            state,
+            body: None,
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn an_unprotected_branch_needs_no_approvals_to_merge() {
+        let repository = repo(Visibility::Public);
+        let user = UserId::new();
+        let writer = access(repository.id, user, RepoRole::Write);
+        assert!(can_merge_pull_request(
+            &ActorContext::User(user),
+            &repository,
+            None,
+            &[],
+            Some(&writer)
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_protected_branch_blocks_a_merge_short_of_its_required_approvals() {
+        let repository = repo(Visibility::Public);
+        let user = UserId::new();
+        let writer = access(repository.id, user, RepoRole::Write);
+        let rule = crate::branch_protection::BranchProtectionRule {
+            id: crate::ids::BranchProtectionRuleId::new(),
+            repository_id: repository.id,
+            branch: "main".to_string(),
+            required_approvals: 1,
+        };
+
+        let err = can_merge_pull_request(
+            &ActorContext::User(user),
+            &repository,
+            Some(&rule),
+            &[],
+            Some(&writer),
+        )
+        .unwrap_err();
+        assert_eq!(err, AuthzError::Forbidden);
+
+        assert!(can_merge_pull_request(
+            &ActorContext::User(user),
+            &repository,
+            Some(&rule),
+            &[review(ReviewState::Approved)],
+            Some(&writer),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn only_a_reviewers_latest_verdict_counts_toward_required_approvals() {
+        let repository = repo(Visibility::Public);
+        let user = UserId::new();
+        let writer = access(repository.id, user, RepoRole::Write);
+        let rule = crate::branch_protection::BranchProtectionRule {
+            id: crate::ids::BranchProtectionRuleId::new(),
+            repository_id: repository.id,
+            branch: "main".to_string(),
+            required_approvals: 1,
+        };
+        let reviewer = UserId::new();
+        let reviews = vec![
+            PrReview {
+                created_at: 1,
+                ..review(ReviewState::Approved)
+            },
+            PrReview {
+                reviewer_id: reviewer,
+                created_at: 2,
+                ..review(ReviewState::ChangesRequested)
+            },
+        ];
+        // Both reviews are actually the same reviewer's, with the later
+        // (changes-requested) verdict superseding the earlier approval.
+        let reviews: Vec<PrReview> = reviews
+            .into_iter()
+            .map(|r| PrReview {
+                reviewer_id: reviewer,
+                ..r
+            })
+            .collect();
+
+        let err = can_merge_pull_request(
+            &ActorContext::User(user),
+            &repository,
+            Some(&rule),
+            &reviews,
+            Some(&writer),
+        )
+        .unwrap_err();
+        assert_eq!(err, AuthzError::Forbidden);
     }
 
     #[test]

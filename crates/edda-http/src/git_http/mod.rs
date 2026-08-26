@@ -304,8 +304,21 @@ async fn receive_pack(
         return response;
     }
 
-    let out = match protocol::run_receive_pack(state.store.as_ref(), &state.locks, &identity, body)
+    let actor = resolve_actor(&state, &auth, &headers).await;
+    let protected_refs = state
+        .authz
+        .protected_ref_names(&actor, &repository)
         .await
+        .unwrap_or_default();
+
+    let out = match protocol::run_receive_pack(
+        state.store.as_ref(),
+        &state.locks,
+        &identity,
+        body,
+        &protected_refs,
+    )
+    .await
     {
         Ok(out) => out,
         Err(err) => return (StatusCode::BAD_REQUEST, err.to_string()).into_response(),

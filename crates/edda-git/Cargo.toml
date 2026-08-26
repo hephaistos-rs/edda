@@ -17,17 +17,20 @@ bytes = { workspace = true }
 edda-domain = { workspace = true }
 edda-telemetry = { workspace = true }
 flate2 = { workspace = true }
-gix = { workspace = true }
+# `merge`: pull-request merging (`merge` module) via `Repository::
+# merge_commits` — pulls in `tree-editor` (writing the merged tree) and
+# `blob-diff` transitively. See that module's doc comment for why this,
+# not `git2`/libgit2.
+gix = { workspace = true, features = ["merge"] }
+gix-actor = { workspace = true }
 gix-hash = { workspace = true, features = ["sha1"] }
 gix-object = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
-# `tree-editor`: only needed by `diff`'s test fixtures, which hand-build
-# commits (`gix::Repository::edit_tree`) rather than shelling out to `git` —
-# not needed by any non-test code in this crate, so scoped to dev-only here
-# rather than added to the main `gix` dependency above.
-gix = { workspace = true, features = ["tree-editor"] }
-gix-actor = { workspace = true }
+# `diff`'s and `merge`'s test fixtures hand-build commits
+# (`gix::Repository::edit_tree`) rather than shelling out to `git` — the
+# main `gix`/`gix-actor` dependencies above (via the `merge` feature)
+# already cover what these tests need.
 tokio = { workspace = true, features = ["rt", "macros"] }

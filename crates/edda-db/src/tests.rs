@@ -6,13 +6,15 @@
 //! tests persistence and schema behavior, not authorization policy).
 
 use edda_domain::{
-    LfsLockId, RepoRole, Repository, RepositoryId, RepositoryOwner, SshKeyId, User, UserId,
+    CloseReason, DiffAnchor, IssueState, LfsLockId, MergeStrategy, MilestoneState, PrRef, PrState,
+    RepoRole, Repository, RepositoryId, RepositoryOwner, ReviewState, SshKeyId, User, UserId,
     Visibility,
 };
 
 use crate::{
-    AccessTokenRepo, AuditEventRepo, LfsRepo, OAuthIdentityRepo, RepoAccessRepo, RepositoryRepo,
-    SshKeyRepo, TotpRepo, UserRepo, WebauthnRepo,
+    AccessTokenRepo, AuditEventRepo, BranchProtectionRepo, IssueCommentRepo, IssueRepo, LabelRepo,
+    LfsRepo, MilestoneRepo, OAuthIdentityRepo, PrCommentRepo, PrReviewRepo, PullRequestRepo,
+    RepoAccessRepo, RepositoryRepo, SshKeyRepo, TotpRepo, UserRepo, WebauthnRepo,
 };
 
 async fn insert_user(pool: &crate::DbPool, username: &str) -> UserId {
@@ -21,6 +23,38 @@ async fn insert_user(pool: &crate::DbPool, username: &str) -> UserId {
         .await
         .unwrap();
     id
+}
+
+/// Opens a pull request with a fixed `main` target and no body, varying
+/// only title/source branch/author — what every PR-related test below
+/// needs to set the scene, before exercising whatever it's actually
+/// testing.
+async fn open_pr(
+    pool: &crate::DbPool,
+    repository_id: RepositoryId,
+    id: edda_domain::PullRequestId,
+    title: &str,
+    source_branch: &str,
+    author_id: UserId,
+) -> i64 {
+    PullRequestRepo::insert(
+        pool,
+        id,
+        repository_id,
+        crate::NewPullRequest {
+            title,
+            body: None,
+            author_id,
+            source: &PrRef {
+                repository_id,
+                branch: source_branch.to_string(),
+            },
+            target: "main",
+            draft: false,
+        },
+    )
+    .await
+    .unwrap()
 }
 
 fn repo(owner: UserId, name: &str, visibility: Visibility) -> Repository {
@@ -626,4 +660,486 @@ async fn audit_events_list_most_recent_first() {
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].event_type, "auth.token.create");
     assert_eq!(events[1].event_type, "auth.login.success");
+}
+
+// --- Phase 6: pull requests, issues, labels, milestones, branch protection ---
+
+#[tokio::test]
+async fn pull_requests_and_issues_share_one_numbering_sequence_per_repository() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let repository = repo(alice, "demo", Visibility::Public);
+    RepositoryRepo::insert(&pool, &repository).await.unwrap();
+
+    let pr_number = open_pr(
+        &pool,
+        repository.id,
+        edda_domain::PullRequestId::new(),
+        "Add feature",
+        "feature",
+        alice,
+    )
+    .await;
+    let issue_number = IssueRepo::insert(
+        &pool,
+        edda_domain::IssueId::new(),
+        repository.id,
+        "Bug report",
+        None,
+        alice,
+    )
+    .await
+    .unwrap();
+    let second_pr_number = open_pr(
+        &pool,
+        repository.id,
+        edda_domain::PullRequestId::new(),
+        "Fix bug",
+        "fix",
+        alice,
+    )
+    .await;
+
+    assert_eq!(pr_number, 1);
+    assert_eq!(issue_number, 2);
+    assert_eq!(second_pr_number, 3);
+}
+
+#[tokio::test]
+async fn a_pull_request_round_trips_through_open_and_merged_states() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let repository = repo(alice, "demo", Visibility::Public);
+    RepositoryRepo::insert(&pool, &repository).await.unwrap();
+
+    let id = edda_domain::PullRequestId::new();
+    PullRequestRepo::insert(
+        &pool,
+        id,
+        repository.id,
+        crate::NewPullRequest {
+            title: "Add feature",
+            body: Some("Some body"),
+            author_id: alice,
+            source: &PrRef {
+                repository_id: repository.id,
+                branch: "feature".to_string(),
+            },
+            target: "main",
+            draft: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    let pr = PullRequestRepo::find_by_id(&pool, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pr.state, PrState::Open);
+    assert_eq!(pr.title, "Add feature");
+    assert_eq!(pr.body.as_deref(), Some("Some body"));
+    assert_eq!(pr.source.branch, "feature");
+    assert_eq!(pr.target, "main");
+
+    let merged_state = PrState::Merged {
+        merged_at: 12345,
+        merge_commit: "a".repeat(40),
+        strategy: MergeStrategy::Merge,
+    };
+    PullRequestRepo::update_state(&pool, id, &merged_state)
+        .await
+        .unwrap();
+
+    let pr = PullRequestRepo::find_by_id(&pool, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pr.state, merged_state);
+
+    let by_number = PullRequestRepo::find_by_repository_and_number(&pool, repository.id, pr.number)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(by_number.id, id);
+}
+
+#[tokio::test]
+async fn pr_reviews_are_appended_not_overwritten_and_list_in_order() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let bob = insert_user(&pool, "bob").await;
+    let repository = repo(alice, "demo", Visibility::Public);
+    RepositoryRepo::insert(&pool, &repository).await.unwrap();
+    let pr_id = edda_domain::PullRequestId::new();
+    open_pr(&pool, repository.id, pr_id, "Add feature", "feature", alice).await;
+
+    PrReviewRepo::insert(
+        &pool,
+        edda_domain::PrReviewId::new(),
+        pr_id,
+        bob,
+        ReviewState::ChangesRequested,
+        Some("please fix"),
+    )
+    .await
+    .unwrap();
+    PrReviewRepo::insert(
+        &pool,
+        edda_domain::PrReviewId::new(),
+        pr_id,
+        bob,
+        ReviewState::Approved,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let reviews = PrReviewRepo::list_for_pull_request(&pool, pr_id)
+        .await
+        .unwrap();
+    assert_eq!(reviews.len(), 2);
+    let latest = edda_domain::latest_reviews(&reviews);
+    assert_eq!(latest.len(), 1);
+    assert_eq!(latest[0].state, ReviewState::Approved);
+}
+
+#[tokio::test]
+async fn a_pr_comment_can_be_anchored_to_a_diff_line_or_left_general() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let repository = repo(alice, "demo", Visibility::Public);
+    RepositoryRepo::insert(&pool, &repository).await.unwrap();
+    let pr_id = edda_domain::PullRequestId::new();
+    open_pr(&pool, repository.id, pr_id, "Add feature", "feature", alice).await;
+
+    PrCommentRepo::insert(
+        &pool,
+        edda_domain::PrCommentId::new(),
+        pr_id,
+        alice,
+        "general comment",
+        None,
+    )
+    .await
+    .unwrap();
+    let anchor = DiffAnchor {
+        file_path: "src/main.rs".to_string(),
+        line_range: (10, 12),
+        commit_sha: "b".repeat(40),
+    };
+    PrCommentRepo::insert(
+        &pool,
+        edda_domain::PrCommentId::new(),
+        pr_id,
+        alice,
+        "anchored comment",
+        Some(&anchor),
+    )
+    .await
+    .unwrap();
+
+    let comments = PrCommentRepo::list_for_pull_request(&pool, pr_id)
+        .await
+        .unwrap();
+    assert_eq!(comments.len(), 2);
+    assert_eq!(comments[0].anchor, None);
+    assert_eq!(comments[1].anchor.as_ref(), Some(&anchor));
+}
+
+#[tokio::test]
+async fn applying_a_scoped_label_unapplies_the_previous_one_in_that_scope() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let repository = repo(alice, "demo", Visibility::Public);
+    RepositoryRepo::insert(&pool, &repository).await.unwrap();
+    let issue_id = edda_domain::IssueId::new();
+    IssueRepo::insert(&pool, issue_id, repository.id, "Bug", None, alice)
+        .await
+        .unwrap();
+
+    let low_id = edda_domain::LabelId::new();
+    LabelRepo::insert(
+        &pool,
+        low_id,
+        repository.id,
+        "priority/low",
+        "#00ff00",
+        None,
+    )
+    .await
+    .unwrap();
+    let high_id = edda_domain::LabelId::new();
+    LabelRepo::insert(
+        &pool,
+        high_id,
+        repository.id,
+        "priority/high",
+        "#ff0000",
+        None,
+    )
+    .await
+    .unwrap();
+    let bug_id = edda_domain::LabelId::new();
+    LabelRepo::insert(&pool, bug_id, repository.id, "bug", "#0000ff", None)
+        .await
+        .unwrap();
+
+    let low = LabelRepo::list_for_repository(&pool, repository.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|l| l.id == low_id)
+        .unwrap();
+    let high = LabelRepo::list_for_repository(&pool, repository.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|l| l.id == high_id)
+        .unwrap();
+    let bug = LabelRepo::list_for_repository(&pool, repository.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|l| l.id == bug_id)
+        .unwrap();
+
+    LabelRepo::apply_to_issue(&pool, issue_id, &low)
+        .await
+        .unwrap();
+    LabelRepo::apply_to_issue(&pool, issue_id, &bug)
+        .await
+        .unwrap();
+    let applied = LabelRepo::list_for_issue(&pool, issue_id).await.unwrap();
+    assert_eq!(applied.len(), 2);
+
+    // Applying `priority/high` unapplies `priority/low` (same scope) but
+    // leaves the unscoped `bug` label untouched.
+    LabelRepo::apply_to_issue(&pool, issue_id, &high)
+        .await
+        .unwrap();
+    let applied = LabelRepo::list_for_issue(&pool, issue_id).await.unwrap();
+    let applied_ids: std::collections::HashSet<_> = applied.iter().map(|l| l.id).collect();
+    assert_eq!(applied_ids, [high_id, bug_id].into_iter().collect());
+}
+
+#[tokio::test]
+async fn an_issue_can_be_assigned_a_milestone_and_closed() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let repository = repo(alice, "demo", Visibility::Public);
+    RepositoryRepo::insert(&pool, &repository).await.unwrap();
+
+    let milestone_id = edda_domain::MilestoneId::new();
+    MilestoneRepo::insert(&pool, milestone_id, repository.id, "v1.0", None, None)
+        .await
+        .unwrap();
+
+    let issue_id = edda_domain::IssueId::new();
+    IssueRepo::insert(&pool, issue_id, repository.id, "Bug", None, alice)
+        .await
+        .unwrap();
+    IssueRepo::set_milestone(&pool, issue_id, Some(milestone_id))
+        .await
+        .unwrap();
+
+    let issue = IssueRepo::find_by_id(&pool, issue_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(issue.milestone_id, Some(milestone_id));
+    assert_eq!(issue.state, IssueState::Open);
+
+    IssueCommentRepo::insert(
+        &pool,
+        edda_domain::IssueCommentId::new(),
+        issue_id,
+        alice,
+        "on it",
+    )
+    .await
+    .unwrap();
+    let comments = IssueCommentRepo::list_for_issue(&pool, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(comments.len(), 1);
+
+    let closed_state = IssueState::Closed {
+        closed_at: 999,
+        reason: CloseReason::Completed,
+    };
+    IssueRepo::update_state(&pool, issue_id, &closed_state)
+        .await
+        .unwrap();
+    let issue = IssueRepo::find_by_id(&pool, issue_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(issue.state, closed_state);
+
+    MilestoneRepo::update_state(&pool, milestone_id, MilestoneState::Closed)
+        .await
+        .unwrap();
+    let milestones = MilestoneRepo::list_for_repository(&pool, repository.id)
+        .await
+        .unwrap();
+    assert_eq!(milestones[0].state, MilestoneState::Closed);
+}
+
+/// Phase 6 exit-criteria test, in its exact stated sequence: "an issue
+/// can be created, labeled (including a scoped-label mutual-exclusion
+/// check), commented on, and closed."
+#[tokio::test]
+async fn an_issue_can_be_created_labeled_commented_on_and_closed() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let repository = repo(alice, "demo", Visibility::Public);
+    RepositoryRepo::insert(&pool, &repository).await.unwrap();
+
+    // Created.
+    let issue_id = edda_domain::IssueId::new();
+    let number = IssueRepo::insert(
+        &pool,
+        issue_id,
+        repository.id,
+        "Something is broken",
+        Some("Steps to reproduce..."),
+        alice,
+    )
+    .await
+    .unwrap();
+    assert_eq!(number, 1);
+
+    // Labeled — including the scoped mutual-exclusion check: applying
+    // `priority/high` after `priority/low` replaces it, but leaves the
+    // unscoped `bug` label alone.
+    let bug_id = edda_domain::LabelId::new();
+    LabelRepo::insert(&pool, bug_id, repository.id, "bug", "#ff0000", None)
+        .await
+        .unwrap();
+    let low_id = edda_domain::LabelId::new();
+    LabelRepo::insert(
+        &pool,
+        low_id,
+        repository.id,
+        "priority/low",
+        "#00ff00",
+        None,
+    )
+    .await
+    .unwrap();
+    let high_id = edda_domain::LabelId::new();
+    LabelRepo::insert(
+        &pool,
+        high_id,
+        repository.id,
+        "priority/high",
+        "#ffa500",
+        None,
+    )
+    .await
+    .unwrap();
+    let repo_labels = LabelRepo::list_for_repository(&pool, repository.id)
+        .await
+        .unwrap();
+    let find = |id| repo_labels.iter().find(|l| l.id == id).unwrap().clone();
+
+    LabelRepo::apply_to_issue(&pool, issue_id, &find(bug_id))
+        .await
+        .unwrap();
+    LabelRepo::apply_to_issue(&pool, issue_id, &find(low_id))
+        .await
+        .unwrap();
+    let applied: std::collections::HashSet<_> = LabelRepo::list_for_issue(&pool, issue_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|l| l.id)
+        .collect();
+    assert_eq!(applied, [bug_id, low_id].into_iter().collect());
+
+    LabelRepo::apply_to_issue(&pool, issue_id, &find(high_id))
+        .await
+        .unwrap();
+    let applied: std::collections::HashSet<_> = LabelRepo::list_for_issue(&pool, issue_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|l| l.id)
+        .collect();
+    assert_eq!(
+        applied,
+        [bug_id, high_id].into_iter().collect(),
+        "priority/high must have replaced priority/low, leaving bug untouched"
+    );
+
+    // Commented on.
+    IssueCommentRepo::insert(
+        &pool,
+        edda_domain::IssueCommentId::new(),
+        issue_id,
+        alice,
+        "investigating now",
+    )
+    .await
+    .unwrap();
+    let comments = IssueCommentRepo::list_for_issue(&pool, issue_id)
+        .await
+        .unwrap();
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0].body, "investigating now");
+
+    // Closed.
+    let closed_state = IssueState::Closed {
+        closed_at: 1_700_000_000,
+        reason: CloseReason::Completed,
+    };
+    IssueRepo::update_state(&pool, issue_id, &closed_state)
+        .await
+        .unwrap();
+    let issue = IssueRepo::find_by_repository_and_number(&pool, repository.id, number)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(issue.state, closed_state);
+}
+
+#[tokio::test]
+async fn a_branch_protection_rule_round_trips_and_can_be_deleted() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let repository = repo(alice, "demo", Visibility::Public);
+    RepositoryRepo::insert(&pool, &repository).await.unwrap();
+
+    let rule_id = edda_domain::BranchProtectionRuleId::new();
+    BranchProtectionRepo::insert(&pool, rule_id, repository.id, "main", 2)
+        .await
+        .unwrap();
+
+    let found = BranchProtectionRepo::find_for_branch(&pool, repository.id, "main")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.required_approvals, 2);
+    assert!(
+        BranchProtectionRepo::find_for_branch(&pool, repository.id, "develop")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let rules = BranchProtectionRepo::list_for_repository(&pool, repository.id)
+        .await
+        .unwrap();
+    assert_eq!(rules.len(), 1);
+
+    assert!(BranchProtectionRepo::delete(&pool, repository.id, rule_id)
+        .await
+        .unwrap());
+    assert!(
+        BranchProtectionRepo::find_for_branch(&pool, repository.id, "main")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

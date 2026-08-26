@@ -16,9 +16,18 @@
 
 pub mod access_token_repo;
 pub mod audit_event_repo;
+pub mod branch_protection_repo;
+pub mod issue_comment_repo;
+pub mod issue_repo;
+pub mod label_repo;
 pub mod lfs_repo;
+pub mod milestone_repo;
 pub mod oauth_identity_repo;
+pub mod pr_comment_repo;
+pub mod pr_review_repo;
+pub mod pull_request_repo;
 pub mod repo_access_repo;
+pub mod repo_number_repo;
 pub mod repository_repo;
 pub mod ssh_key_repo;
 pub mod totp_repo;
@@ -30,9 +39,18 @@ mod tests;
 
 pub use access_token_repo::AccessTokenRepo;
 pub use audit_event_repo::{AuditEvent, AuditEventRepo};
+pub use branch_protection_repo::BranchProtectionRepo;
+pub use issue_comment_repo::IssueCommentRepo;
+pub use issue_repo::IssueRepo;
+pub use label_repo::LabelRepo;
 pub use lfs_repo::{CreateLockError, LfsRepo};
+pub use milestone_repo::MilestoneRepo;
 pub use oauth_identity_repo::OAuthIdentityRepo;
+pub use pr_comment_repo::PrCommentRepo;
+pub use pr_review_repo::PrReviewRepo;
+pub use pull_request_repo::{NewPullRequest, PullRequestRepo};
 pub use repo_access_repo::RepoAccessRepo;
+pub use repo_number_repo::RepoNumberRepo;
 pub use repository_repo::RepositoryRepo;
 pub use ssh_key_repo::SshKeyRepo;
 pub use totp_repo::TotpRepo;

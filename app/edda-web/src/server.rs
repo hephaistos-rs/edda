@@ -436,7 +436,7 @@ impl From<edda_git::CommitLogEntry> for CommitLogEntryDto {
 /// 404-not-403 reasoning as `get_repo`. Returns the resolved `Repository`
 /// so callers don't have to look it up twice.
 #[cfg(feature = "server")]
-async fn require_read_access(
+pub(crate) async fn require_read_access(
     auth: &axum_login::AuthSession<edda_auth::Backend>,
     owner: &str,
     name: &str,
@@ -457,6 +457,34 @@ async fn require_read_access(
         .await
         .map_err(|err| ServerFnError::new(err.to_string()))?;
     Ok(repository)
+}
+
+/// Shared by `pr_server`/`issue_server` — every pull-request/issue write
+/// (opening one, commenting, labeling, ...) needs at least `Write` on the
+/// repository it belongs to, resolved the same "already-known-actor"
+/// way `require_read_access` resolves read access.
+#[cfg(feature = "server")]
+pub(crate) async fn require_write_access(
+    auth: &axum_login::AuthSession<edda_auth::Backend>,
+    owner: &str,
+    name: &str,
+) -> Result<(edda_domain::Repository, edda_domain::ActorContext), ServerFnError> {
+    let shared = crate::shared::get();
+    let repository = shared
+        .authz
+        .repository_by_name(owner, name)
+        .await
+        .map_err(|err| ServerFnError::new(err.to_string()))?;
+    let Some(session_user) = &auth.user else {
+        return Err(ServerFnError::new("login required"));
+    };
+    let actor = edda_domain::ActorContext::User(session_user.user.id);
+    shared
+        .authz
+        .check_write(&actor, &repository)
+        .await
+        .map_err(|err| ServerFnError::new(err.to_string()))?;
+    Ok((repository, actor))
 }
 
 /// `path` is a `/`-joined relative path within the repo (e.g. `"src/main.rs"`),

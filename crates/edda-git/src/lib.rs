@@ -1,4 +1,5 @@
 pub mod diff;
+pub mod merge;
 pub mod pack;
 pub mod pktline;
 pub mod protocol;
@@ -6,6 +7,7 @@ pub mod search;
 pub mod store;
 
 pub use diff::{commit_diff, DiffHunk, DiffLine, FileDiff};
+pub use merge::{merge_branches, MergeOutcome};
 pub use search::{search_tree, SearchMatch};
 
 use std::collections::HashMap;
@@ -82,6 +84,10 @@ pub enum GitError {
     NotFound(String),
     Io(std::io::Error),
     Git(String),
+    /// A merge (`merge::merge_branches`) left this many unresolved
+    /// conflicts — the merge was not completed, no objects it wrote are
+    /// reachable from any ref, and the target branch was not moved.
+    Conflict(usize),
 }
 
 impl fmt::Display for GitError {
@@ -94,6 +100,9 @@ impl fmt::Display for GitError {
             GitError::NotFound(name) => write!(f, "no repository named \"{name}\""),
             GitError::Io(err) => write!(f, "{err}"),
             GitError::Git(err) => write!(f, "{err}"),
+            GitError::Conflict(count) => {
+                write!(f, "the merge has {count} unresolved conflict(s)")
+            }
         }
     }
 }

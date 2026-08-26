@@ -436,6 +436,16 @@ pub fn Repo(owner: String, name: String) -> Element {
                                 onclick: move |_| tab.set(RepoTab::Search),
                                 "search"
                             }
+                            Link {
+                                to: Route::PullsList { owner: owner.clone(), name: name.clone() },
+                                class: "border-b-2 border-transparent px-1 pb-2 text-ink-muted no-underline hover:text-ink",
+                                "pull requests"
+                            }
+                            Link {
+                                to: Route::IssuesList { owner: owner.clone(), name: name.clone() },
+                                class: "border-b-2 border-transparent px-1 pb-2 text-ink-muted no-underline hover:text-ink",
+                                "issues"
+                            }
                         }
                         if let Some(Ok(names)) = &*branches.read() {
                             select {

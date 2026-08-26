@@ -26,6 +26,11 @@ enum ChannelState {
     ReceivePack {
         identity: String,
         buffer: Vec<u8>,
+        /// Resolved once, here, at command-open time (where `actor`/
+        /// `repository` are both in scope) — see `AuthorizationService::
+        /// protected_ref_names`'s own doc comment for why this
+        /// resolution can't happen inside `edda-git` itself.
+        protected_refs: std::collections::HashSet<String>,
     },
 }
 
@@ -208,10 +213,19 @@ impl server::Handler for Connection {
                 identity,
                 buffer: Vec::new(),
             },
-            crate::command::GitService::ReceivePack => ChannelState::ReceivePack {
-                identity,
-                buffer: Vec::new(),
-            },
+            crate::command::GitService::ReceivePack => {
+                let protected_refs = self
+                    .state
+                    .authz
+                    .protected_ref_names(&actor, &repository)
+                    .await
+                    .unwrap_or_default();
+                ChannelState::ReceivePack {
+                    identity,
+                    buffer: Vec::new(),
+                    protected_refs,
+                }
+            }
         };
         self.channels.insert(channel, next_state);
         Ok(())
@@ -267,7 +281,11 @@ impl server::Handler for Connection {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if let Some(ChannelState::ReceivePack { identity, buffer }) = self.channels.remove(&channel)
+        if let Some(ChannelState::ReceivePack {
+            identity,
+            buffer,
+            protected_refs,
+        }) = self.channels.remove(&channel)
         {
             let body = Bytes::from(buffer);
             match protocol::run_receive_pack(
@@ -275,6 +293,7 @@ impl server::Handler for Connection {
                 &self.state.locks,
                 &identity,
                 body,
+                &protected_refs,
             )
             .await
             {

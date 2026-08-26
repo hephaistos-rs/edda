@@ -27,6 +27,12 @@ edda-ssh = { workspace = true, optional = true }
 edda-telemetry = { workspace = true, optional = true }
 gloo-net = { workspace = true, features = ["json"], optional = true }
 serde = { workspace = true, features = ["derive"] }
+# Not optional: `ui/webauthn_js` passes the WebAuthn ceremony options/
+# response JSON through unopened (server and browser agree on the shape,
+# `ui/` never needs to interpret individual fields) — see that module's
+# own doc comment for why `serde_json::Value` rather than a duplicated
+# set of typed DTOs.
+serde_json = { workspace = true }
 # Backend (SQLite/PostgreSQL/MySQL-MariaDB) is a runtime choice, selected
 # by `EDDA_DATABASE_URL`'s scheme — one compiled binary, all three
 # drivers linked in.

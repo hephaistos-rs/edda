@@ -1,6 +1,7 @@
-//! WebAuthn/passkey credential storage. `passkey_json` is `webauthn-rs`'s
-//! own serialized `Passkey` — this crate never interprets it, only
-//! round-trips the bytes `edda-auth::webauthn` hands it.
+//! WebAuthn/passkey credential storage. `passkey_json` is
+//! `edda_auth::webauthn`'s own serialized `StoredCredential` — this crate
+//! never interprets it, only round-trips the bytes `edda-auth::webauthn`
+//! hands it.
 
 use edda_domain::{UserId, WebauthnCredentialId};
 

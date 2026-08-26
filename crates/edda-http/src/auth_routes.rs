@@ -20,8 +20,10 @@ use crate::state::AppState;
 
 /// Best-effort audit logging — see `admin_routes::record`'s identical
 /// reasoning for why a logging failure must never fail the action it
-/// describes.
-async fn record(pool: &edda_db::DbPool, event_type: &str, actor_id: &str) {
+/// describes. `pub(crate)`: `webauthn_routes` completes a login exactly
+/// the same way `login`/`login_totp` here do, and shares this rather than
+/// duplicating it.
+pub(crate) async fn record(pool: &edda_db::DbPool, event_type: &str, actor_id: &str) {
     let _ = edda_db::AuditEventRepo::insert(
         pool,
         edda_domain::AuditEventId::new(),
@@ -54,8 +56,12 @@ pub fn routes() -> Router<AppState> {
 /// mirrored by `edda-web`'s wasm-compiled client code anyway; keeping a
 /// dedicated DTO at the crate boundary (not just the public HTTP API)
 /// avoids leaking domain types into the wasm build.
+/// `pub(crate)`: `webauthn_routes::login_verify` returns the same shape
+/// after completing a login via a passkey instead of a password+TOTP
+/// pair — see `record`'s identical reasoning for sharing rather than
+/// duplicating.
 #[derive(Debug, Serialize)]
-struct CurrentUserDto {
+pub(crate) struct CurrentUserDto {
     id: String,
     username: String,
     email: String,
@@ -154,20 +160,31 @@ async fn login(mut auth: AuthSession<Backend>, Json(creds): Json<LoginBody>) -> 
     let user = session_user.user.clone();
 
     // Password verified — but if this account has an *activated* TOTP
-    // credential, the session isn't established yet. A pending-login
-    // token (short-lived, HMAC-signed, scoped to this one user) stands in
-    // for "password already verified" until a second request presents a
-    // valid code to `/api/auth/login/totp`. See `edda_auth::totp`'s and
-    // `edda_auth::pending_login`'s own doc comments for the full
-    // reasoning — `axum_login::AuthnBackend::authenticate` has no room for
-    // this intermediate state, so it has to live at this route level
-    // instead of inside `authenticate` itself.
+    // credential, or at least one registered WebAuthn credential, the
+    // session isn't established yet. A pending-login token (short-lived,
+    // HMAC-signed, scoped to this one user) stands in for "password
+    // already verified" until a second request presents a valid TOTP/
+    // recovery code to `/api/auth/login/totp` or a valid passkey
+    // assertion to `/api/auth/webauthn/login/verify`. See
+    // `edda_auth::totp`'s and `edda_auth::pending_login`'s own doc
+    // comments for the full reasoning — `axum_login::AuthnBackend::
+    // authenticate` has no room for this intermediate state, so it has to
+    // live at this route level instead of inside `authenticate` itself.
+    // Checking WebAuthn here (not just TOTP) matters: without it, an
+    // account with *only* a passkey registered — no TOTP — would skip a
+    // second factor entirely, since `authenticate` already established
+    // the password was correct and nothing downstream would ever ask for
+    // more.
     let auth_backend = auth.backend.clone();
     let pool = auth_backend.pool();
-    let needs_totp = edda_auth::totp::is_activated(pool, user.id)
+    let has_totp = edda_auth::totp::is_activated(pool, user.id)
         .await
         .unwrap_or(false);
-    if needs_totp {
+    let has_webauthn = !edda_auth::webauthn::list(pool, user.id)
+        .await
+        .unwrap_or_default()
+        .is_empty();
+    if has_totp || has_webauthn {
         let pending_login_token = edda_auth::pending_login::issue(&user.id.to_string());
         return Json(LoginResponse::NeedsTotp {
             pending_login_token,

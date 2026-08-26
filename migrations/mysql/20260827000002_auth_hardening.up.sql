@@ -36,11 +36,11 @@ CREATE TABLE totp_recovery_codes (
 CREATE INDEX idx_totp_recovery_codes_user ON totp_recovery_codes(user_id);
 CREATE UNIQUE INDEX idx_totp_recovery_codes_hash ON totp_recovery_codes(code_hash);
 
--- `passkey_json` (`webauthn-rs`'s serialized `Passkey`) is comfortably
--- under a few KB in practice — `VARCHAR(8192)` is generous headroom
--- while staying a plain `VARCHAR` (needed for `String` decoding, and for
--- this to be the only large column in the table, safely inside InnoDB's
--- row-size limit).
+-- `passkey_json` (`edda_auth::webauthn`'s serialized `StoredCredential`)
+-- is comfortably under a few KB in practice — `VARCHAR(8192)` is generous
+-- headroom while staying a plain `VARCHAR` (needed for `String` decoding,
+-- and for this to be the only large column in the table, safely inside
+-- InnoDB's row-size limit).
 CREATE TABLE webauthn_credentials (
     id           VARCHAR(36) PRIMARY KEY NOT NULL,
     user_id      VARCHAR(36) NOT NULL,

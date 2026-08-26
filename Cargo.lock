@@ -1140,6 +1140,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "coset"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1eb98d5e9155e2cf7cd942c8b3033097d4563b6fb0a00b9caecb74669555c058"
+dependencies = [
+ "ciborium",
+ "ciborium-io",
+]
+
+[[package]]
 name = "cpubits"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2502,6 +2512,7 @@ dependencies = [
  "edda-telemetry",
  "gloo-net 0.7.0",
  "serde",
+ "serde_json",
  "sqlx",
  "tokio",
  "tower-sessions",
@@ -2520,11 +2531,14 @@ dependencies = [
  "axum-login",
  "base64 0.22.1",
  "chrono",
+ "coset",
  "edda-db",
  "edda-domain",
  "jsonwebtoken",
  "oauth2",
  "openidconnect",
+ "p256 0.14.0",
+ "passkey-types",
  "rand 0.10.2",
  "russh",
  "serde",
@@ -6600,6 +6614,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "passkey-types"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2a1fae06bd6bc619675d30b50cb38ca649837cc9e6a92a00b14743cfbdb1390"
+dependencies = [
+ "bitflags 2.13.1",
+ "ciborium",
+ "coset",
+ "data-encoding",
+ "getrandom 0.2.17",
+ "hmac 0.12.1",
+ "indexmap 2.14.0",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "strum",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "password-hash"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8255,6 +8291,7 @@ version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
+ "indexmap 2.14.0",
  "itoa",
  "memchr",
  "serde",
@@ -9014,6 +9051,27 @@ name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
+
+[[package]]
+name = "strum"
+version = "0.27.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af23d6f6c1a224baef9d3f61e287d2761385a5b88fdab4eb4c6f11aeb54c4bcf"
+dependencies = [
+ "strum_macros",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.27.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7695ce3845ea4b33927c055a39dc438a45b059f7c1b3d91d38d10355fb8cbca7"
+dependencies = [
+ "heck 0.5.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "subsecond"

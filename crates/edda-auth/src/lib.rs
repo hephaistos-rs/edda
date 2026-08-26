@@ -1,9 +1,9 @@
 //! Authentication (`backend`, `password`, `signup`, `tokens`, `ssh`,
-//! `totp`, `oauth`) and authorization (`authz`). `secret_box` is the
-//! at-rest encryption used by `totp` to store a recoverable secret;
-//! `pending_login` is the short-lived-token bridge between "password
-//! verified" and "session established" that a second-factor challenge
-//! needs.
+//! `totp`, `oauth`, `webauthn`) and authorization (`authz`). `secret_box`
+//! is the at-rest encryption used by `totp` to store a recoverable
+//! secret; `pending_login` is the short-lived-token bridge between
+//! "password verified" and "session established" that a second-factor
+//! challenge (TOTP or WebAuthn) needs.
 
 pub mod authz;
 pub mod backend;
@@ -15,6 +15,7 @@ pub mod signup;
 pub mod ssh;
 pub mod tokens;
 pub mod totp;
+pub mod webauthn;
 
 pub use authz::AuthorizationService;
 pub use backend::{AuthError, Backend, Credentials, SessionUser};

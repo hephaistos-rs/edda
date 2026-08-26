@@ -17,6 +17,13 @@ aes-gcm = { workspace = true }
 argon2 = { workspace = true }
 axum-login = { workspace = true }
 base64 = { workspace = true }
+# WebAuthn's COSE key access (`CoseKey::to_sec1_octet_string`) and CBOR
+# parsing of the attestation object (`coset::cbor` = `ciborium`, re-exported)
+# — `webauthn` needs this in addition to the `CoseKey` type `passkey-types`
+# itself re-exports, since it also touches `coset::iana`/`coset::cbor`
+# directly. See the workspace `Cargo.toml`'s WebAuthn dependency comment for
+# why this trio over `webauthn-rs`.
+coset = { workspace = true }
 edda-db = { workspace = true }
 edda-domain = { workspace = true }
 # Short-lived "pending 2FA" tokens (`pending_login`) — same crate/pattern
@@ -24,6 +31,13 @@ edda-domain = { workspace = true }
 jsonwebtoken = { workspace = true }
 oauth2 = { workspace = true }
 openidconnect = { workspace = true }
+# ES256 assertion/attestation signature verification (`p256::ecdsa`) — see
+# the workspace `Cargo.toml`'s WebAuthn dependency comment.
+p256 = { workspace = true }
+# WebAuthn request/response JSON types matching the browser
+# `navigator.credentials` shape — see the workspace `Cargo.toml`'s WebAuthn
+# dependency comment.
+passkey-types = { workspace = true }
 rand = { workspace = true, features = ["thread_rng"] }
 # Only for `russh::keys` (= the `ssh_key` crate's types, re-exported) —
 # public-key parsing and fingerprinting are an authentication-credential
@@ -35,7 +49,7 @@ rand = { workspace = true, features = ["thread_rng"] }
 # could resolve to an incompatible type even at a semver-compatible version.
 russh = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-# WebAuthn's `Passkey` and OAuth's linked-identity bookkeeping are
+# `webauthn::StoredCredential` and OAuth's linked-identity bookkeeping are
 # persisted as opaque JSON blobs via `edda-db` — this crate does the
 # (de)serialization, `edda-db` just stores the resulting string.
 serde_json = { workspace = true }

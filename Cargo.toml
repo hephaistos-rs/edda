@@ -130,49 +130,28 @@ tracing-opentelemetry = "0.33.0"
 tracing-subscriber = "0.3.23"
 uuid = "1.24.1"
 web-time = "1.1.0"
-# WebAuthn/passkey second factor: deliberately NOT added as a dependency
-# here. `webauthn-rs` 0.5.5's `webauthn-rs-core` has `default = []` (no
-# feature at all gates this) and unconditionally depends on
-# `webauthn-attestation-ca` (confirmed by reading both crates' actual
-# published `Cargo.toml`s), which itself unconditionally depends on
-# `openssl`/`openssl-sys` — a native C dependency this workspace otherwise
-# avoids everywhere else (`ring` over `aws-lc-rs` for `russh`,
-# `rust_crypto` for `jsonwebtoken`, `fancy-regex` for `syntect`).
-#
-# Three concrete fixes were tried and verified failing on this workspace's
-# own Windows/MSVC (`x86_64-pc-windows-msvc`) dev environment, each with a
-# real `cargo build` (not just `cargo check`, which doesn't invoke the
-# final link step and can mask this class of failure):
-#   1. No system OpenSSL install at all → `openssl-sys`'s build script
-#      fails outright looking for one.
-#   2. `OPENSSL_DIR` pointed at Strawberry Perl's bundled OpenSSL
-#      (`C:\Strawberry\c`, which does have real `libssl.a`/`libcrypto.a`
-#      and headers) → `cargo build` fails with "could not find native
-#      static library `libssl`": those archives are MinGW-format, and
-#      this toolchain's linker (MSVC `link.exe`) cannot consume them.
-#   3. `openssl = { features = ["vendored"] }` (build OpenSSL from
-#      source) with Strawberry Perl on `PATH` (which — unlike Git for
-#      Windows' bundled minimal Perl, the actual cause of an earlier,
-#      less precise version of this finding — does have the
-#      `Locale::Maketext::Simple` CPAN module OpenSSL's `Configure`
-#      needs) → still fails, earlier in the process: `Configure` itself
-#      aborts with a Perl error in its own `OpenSSL::Template` module
-#      (`Template.pm` line 41, "Compilation failed in require") before
-#      ever reaching a C compiler, so having Visual Studio 2022 (which
-#      this machine does) installed doesn't help either.
-#
-# A genuinely pure-Rust alternative exists — 1Password's `passkey` crate
-# (0.4.0; `passkey-authenticator`/`passkey-client`/`passkey-types`) has an
-# entirely openssl-free dependency tree (`p256`/RustCrypto, confirmed via
-# `cargo tree` in an isolated probe project) — but it is a different API
-# shape from `webauthn-rs`, and adopting it is a real implementation task
-# (registration/authentication ceremony, challenge/session plumbing, a
-# client-side `navigator.credentials` bridge), not a drop-in swap, so it
-# was not undertaken in this pass. TOTP is this phase's required
-# second-factor mechanism (the exit criteria name it explicitly; WebAuthn
-# does not appear in them) — the WebAuthn *persistence* layer
-# (`webauthn_credentials` table, `edda_db::WebauthnRepo`,
-# `edda_domain::WebauthnCredentialId`) is still built and tested, ready
-# for whenever this is revisited on top of `passkey` (or a future
-# `webauthn-rs` release that decouples attestation from its core
-# dependency graph, or a non-MSVC build environment).
+# WebAuthn/passkey registration+authentication ceremony (`edda_auth::webauthn`).
+# Deliberately not `webauthn-rs`: that crate's `webauthn-rs-core` unconditionally
+# depends on `webauthn-attestation-ca` -> `openssl`/`openssl-sys`, a native C
+# dependency that fails to build on this workspace's Windows/MSVC toolchain
+# (verified with real `cargo build`s, not just `cargo check`) and that this
+# workspace otherwise avoids everywhere else (`ring` over `aws-lc-rs` for
+# `russh`, `rust_crypto` for `jsonwebtoken`, `fancy-regex` for `syntect`).
+# `passkey-types` + `coset` + `p256` is an entirely openssl-free,
+# RustCrypto-family alternative (verified via `cargo tree` and a real
+# `cargo build` in an isolated probe project) — `passkey-types` supplies the
+# WebAuthn JSON/CBOR request-response types (matching the browser
+# `navigator.credentials` JSON shape 1:1, with `serialize_bytes_as_base64_string`
+# so `Bytes` fields round-trip as base64url strings) and CTAP2's
+# `AuthenticatorData::from_slice`/`AttestedCredentialData` parsers; `coset`
+# (re-exported by `passkey-types` for `CoseKey`, depended on directly here for
+# `iana`/CBOR value access) gives `CoseKey::to_sec1_octet_string()` to recover
+# a P-256 point from an attested credential's COSE key; `p256`'s `ecdsa`
+# module verifies the ES256 assertion signature. None of these are an
+# off-the-shelf relying-party verifier — `passkey-rs` is built for WebAuthn
+# *clients*/authenticators, not servers — so `edda_auth::webauthn` implements
+# the actual RP-side ceremony (challenge issuance, origin/RP-ID/signature
+# verification, sign-counter tracking) itself on top of these primitives.
+coset = "0.4.2"
+p256 = "0.14.0"
+passkey-types = { version = "0.5.0", features = ["serialize_bytes_as_base64_string"] }

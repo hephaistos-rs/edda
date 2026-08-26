@@ -46,9 +46,9 @@ CREATE UNIQUE INDEX idx_totp_recovery_codes_hash ON totp_recovery_codes(code_has
 
 -- WebAuthn credentials are public-key material by design — nothing here
 -- needs encryption at rest (contrast `totp_secrets` above). `passkey_json`
--- is `webauthn-rs`'s own serialized `Passkey` (its internal wire/storage
--- format is opaque and versioned by that crate; `edda-auth` never
--- interprets it directly, only round-trips it through `serde_json`).
+-- is `edda_auth::webauthn`'s own serialized `StoredCredential` (credential
+-- ID, SEC1 public key point, sign counter); `edda-db` never interprets it
+-- directly, only round-trips it through `serde_json`.
 CREATE TABLE webauthn_credentials (
     id           TEXT PRIMARY KEY NOT NULL,
     user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

@@ -127,6 +127,7 @@ async fn an_uploaded_release_asset_downloads_back_with_matching_content() {
         locks,
         authz: AuthorizationService::new(pool.clone()),
         backend: Backend::new(pool.clone()),
+        config: Default::default(),
     };
     let addr = spawn_server(state).await;
     let base = format!("http://{addr}");

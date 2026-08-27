@@ -62,6 +62,7 @@ async fn login_and_read_same_site(same_site: Option<SameSite>) -> String {
         locks: std::sync::Arc::new(edda_git::LockRegistry::new()),
         authz: AuthorizationService::new(pool.clone()),
         backend: Backend::new(pool.clone()),
+        config: Default::default(),
     };
     let addr = spawn_server_with_same_site(state, same_site).await;
 

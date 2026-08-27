@@ -45,8 +45,7 @@ async fn disabling_a_user_via_the_cli_blocks_their_next_login() {
         db_path.to_str().unwrap().replace('\\', "/")
     );
 
-    std::env::set_var("EDDA_DATABASE_URL", &db_url);
-    let pool = edda_db::pool()
+    let pool = edda_db::pool(&db_url)
         .await
         .expect("connect and migrate test database");
 

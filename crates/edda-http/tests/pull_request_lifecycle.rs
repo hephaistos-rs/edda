@@ -154,6 +154,7 @@ async fn a_pull_request_opens_is_reviewed_and_merges_against_a_real_repository()
         locks: locks.clone(),
         authz: AuthorizationService::new(pool.clone()),
         backend: Backend::new(pool.clone()),
+        config: Default::default(),
     };
     let addr = spawn_server(state).await;
     let remote = format!("http://ci:{alice_token}@{addr}/alice/demo.git");

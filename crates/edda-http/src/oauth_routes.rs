@@ -46,15 +46,21 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// Lets the UI decide whether to render an "sign in with SSO"/"link
-/// external account" affordance at all — this instance's OAuth
-/// configuration is server-side (env vars), so the client has no other
-/// way to know whether `/api/auth/oauth/login` would even work.
-async fn enabled() -> Response {
-    axum::Json(oauth::Config::from_env().is_some()).into_response()
+/// external account" affordance at all — this instance's OIDC
+/// configuration is server-side, so the client has no other way to know
+/// whether `/api/auth/oauth/login` would even work.
+async fn enabled(State(state): State<AppState>) -> Response {
+    axum::Json(state.config.oidc.is_some()).into_response()
 }
 
-async fn config_or_404() -> Result<oauth::Config, Response> {
-    oauth::Config::from_env().ok_or_else(|| {
+/// This instance's OIDC config, or a 404 when it isn't configured (the
+/// `EDDA_OAUTH_*` set unset). Resolved once at startup by
+/// `edda_http::config` and carried in `AppState`.
+// `Err` is a ready-to-return axum `Response` (the "value or a 404" helper
+// pattern) — intentionally, not an error to bubble up a deep call stack.
+#[allow(clippy::result_large_err)]
+fn config_or_404(state: &AppState) -> Result<oauth::Config, Response> {
+    state.config.oidc.clone().ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
             "OAuth login is not configured for this instance",
@@ -65,8 +71,8 @@ async fn config_or_404() -> Result<oauth::Config, Response> {
 
 /// Begins a fresh login attempt: redirects the browser to the configured
 /// provider's consent screen.
-async fn start_login(session: Session) -> Response {
-    begin(session, None).await
+async fn start_login(State(state): State<AppState>, session: Session) -> Response {
+    begin(&state, session, None).await
 }
 
 /// Begins a *link* attempt from an already-authenticated session — the
@@ -74,7 +80,11 @@ async fn start_login(session: Session) -> Response {
 /// email already matches an existing password account (see
 /// `oauth::link`'s doc comment). Refuses outright if the caller isn't
 /// logged in; there is nothing useful to link a floating identity to.
-async fn start_link(session: Session, auth: AuthSession<Backend>) -> Response {
+async fn start_link(
+    State(state): State<AppState>,
+    session: Session,
+    auth: AuthSession<Backend>,
+) -> Response {
     let Some(session_user) = auth.user else {
         return (
             StatusCode::UNAUTHORIZED,
@@ -82,11 +92,11 @@ async fn start_link(session: Session, auth: AuthSession<Backend>) -> Response {
         )
             .into_response();
     };
-    begin(session, Some(session_user.user.id.to_string())).await
+    begin(&state, session, Some(session_user.user.id.to_string())).await
 }
 
-async fn begin(session: Session, link_user_id: Option<String>) -> Response {
-    let config = match config_or_404().await {
+async fn begin(state: &AppState, session: Session, link_user_id: Option<String>) -> Response {
+    let config = match config_or_404(state) {
         Ok(config) => config,
         Err(response) => return response,
     };
@@ -139,7 +149,7 @@ async fn callback(
     mut auth: AuthSession<Backend>,
     Query(params): Query<CallbackParams>,
 ) -> Response {
-    let config = match config_or_404().await {
+    let config = match config_or_404(&state) {
         Ok(config) => config,
         Err(response) => return response,
     };

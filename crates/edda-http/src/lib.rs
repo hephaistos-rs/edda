@@ -6,6 +6,7 @@ mod access_routes;
 mod admin_routes;
 mod api_v1;
 mod auth_routes;
+pub mod config;
 mod git_http;
 mod lfs;
 mod oauth_routes;
@@ -15,7 +16,7 @@ mod ssh_key_routes;
 mod state;
 mod webauthn_routes;
 
-pub use state::AppState;
+pub use state::{AppState, RuntimeConfig};
 
 use axum::extract::{MatchedPath, Request, State};
 use axum::http::{Response as HttpResponse, StatusCode};
@@ -48,7 +49,7 @@ pub fn router(state: AppState) -> Router {
         .merge(admin_routes::routes())
         .merge(release_assets::routes())
         .merge(api_v1::routes())
-        .route_layer(rate_limit::layer());
+        .route_layer(rate_limit::layer(&state.config.rate_limit));
 
     let routes = Router::new()
         .merge(git_http::routes())

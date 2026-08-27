@@ -90,19 +90,6 @@ async fn sustained_requests_trip_the_limiter_but_never_a_real_git_clone() {
         return;
     }
 
-    // A deliberately tiny budget — this test only needs to *observe* the
-    // limiter engaging, not exercise its production-sized default. Read
-    // once, inside `edda_http::rate_limit::layer()`, at the `router(...)`
-    // call a few lines below — no other test in this process reads these,
-    // so there's no cross-test race.
-    // Single-threaded at this point in the test (no other task has been
-    // spawned yet), and no other test in this binary reads these vars.
-    // `set_var` is infallible and safe on this workspace's 2021 edition;
-    // it only becomes `unsafe` under edition 2024, and by the time that
-    // migration lands the rate-limit budget comes from `Settings`, not env.
-    std::env::set_var("EDDA_RATE_LIMIT_PER_SECOND", "1");
-    std::env::set_var("EDDA_RATE_LIMIT_BURST", "3");
-
     let pool = edda_db::test_pool().await;
     let store_root = temp_dir("store");
     let store: Arc<dyn RepoStore> = Arc::new(LocalFsStore::new(store_root.clone()));
@@ -137,6 +124,15 @@ async fn sustained_requests_trip_the_limiter_but_never_a_real_git_clone() {
         locks,
         authz: AuthorizationService::new(pool.clone()),
         backend: Backend::new(pool.clone()),
+        // A deliberately tiny budget — this test only needs to *observe*
+        // the limiter engaging, not exercise its production-sized default.
+        config: edda_http::RuntimeConfig {
+            rate_limit: edda_http::config::RateLimitConfig {
+                per_second: 1,
+                burst: 3,
+            },
+            ..Default::default()
+        },
     };
     let addr = spawn_server(state).await;
     let base = format!("http://{addr}");

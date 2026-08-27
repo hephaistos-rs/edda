@@ -13,27 +13,32 @@ use lettre::{AsyncTransport, Tokio1Executor};
 use edda_db::DbPool;
 use edda_domain::{JobPayload, WebhookDeliveryId};
 
-/// SMTP delivery, configured from `EDDA_SMTP_URL`/`EDDA_SMTP_FROM`. Both
-/// unset (the default) is a supported, first-class standalone
-/// configuration, not a degraded one — `send_email` simply logs and
-/// no-ops rather than failing when this is `None`, so nothing in this
-/// workspace *requires* SMTP to run (`AGENTS.md`'s "optional but
-/// first-class" framing applied here exactly as it already is to
-/// PostgreSQL/MySQL).
+/// SMTP delivery, configured from `edda_http::config`'s `SmtpConfig`
+/// (`EDDA_SMTP_URL`/`EDDA_SMTP_FROM`). Both unset (the default) is a
+/// supported, first-class standalone configuration, not a degraded one —
+/// `send_email` simply logs and no-ops rather than failing when this is
+/// `None`, so nothing in this workspace *requires* SMTP to run
+/// (`AGENTS.md`'s "optional but first-class" framing applied here exactly
+/// as it already is to PostgreSQL/MySQL).
 pub struct Mailer {
     transport: lettre::AsyncSmtpTransport<Tokio1Executor>,
     from: lettre::message::Mailbox,
 }
 
 impl Mailer {
-    pub fn from_env() -> Option<Self> {
-        let url = std::env::var("EDDA_SMTP_URL").ok()?;
-        let from = std::env::var("EDDA_SMTP_FROM").ok()?;
-        let from: lettre::message::Mailbox = from.parse().ok()?;
-        let transport = lettre::AsyncSmtpTransport::<Tokio1Executor>::from_url(&url)
-            .ok()?
+    /// Builds a mailer from a validated `SmtpConfig`. Returns `Err` with a
+    /// human-readable reason if the URL or From mailbox don't parse — the
+    /// composition root surfaces that as a startup failure rather than
+    /// silently disabling email.
+    pub fn new(config: &edda_http::config::SmtpConfig) -> Result<Self, String> {
+        let from: lettre::message::Mailbox = config
+            .from
+            .parse()
+            .map_err(|e| format!("EDDA_SMTP_FROM is not a valid mailbox: {e}"))?;
+        let transport = lettre::AsyncSmtpTransport::<Tokio1Executor>::from_url(&config.url)
+            .map_err(|e| format!("EDDA_SMTP_URL is not a valid SMTP URL: {e}"))?
             .build();
-        Some(Self { transport, from })
+        Ok(Self { transport, from })
     }
 
     async fn send(&self, to: &str, subject: &str, body_text: &str) -> Result<(), String> {
@@ -231,12 +236,7 @@ mod tests {
     use axum::Router;
 
     fn set_test_key() {
-        std::env::set_var(
-            "EDDA_SECRET_KEY",
-            "1111111111111111111111111111111111111111111111111111111111111111"
-                .get(0..64)
-                .unwrap(),
-        );
+        edda_auth::secret_box::init(Some([0x11; 32]));
     }
 
     #[derive(Clone, Default)]
@@ -352,7 +352,8 @@ mod tests {
             .unwrap();
 
         let secret = edda_auth::webhook_signing::generate_secret();
-        let ciphertext = edda_auth::secret_box::encrypt(secret.as_bytes());
+        let ciphertext =
+            edda_auth::secret_box::encrypt(secret.as_bytes()).expect("test key installed");
         let webhook_id = edda_domain::WebhookId::new();
         edda_db::WebhookRepo::insert(
             &pool,

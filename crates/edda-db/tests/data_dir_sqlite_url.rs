@@ -1,50 +1,23 @@
-//! Regression test: `edda_db::pool()` must build a usable SQLite URL from
-//! `EDDA_DATA_DIR` regardless of the directory's shape — an absolute path
-//! and the platform-native separator included.
+//! Regression test: `edda_db::effective_url` + `pool` must build a usable
+//! SQLite URL from a data directory regardless of the directory's shape —
+//! an absolute path and the platform-native separator included.
 //!
 //! The zero-config default path used to format the URL as
 //! `sqlite://<data_dir>/edda.db`, where `sqlite://` makes the URL parser
 //! read the first path segment as an authority/host. On Windows that meant
-//! an absolute `EDDA_DATA_DIR` (`C:\...`) put the drive letter in the host
+//! an absolute data dir (`C:\...`) put the drive letter in the host
 //! position ("unable to open database file"), and any backslash separator
 //! produced "invalid domain character" — the server panicked at startup
 //! for essentially every real deployment path, and only a forward-slash
-//! *relative* `EDDA_DATA_DIR` happened to work. This exercises the fixed
+//! *relative* data dir happened to work. This exercises the fixed
 //! `sqlite:` opaque form against exactly that input.
 //!
-//! One test, run cases sequentially: `pool()` reads process-global env, so
-//! the cases must not interleave. This file is its own test binary, so
-//! there is no contention with the rest of the suite.
+//! Since Phase 1 the resolution takes explicit parameters (no `std::env`),
+//! so this no longer touches process-global state.
 
-struct EnvGuard {
-    database_url: Option<String>,
-    data_dir: Option<String>,
-}
+use std::path::{Path, PathBuf};
 
-impl EnvGuard {
-    fn capture() -> Self {
-        Self {
-            database_url: std::env::var("EDDA_DATABASE_URL").ok(),
-            data_dir: std::env::var("EDDA_DATA_DIR").ok(),
-        }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        restore("EDDA_DATABASE_URL", self.database_url.as_deref());
-        restore("EDDA_DATA_DIR", self.data_dir.as_deref());
-    }
-}
-
-fn restore(key: &str, value: Option<&str>) {
-    match value {
-        Some(v) => std::env::set_var(key, v),
-        None => std::env::remove_var(key),
-    }
-}
-
-fn unique_dir(label: &str) -> std::path::PathBuf {
+fn unique_dir(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "edda-db-datadir-{label}-{}-{}",
         std::process::id(),
@@ -55,18 +28,23 @@ fn unique_dir(label: &str) -> std::path::PathBuf {
     ))
 }
 
-/// Points `EDDA_DATA_DIR` at `data_dir` (with `EDDA_DATABASE_URL` unset, to
-/// force the SQLite zero-config path), opens a pool, and proves it's
-/// actually usable — not merely constructed.
+/// Resolves the zero-config SQLite URL for `data_dir`, opens a pool, and
+/// proves it's actually usable — not merely constructed.
 async fn assert_pool_works_with_data_dir(data_dir: &str) {
+    // The data dir is the caller's responsibility (`edda_db::pool` no
+    // longer touches the filesystem) — `edda_http::config` / `edda-cli`
+    // create it at startup; here the test does.
     std::fs::create_dir_all(data_dir).expect("create the test data dir");
 
-    std::env::remove_var("EDDA_DATABASE_URL");
-    std::env::set_var("EDDA_DATA_DIR", data_dir);
+    let url = edda_db::effective_url(None, Path::new(data_dir));
+    assert!(
+        url.starts_with("sqlite:"),
+        "expected a sqlite: URL, got {url:?}"
+    );
 
-    let pool = edda_db::pool()
-        .await
-        .unwrap_or_else(|err| panic!("pool() failed for EDDA_DATA_DIR={data_dir:?}: {err}"));
+    let pool = edda_db::pool(&url).await.unwrap_or_else(|err| {
+        panic!("pool() failed for data_dir={data_dir:?} (url {url:?}): {err}")
+    });
 
     sqlx::query("SELECT 1")
         .execute(&pool.any)
@@ -74,7 +52,7 @@ async fn assert_pool_works_with_data_dir(data_dir: &str) {
         .expect("run a trivial query against the opened pool");
 
     assert!(
-        std::path::Path::new(data_dir).join("edda.db").exists(),
+        Path::new(data_dir).join("edda.db").exists(),
         "expected edda.db under {data_dir:?}"
     );
 
@@ -83,10 +61,8 @@ async fn assert_pool_works_with_data_dir(data_dir: &str) {
 
 #[tokio::test]
 async fn pool_opens_from_data_dir_regardless_of_path_shape() {
-    let _restore = EnvGuard::capture();
-
     // An absolute path with the platform-native separator — on Windows the
-    // `C:\...\` shape that used to make `pool()` panic at startup.
+    // `C:\...\` shape that used to make startup panic.
     let native = unique_dir("native");
     assert!(
         native.is_absolute(),

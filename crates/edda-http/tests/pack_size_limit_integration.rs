@@ -148,6 +148,7 @@ async fn a_push_larger_than_the_default_body_limit_succeeds() {
         locks,
         authz: AuthorizationService::new(pool.clone()),
         backend: Backend::new(pool.clone()),
+        config: Default::default(),
     };
     let addr = spawn_server(state).await;
 

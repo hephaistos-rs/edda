@@ -62,14 +62,17 @@ Runtime behavior is controlled by environment variables — none of them are rea
 
 | Variable         | Default              | Purpose                                                     |
 | ---------------- | -------------------- | ---------------------------------------------------------- |
-| `EDDA_DATA_DIR`  | `./data`             | Where repository data and the SQLite database live.        |
-| `IP` / `PORT`    | `127.0.0.1` / `8080` | Address the HTTP server binds to.                          |
-| `EDDA_SSH_PORT`  | `2222`               | Port the git-over-SSH listener binds to (on `IP`).         |
+| `EDDA_DATA_DIR`     | `./data`             | Where repository data and the SQLite database live.        |
+| `IP` / `PORT`       | `127.0.0.1` / `8080` | Address the HTTP server binds to.                          |
+| `EDDA_SSH_PORT`     | `2222`               | Port the git-over-SSH listener binds to (on `IP`).         |
+| `EDDA_EXTERNAL_URL` | `http://<IP>:<PORT>` | Public URL the instance is reached on (no trailing slash). |
 
-See `.env.example` for the full list — database URL, `EDDA_SECRET_KEY`
-(required before TOTP enrollment or webhook creation), OAuth/WebAuthn/SMTP
-settings, rate-limit tuning, and the observability variables documented
-below.
+See `.env.example` for the full list — database URL, `EDDA_EXTERNAL_URL`,
+`EDDA_SECRET_KEYS` (optional; needed for TOTP enrollment and stored
+webhook secrets), OAuth/WebAuthn/SMTP settings, rate-limit tuning, and the
+observability variables documented below. Every `EDDA_*` variable is
+validated once at startup — a misconfigured instance fails immediately
+with the complete list of problems.
 
 ### Database backend
 

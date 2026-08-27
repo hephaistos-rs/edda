@@ -104,6 +104,7 @@ async fn a_public_repo_is_visible_unauthenticated_and_a_private_one_404s_without
         locks,
         authz: AuthorizationService::new(pool.clone()),
         backend: Backend::new(pool.clone()),
+        config: Default::default(),
     };
     let addr = spawn_server(state).await;
     let base = format!("http://{addr}");
@@ -221,6 +222,7 @@ async fn pull_requests_and_issues_are_readable_through_the_versioned_api() {
         locks,
         authz: AuthorizationService::new(pool.clone()),
         backend: Backend::new(pool.clone()),
+        config: Default::default(),
     };
     let addr = spawn_server(state).await;
     let base = format!("http://{addr}");

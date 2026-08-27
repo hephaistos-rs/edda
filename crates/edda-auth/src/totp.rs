@@ -24,7 +24,7 @@ pub enum TotpError {
     #[error("TOTP is not enrolled for this account")]
     NotEnrolled,
     #[error(transparent)]
-    Decrypt(#[from] crate::secret_box::DecryptError),
+    SecretBox(#[from] crate::secret_box::SecretBoxError),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -70,7 +70,7 @@ pub async fn enroll(
     let secret_bytes = secret.as_bytes().to_vec();
     let totp = build_totp(secret_bytes.clone(), account_name);
 
-    let ciphertext = crate::secret_box::encrypt(&secret_bytes);
+    let ciphertext = crate::secret_box::encrypt(&secret_bytes)?;
     TotpRepo::upsert_secret(pool, user_id, &ciphertext).await?;
 
     let otpauth_uri = totp
@@ -162,12 +162,9 @@ mod tests {
     use super::*;
 
     fn set_test_key() {
-        std::env::set_var(
-            "EDDA_SECRET_KEY",
-            "0000000000000000000000000000000000000000000000000000000000000000"
-                .get(0..64)
-                .unwrap(),
-        );
+        // Same fixed key `secret_box`'s own tests install; `init`'s
+        // `OnceLock` reads whichever call lands first.
+        crate::secret_box::init(Some([0u8; 32]));
     }
 
     /// Generates the code a real authenticator app would show right now,

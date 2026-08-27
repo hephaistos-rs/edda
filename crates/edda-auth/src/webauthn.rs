@@ -93,27 +93,18 @@ pub enum WebauthnError {
     Db(#[from] sqlx::Error),
 }
 
-/// This instance's Relying Party identity — read once per call from
-/// `EDDA_WEBAUTHN_RP_ID`/`EDDA_WEBAUTHN_ORIGIN`, the same "absent means
-/// disabled, both-or-neither" shape as `oauth::Config::from_env`. `rp_id`
-/// is the registrable domain every credential gets scoped to (e.g.
-/// `example.com`); `origin` is the exact scheme+host(+port) a browser
-/// reports in `clientDataJSON` (e.g. `https://example.com`). A mismatch on
-/// either fails every ceremony, so there's no sensible partial default —
-/// an instance that hasn't configured both simply doesn't offer WebAuthn.
+/// This instance's Relying Party identity. `rp_id` is the registrable
+/// domain every credential gets scoped to (e.g. `example.com`); `origin`
+/// is the exact scheme+host(+port) a browser reports in `clientDataJSON`
+/// (e.g. `https://example.com`). A mismatch on either fails every
+/// ceremony, so there's no sensible partial default — an instance that
+/// hasn't configured both simply doesn't offer WebAuthn. Constructed by
+/// `edda_http::config` from `EDDA_WEBAUTHN_RP_ID`/`EDDA_WEBAUTHN_ORIGIN`
+/// and passed in via `AppState`; this crate never reads the environment.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub rp_id: String,
     pub origin: String,
-}
-
-impl Config {
-    pub fn from_env() -> Option<Self> {
-        Some(Self {
-            rp_id: std::env::var("EDDA_WEBAUTHN_RP_ID").ok()?,
-            origin: std::env::var("EDDA_WEBAUTHN_ORIGIN").ok()?,
-        })
-    }
 }
 
 /// What actually gets persisted in `webauthn_credentials.passkey_json` —

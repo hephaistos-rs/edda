@@ -77,6 +77,19 @@ enforce "edda-git manifest does not depend on edda-db or edda-auth" \
 enforce "edda-render manifest depends on no other Edda crate" \
     "$(g '^\s*edda-[a-z]+\s*[=.]' crates/edda-render/Cargo.toml)"
 
+# One config surface (plan.local.md §4.13 / Phase 1): only `edda-http::config`
+# and the two binary roots read Edda's own `EDDA_*` (and `IP`/`PORT`)
+# variables. Exceptions, each deliberate:
+#   - crates/edda-telemetry/src/config.rs — the OTel SDK's own OTEL_* vars
+#     plus EDDA_LOG_FORMAT (plan §4.9)
+#   - EDDA_TEST_* anywhere               — test-harness plumbing, not config
+#   - src/main.rs (either binary)        — the composition roots
+#   - tests/ dirs                        — tests set their own env
+enforce "only edda-http::config + the binaries read EDDA_* / IP / PORT from the environment" \
+    "$(g 'env::(var|set_var|remove_var)\s*\(\s*\"(EDDA_|IP\"|PORT\")' --include=*.rs crates app \
+        | grep -vE 'edda-http/src/config\.rs|edda-telemetry/src/config\.rs|/src/main\.rs|/tests/|EDDA_TEST_' \
+        || true)"
+
 echo
 echo "── PENDING (target invariants, not yet enforced) ────────"
 
@@ -91,10 +104,6 @@ pending "Phase 4" "dioxus outside the web UI crate" \
 
 pending "Phase 6/7" "gix:: / gix_*:: outside crates/edda-git/" \
     "$(g '\bgix(_[a-z]+)?::' --include=*.rs crates app | grep -v 'crates/edda-git/' || true)"
-
-pending "Phase 1" "env::var / env::set_var outside edda-app::config + the binary" \
-    "$(g 'env::(var|set_var|remove_var)\b' --include=*.rs crates app \
-        | grep -vE 'app/edda-web/src/main\.rs|:[0-9]+:\s*(//|//!)' || true)"
 
 echo
 if [[ $fail -ne 0 ]]; then

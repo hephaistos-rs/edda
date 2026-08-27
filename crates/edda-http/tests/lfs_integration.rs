@@ -139,6 +139,7 @@ async fn git_lfs_cli_round_trips_a_tracked_file_through_a_real_server() {
         locks,
         authz: AuthorizationService::new(pool.clone()),
         backend: Backend::new(pool.clone()),
+        config: Default::default(),
     };
     let addr = spawn_server(state).await;
     let remote = format!("http://ci:{raw_token}@{addr}/alice/demo.git");

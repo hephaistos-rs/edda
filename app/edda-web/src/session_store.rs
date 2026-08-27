@@ -5,9 +5,10 @@
 //! selection. Session storage is the one place in the composition root
 //! that still needs to
 //! know which concrete backend is active: this module opens a second,
-//! small connection using the *same* `EDDA_DATABASE_URL` (typed this
-//! time), and wraps whichever store that produces behind one type so the
-//! rest of `main.rs` doesn't need to branch on backend again.
+//! small connection using the *same* resolved database URL (typed this
+//! time — `main.rs` passes in `Settings::db.url`), and wraps whichever
+//! store that produces behind one type so the rest of `main.rs` doesn't
+//! need to branch on backend again.
 //!
 //! This is not a hand-rolled session-persistence reimplementation — the
 //! actual storage logic (schema, encoding, cleanup) is entirely
@@ -36,33 +37,20 @@ impl std::fmt::Debug for AnySessionStore {
 }
 
 /// Opens the typed session-store connection matching `pool`'s backend,
-/// re-reading `EDDA_DATABASE_URL`/`EDDA_DATA_DIR` exactly the way
-/// `edda_db::pool()` did to connect the `AnyPool` in the first place, and
-/// runs that store's own migration.
-pub async fn connect(pool: &edda_db::DbPool) -> Result<AnySessionStore, sqlx::Error> {
-    let url_env = std::env::var("EDDA_DATABASE_URL").ok();
+/// using the same resolved database `url` `edda_db::pool` connected the
+/// `AnyPool` with, and runs that store's own migration.
+pub async fn connect(pool: &edda_db::DbPool, url: &str) -> Result<AnySessionStore, sqlx::Error> {
     let store = match pool.backend() {
         edda_db::Backend::Sqlite => {
-            let url = match url_env {
-                Some(url) => url,
-                None => {
-                    let data_dir = std::env::var("EDDA_DATA_DIR")
-                        .map(std::path::PathBuf::from)
-                        .unwrap_or_else(|_| "./data".into());
-                    format!("sqlite://{}?mode=rwc", data_dir.join("edda.db").display())
-                }
-            };
-            let sqlite_pool = sqlx::SqlitePool::connect(&url).await?;
+            let sqlite_pool = sqlx::SqlitePool::connect(url).await?;
             AnySessionStore::Sqlite(tower_sessions_sqlx_store::SqliteStore::new(sqlite_pool))
         }
         edda_db::Backend::Postgres => {
-            let url = url_env.expect("EDDA_DATABASE_URL is required for the postgres backend");
-            let pg_pool = sqlx::PgPool::connect(&url).await?;
+            let pg_pool = sqlx::PgPool::connect(url).await?;
             AnySessionStore::Postgres(tower_sessions_sqlx_store::PostgresStore::new(pg_pool))
         }
         edda_db::Backend::MySql => {
-            let url = url_env.expect("EDDA_DATABASE_URL is required for the mysql backend");
-            let mysql_pool = sqlx::MySqlPool::connect(&url).await?;
+            let mysql_pool = sqlx::MySqlPool::connect(url).await?;
             AnySessionStore::MySql(tower_sessions_sqlx_store::MySqlStore::new(mysql_pool))
         }
     };

@@ -2,9 +2,10 @@
 //! generic OIDC-compliant provider — Edda authenticates against external
 //! identity providers, it does not act as one itself (that's out of this
 //! plan's scope entirely). Provider configuration is environment-driven,
-//! not database-stored (see `Config::from_env`) — there is nothing
-//! per-instance-secret about it that needs at-rest encryption the way a
-//! per-user TOTP secret does.
+//! not database-stored (parsed once by `edda_http::config` from the
+//! `EDDA_OAUTH_*` variables and passed in via `AppState`) — there is
+//! nothing per-instance-secret about it that needs at-rest encryption the
+//! way a per-user TOTP secret does.
 //!
 //! **Account-linking policy** (deliberate, not incidental): a first-time
 //! OAuth login whose email matches an *existing* password-based account
@@ -26,27 +27,16 @@ use edda_domain::{OAuthIdentityId, User, UserId};
 
 pub const PROVIDER_NAME: &str = "oidc";
 
+/// One OIDC provider's consumer-login credentials. Constructed by
+/// `edda_http::config` from the `EDDA_OAUTH_*` variables (all four or
+/// none) and passed in via `AppState` — this crate never reads the
+/// environment. `None` in `AppState` means OIDC login isn't offered.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub issuer_url: String,
     pub client_id: String,
     pub client_secret: String,
     pub redirect_url: String,
-}
-
-impl Config {
-    /// Reads `EDDA_OAUTH_ISSUER_URL`/`EDDA_OAUTH_CLIENT_ID`/
-    /// `EDDA_OAUTH_CLIENT_SECRET`/`EDDA_OAUTH_REDIRECT_URL` — `None` if
-    /// OAuth login isn't configured for this instance at all (the common
-    /// case; nothing about this workspace requires OAuth to be set up).
-    pub fn from_env() -> Option<Self> {
-        Some(Config {
-            issuer_url: std::env::var("EDDA_OAUTH_ISSUER_URL").ok()?,
-            client_id: std::env::var("EDDA_OAUTH_CLIENT_ID").ok()?,
-            client_secret: std::env::var("EDDA_OAUTH_CLIENT_SECRET").ok()?,
-            redirect_url: std::env::var("EDDA_OAUTH_REDIRECT_URL").ok()?,
-        })
-    }
 }
 
 #[derive(Debug, thiserror::Error)]

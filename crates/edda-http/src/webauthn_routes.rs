@@ -50,12 +50,18 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
-async fn enabled() -> Response {
-    axum::Json(webauthn::Config::from_env().is_some()).into_response()
+async fn enabled(State(state): State<AppState>) -> Response {
+    axum::Json(state.config.webauthn.is_some()).into_response()
 }
 
-async fn config_or_404() -> Result<webauthn::Config, Response> {
-    webauthn::Config::from_env().ok_or_else(|| {
+/// This instance's WebAuthn config, or a 404 when it isn't configured
+/// (`EDDA_WEBAUTHN_RP_ID`/`_ORIGIN` unset). Resolved once at startup by
+/// `edda_http::config` and carried in `AppState`.
+// `Err` is a ready-to-return axum `Response` (the "value or a 404" helper
+// pattern) — intentionally, not an error to bubble up a deep call stack.
+#[allow(clippy::result_large_err)]
+fn config_or_404(state: &AppState) -> Result<webauthn::Config, Response> {
+    state.config.webauthn.clone().ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
             "WebAuthn is not configured for this instance",
@@ -86,7 +92,7 @@ async fn register_options(State(state): State<AppState>, auth: AuthSession<Backe
     let Some(session_user) = auth.user else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    let config = match config_or_404().await {
+    let config = match config_or_404(&state) {
         Ok(config) => config,
         Err(response) => return response,
     };
@@ -123,7 +129,7 @@ async fn register_verify(
     let Some(session_user) = auth.user else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    let config = match config_or_404().await {
+    let config = match config_or_404(&state) {
         Ok(config) => config,
         Err(response) => return response,
     };
@@ -169,7 +175,7 @@ async fn login_options(
     else {
         return (StatusCode::UNAUTHORIZED, "that login attempt has expired").into_response();
     };
-    let config = match config_or_404().await {
+    let config = match config_or_404(&state) {
         Ok(config) => config,
         Err(response) => return response,
     };
@@ -223,7 +229,7 @@ async fn login_verify(
         return (StatusCode::UNAUTHORIZED, "that login attempt has expired").into_response();
     }
 
-    let config = match config_or_404().await {
+    let config = match config_or_404(&state) {
         Ok(config) => config,
         Err(response) => return response,
     };

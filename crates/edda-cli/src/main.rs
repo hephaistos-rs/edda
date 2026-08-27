@@ -1,9 +1,9 @@
 //! Instance administration CLI: a thin binary that talks to `edda-db`/
 //! `edda-auth` directly, bypassing HTTP entirely — run from the same
 //! host/container as the server, not a remote API client. Connects via
-//! the exact same `EDDA_DATABASE_URL`/`EDDA_DATA_DIR` resolution every
-//! other binary in this workspace uses (`edda_db::pool()`), so this
-//! points at whichever database the running server itself uses.
+//! the exact same `EDDA_DATABASE_URL`/`EDDA_DATA_DIR` resolution the
+//! server uses (`edda_db::effective_url`), so this points at whichever
+//! database the running server itself uses.
 
 use std::process::ExitCode;
 
@@ -35,7 +35,21 @@ async fn main() -> ExitCode {
 }
 
 async fn run(args: &[String]) -> Result<(), String> {
-    let pool = edda_db::pool()
+    // The same `EDDA_DATABASE_URL` / `EDDA_DATA_DIR` resolution the server
+    // uses (`edda_db::effective_url`), so this points at whichever database
+    // the running instance does. As a binary entry point, reading the
+    // environment directly here is allowed (`edda-http::config` is the
+    // server's equivalent; a shared `Settings` is a later phase).
+    let data_dir = std::env::var("EDDA_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("./data"));
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|err| format!("could not create data dir {data_dir:?}: {err}"))?;
+    let url = edda_db::effective_url(
+        std::env::var("EDDA_DATABASE_URL").ok().as_deref(),
+        &data_dir,
+    );
+    let pool = edda_db::pool(&url)
         .await
         .map_err(|err| format!("could not connect to the database: {err}"))?;
 

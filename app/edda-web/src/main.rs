@@ -105,10 +105,33 @@ async fn wait_for_shutdown_signal() {
 /// nowhere else.
 #[cfg(feature = "server")]
 fn main() {
+    // Parse and validate every `EDDA_*` variable once, before anything
+    // else runs. A misconfigured instance stops here with the *complete*
+    // list of problems, printed plainly (no subscriber is installed yet).
+    let settings = match edda_http::config::Settings::from_env() {
+        Ok(settings) => std::sync::Arc::new(settings),
+        Err(errors) => {
+            eprint!("{errors}");
+            std::process::exit(1);
+        }
+    };
+
     // Must run before `dioxus::server::serve(...)` — it installs a default
     // `tracing` subscriber of its own unless one is already set. See
     // `edda_telemetry`'s module docs for the full explanation.
     let telemetry_guard = edda_telemetry::init();
+
+    // Install the at-rest encryption key (or `None`). No lazy panic: if
+    // it's absent, TOTP/webhook-secret features fail with a clear error
+    // instead of aborting a request.
+    edda_auth::secret_box::init(settings.secret_keys.primary());
+    if !settings.secret_keys.is_configured() {
+        tracing::warn!(
+            "EDDA_SECRET_KEYS is not set — TOTP (2FA) enrollment and creating webhooks with a \
+             stored secret will be unavailable until it is configured"
+        );
+    }
+
     // `dioxus::server::serve`'s callback can run more than once (dev-mode hot
     // reload re-invokes it to rebuild the router); the shutdown watcher below
     // must still only ever be spawned once, so the guard is shared behind a
@@ -118,11 +141,12 @@ fn main() {
     let ssh_server_started = std::sync::Arc::new(std::sync::Once::new());
 
     dioxus::server::serve(move || {
+        let settings = settings.clone();
         let telemetry_guard = telemetry_guard.clone();
         let shutdown_watcher_started = shutdown_watcher_started.clone();
         let ssh_server_started = ssh_server_started.clone();
         async move {
-            let pool = edda_db::pool().await?;
+            let pool = edda_db::pool(&settings.db.url).await?;
 
             // Session cookies persist in the same configured database as
             // everything else, via a second small typed connection
@@ -130,7 +154,7 @@ fn main() {
             // — see that module's doc comment for why
             // `tower-sessions-sqlx-store` can't share the `AnyPool`
             // directly.
-            let session_store = session_store::connect(&pool).await?;
+            let session_store = session_store::connect(&pool, &settings.db.url).await?;
             // `SameSite=Lax`, not `tower-sessions`' own `Strict` default
             // (verified directly against a real instance, and found to
             // matter): the OAuth login/link flow (`edda-http`'s
@@ -154,8 +178,9 @@ fn main() {
             let auth_layer =
                 axum_login::AuthManagerLayerBuilder::new(backend.clone(), session_layer).build();
 
-            let store: std::sync::Arc<dyn edda_git::store::RepoStore> =
-                std::sync::Arc::new(edda_git::store::LocalFsStore::from_env());
+            let store: std::sync::Arc<dyn edda_git::store::RepoStore> = std::sync::Arc::new(
+                edda_git::store::LocalFsStore::new(settings.git.repo_root.clone()),
+            );
             let locks = std::sync::Arc::new(edda_git::LockRegistry::new());
             let authz = edda_auth::AuthorizationService::new(pool.clone());
 
@@ -176,6 +201,12 @@ fn main() {
                 locks: locks.clone(),
                 authz: authz.clone(),
                 backend,
+                config: edda_http::RuntimeConfig {
+                    webauthn: settings.webauthn.clone().map(|w| w.into_auth()),
+                    oidc: settings.oidc.clone().map(|o| o.into_auth()),
+                    external_url: settings.http.external_url.clone(),
+                    rate_limit: settings.rate_limit,
+                },
             };
             let router = dioxus::server::router(App)
                 .merge(edda_http::router(state))
@@ -186,13 +217,18 @@ fn main() {
             // (secret decryption, HMAC signing) and an HTTP client —
             // `edda-jobs` itself deliberately depends on neither (see
             // that crate's own `Cargo.toml` doc comment).
-            let mailer = job_handlers::Mailer::from_env().map(std::sync::Arc::new);
-            if mailer.is_none() {
-                tracing::info!(
-                    "EDDA_SMTP_URL not set — email delivery (password reset, mention \
-                     notifications) is disabled; in-app notifications still work"
-                );
-            }
+            let mailer = match &settings.smtp {
+                Some(smtp) => Some(std::sync::Arc::new(
+                    job_handlers::Mailer::new(smtp).map_err(std::io::Error::other)?,
+                )),
+                None => {
+                    tracing::info!(
+                        "EDDA_SMTP_URL not set — email delivery (password reset, mention \
+                         notifications) is disabled; in-app notifications still work"
+                    );
+                    None
+                }
+            };
             let mut handlers = edda_jobs::HandlerRegistry::new();
             handlers.register(edda_domain::JobKind::SendEmail, {
                 let mailer = mailer.clone();
@@ -223,28 +259,11 @@ fn main() {
                     locks,
                     authz,
                 };
+                let ssh_bind = settings.ssh.bind;
+                let host_key_path = settings.ssh.host_key_path.clone();
                 tokio::spawn(async move {
-                    let ip: std::net::IpAddr = std::env::var("IP")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(std::net::IpAddr::from([127, 0, 0, 1]));
-                    let port: u16 = std::env::var("EDDA_SSH_PORT")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(2222);
-                    let data_dir = std::env::var("EDDA_DATA_DIR")
-                        .map(std::path::PathBuf::from)
-                        .unwrap_or_else(|_| "./data".into());
-                    let host_key_path = data_dir.join("ssh_host_ed25519_key");
-
-                    tracing::info!(%ip, port, "starting git-over-SSH listener");
-                    if let Err(err) = edda_ssh::serve(
-                        ssh_state,
-                        std::net::SocketAddr::from((ip, port)),
-                        &host_key_path,
-                    )
-                    .await
-                    {
+                    tracing::info!(addr = %ssh_bind, "starting git-over-SSH listener");
+                    if let Err(err) = edda_ssh::serve(ssh_state, ssh_bind, &host_key_path).await {
                         tracing::error!(error = %err, "git-over-SSH listener stopped");
                     }
                 });

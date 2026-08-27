@@ -161,6 +161,7 @@ async fn a_protected_branch_rejects_a_direct_push_from_a_non_admin_collaborator(
         locks,
         authz: AuthorizationService::new(pool.clone()),
         backend: Backend::new(pool.clone()),
+        config: Default::default(),
     };
     let addr = spawn_server(state).await;
 

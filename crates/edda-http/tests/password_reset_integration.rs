@@ -80,6 +80,7 @@ async fn a_full_password_reset_round_trip_changes_which_password_logs_in() {
         locks,
         authz: AuthorizationService::new(pool.clone()),
         backend: Backend::new(pool.clone()),
+        config: Default::default(),
     };
     let addr = spawn_server(state).await;
     let base = format!("http://{addr}");

@@ -53,18 +53,9 @@ pub struct LocalFsStore {
 }
 
 impl LocalFsStore {
-    pub fn from_env() -> Self {
-        let data_dir = std::env::var("EDDA_DATA_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("./data"));
-        Self {
-            root: data_dir.join("repos"),
-        }
-    }
-
-    /// Rooted at an explicit directory rather than derived from
-    /// `EDDA_DATA_DIR` — for tests and any other embedding that needs a
-    /// store without touching process-global environment state.
+    /// Rooted at an explicit directory. The composition root passes
+    /// `{data_dir}/repos` (resolved once by `edda_http::config`); tests
+    /// pass a temp dir. This crate never reads the environment itself.
     pub fn new(root: PathBuf) -> Self {
         Self { root }
     }
@@ -123,7 +114,8 @@ mod tests {
     /// A `LocalFsStore` rooted at a fresh directory under the OS temp dir,
     /// removed again when the test's `TestStore` is dropped — keeps
     /// filesystem tests isolated from both each other and from the real
-    /// `EDDA_DATA_DIR` (never touched here; see `LocalFsStore::from_env`).
+    /// data directory (this crate never reads `EDDA_DATA_DIR` — the
+    /// composition root passes an explicit root to `LocalFsStore::new`).
     struct TestStore {
         store: LocalFsStore,
         root: PathBuf,

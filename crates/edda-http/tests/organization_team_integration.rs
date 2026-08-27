@@ -211,6 +211,7 @@ async fn a_team_members_push_access_comes_from_team_attachment_alone() {
         locks,
         authz: AuthorizationService::new(pool.clone()),
         backend: Backend::new(pool.clone()),
+        config: Default::default(),
     };
     let addr = spawn_server(state).await;
 

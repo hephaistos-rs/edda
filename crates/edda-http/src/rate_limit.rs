@@ -86,23 +86,6 @@ fn client_ip(headers: &HeaderMap) -> Option<IpAddr> {
         .and_then(|value| value.trim().parse().ok())
 }
 
-/// Read from `EDDA_RATE_LIMIT_PER_SECOND`/`EDDA_RATE_LIMIT_BURST`
-/// (deployment configuration, per `AGENTS.md`'s convention — never a
-/// source change to retune), falling back to a default generous enough
-/// for normal interactive use (loading a page that fans out to several
-/// `/api/v1/` calls at once) while still bounding a single client's
-/// sustained request rate.
-fn env_setting(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(default)
-}
-
-const DEFAULT_PER_SECOND: u64 = 5;
-const DEFAULT_BURST_SIZE: u64 = 20;
-
 pub type EddaGovernorLayer =
     GovernorLayer<EddaKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
 
@@ -119,16 +102,15 @@ pub type EddaGovernorLayer =
 /// the composition-root API change (hoisting this above the per-`router()`
 /// -call boundary, unlike `edda_jobs::spawn_poller` which already lives
 /// there) that would be needed to close it.
-pub fn layer() -> EddaGovernorLayer {
-    let per_second = env_setting("EDDA_RATE_LIMIT_PER_SECOND", DEFAULT_PER_SECOND);
-    let burst_size = env_setting("EDDA_RATE_LIMIT_BURST", DEFAULT_BURST_SIZE);
-
+pub fn layer(settings: &crate::config::RateLimitConfig) -> EddaGovernorLayer {
     let config = GovernorConfigBuilder::default()
-        .per_second(per_second)
-        .burst_size(burst_size as u32)
+        .per_second(settings.per_second)
+        .burst_size(settings.burst)
         .key_extractor(EddaKeyExtractor)
         .finish()
-        .expect("EDDA_RATE_LIMIT_PER_SECOND/EDDA_RATE_LIMIT_BURST produce a valid governor config");
+        .expect(
+            "a RateLimitConfig validated by edda_http::config produces a valid governor config",
+        );
 
     let limiter = config.limiter().clone();
     tokio::spawn(async move {

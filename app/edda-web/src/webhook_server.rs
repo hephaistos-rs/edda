@@ -123,7 +123,8 @@ pub async fn create_webhook(
         .map_err(|err| ServerFnError::new(err.to_string()))?;
 
     let raw_secret = edda_auth::webhook_signing::generate_secret();
-    let ciphertext = edda_auth::secret_box::encrypt(raw_secret.as_bytes());
+    let ciphertext = edda_auth::secret_box::encrypt(raw_secret.as_bytes())
+        .map_err(|err| ServerFnError::new(err.to_string()))?;
 
     let id = edda_domain::WebhookId::new();
     edda_db::WebhookRepo::insert(

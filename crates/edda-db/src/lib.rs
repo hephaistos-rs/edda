@@ -175,40 +175,33 @@ pub(crate) fn get_bytes(row: &AnyRow, column: &str) -> Result<Vec<u8>, sqlx::Err
     row.try_get(column)
 }
 
-/// Opens the configured backend's pool and applies any migrations that
-/// haven't run yet. Safe to call more than once per process — pool
-/// creation is cheap and idempotent.
+/// The effective connection URL for a given deployment: `configured` (from
+/// `EDDA_DATABASE_URL`) verbatim when set, otherwise a local SQLite file
+/// under `data_dir` — the zero-config default. Pure; the caller (the
+/// composition root or `edda-cli`, the only places that read env) decides
+/// where `configured`/`data_dir` come from.
 ///
-/// `EDDA_DATABASE_URL` selects both the backend (by scheme) and the
-/// instance to connect to. Unset falls back to a local SQLite file under
-/// `EDDA_DATA_DIR` (default `./data`) — the zero-config path, and not the
-/// only path a single compiled binary can take.
-pub async fn pool() -> Result<DbPool, sqlx::Error> {
+/// `sqlite:` (opaque form), not `sqlite://` (authority form): the latter
+/// parses the first path segment as a URL host, so an absolute path
+/// (`C:\...` -> host `C`) or any Windows separator (`\`) makes it
+/// malformed. The opaque form takes the remainder verbatim as a filename,
+/// so absolute/relative and either separator all work.
+pub fn effective_url(configured: Option<&str>, data_dir: &std::path::Path) -> String {
+    match configured {
+        Some(url) => url.to_string(),
+        None => format!("sqlite:{}?mode=rwc", data_dir.join("edda.db").display()),
+    }
+}
+
+/// Opens the pool for `url` and applies any migrations that haven't run
+/// yet. Safe to call more than once per process — pool creation is cheap
+/// and idempotent. The caller is responsible for the data directory
+/// existing (`edda_http::config` / `edda-cli` create it at startup); a
+/// file-backed SQLite URL under a missing directory fails here with a
+/// clear IO error rather than silently creating a tree.
+pub async fn pool(url: &str) -> Result<DbPool, sqlx::Error> {
     sqlx::any::install_default_drivers();
-
-    let url = match std::env::var("EDDA_DATABASE_URL") {
-        Ok(url) => url,
-        Err(_) => {
-            let data_dir = std::env::var("EDDA_DATA_DIR")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| "./data".into());
-            std::fs::create_dir_all(&data_dir).map_err(sqlx::Error::Io)?;
-            let path = data_dir.join("edda.db");
-            // `sqlite:` (opaque form), not `sqlite://` (authority form): the
-            // latter parses the first path segment as a URL host, so an
-            // absolute path (`C:\...` -> host `C`, "unable to open database
-            // file") or any Windows path separator (`\` -> "invalid domain
-            // character") makes it malformed. Only a forward-slash relative
-            // path happens to survive `sqlite://`. The opaque form takes the
-            // remainder verbatim as a filename, so absolute/relative and
-            // either separator all work. (The `sqlite:///` three-slash form
-            // also works, but only for absolute paths — it turns a relative
-            // path into a bogus absolute one.)
-            format!("sqlite:{}?mode=rwc", path.display())
-        }
-    };
-
-    connect_and_migrate(&url).await
+    connect_and_migrate(url).await
 }
 
 /// Shared by `pool()` and `test_pool()` — connects, applies this

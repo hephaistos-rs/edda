@@ -265,51 +265,30 @@ pub async fn add_pull_request_comment(
     anchor: Option<CommentAnchorInput>,
 ) -> Result<(), ServerFnError> {
     let shared = crate::shared::get();
-    let (repository, actor) = crate::server::require_write_access(&auth, &owner, &name).await?;
-    let user_id = actor.user_id().expect("User actor");
-    if body.trim().is_empty() {
-        return Err(ServerFnError::new("a comment can't be empty"));
-    }
-
-    let pr = edda_db::PullRequestRepo::find_by_repository_and_number(
-        &shared.pool,
-        repository.id,
-        number,
-    )
-    .await
-    .map_err(|err| ServerFnError::new(err.to_string()))?
-    .ok_or_else(|| ServerFnError::new("no such pull request"))?;
+    let Some(session_user) = &auth.user else {
+        return Err(ServerFnError::new("login required"));
+    };
+    let actor = edda_domain::ActorContext::User(session_user.user.id);
 
     let anchor = anchor.map(|a| edda_domain::DiffAnchor {
         file_path: a.file_path,
         line_range: (a.line_start, a.line_end),
         commit_sha: a.commit_sha,
     });
-    edda_db::PrCommentRepo::insert(
-        &shared.pool,
-        edda_domain::PrCommentId::new(),
-        pr.id,
-        user_id,
-        body.trim(),
-        anchor.as_ref(),
+
+    // Authorization (write on the repo), the comment insert, and one
+    // `UserMentioned` outbox event per `@mention` are the service's job —
+    // all in one transaction so no mention notification is lost or fired
+    // for a comment that rolled back.
+    edda_http::services::PullRequestService::new(
+        shared.pool.clone(),
+        shared.store.clone(),
+        shared.locks.clone(),
+        shared.authz.clone(),
     )
+    .add_comment(&actor, &owner, &name, number, &body, anchor)
     .await
     .map_err(|err| ServerFnError::new(err.to_string()))?;
-
-    crate::mentions::dispatch_mentions(
-        &shared.pool,
-        body.trim(),
-        user_id,
-        edda_domain::MentionSource::PullRequestComment {
-            pull_request_id: pr.id,
-        },
-        &format!("You were mentioned on pull request #{number}"),
-        &format!(
-            "You were mentioned in a comment on pull request #{number} (\"{}\") in {owner}/{name}.",
-            pr.title
-        ),
-    )
-    .await;
 
     Ok(())
 }
@@ -351,17 +330,10 @@ pub async fn submit_pull_request_review(
     Ok(())
 }
 
-/// The full merge sequence: authorize, hold this repository's lock for
-/// the *entire* remainder (git merge, then the SQL
-/// state update — not released in between, so no other write can
-/// interleave and observe the git merge commit without the matching PR
-/// row, or vice versa), perform the git-level merge, then record it. If
-/// the git merge fails (conflicts), nothing SQL has been touched — no
-/// rollback needed. If the SQL update fails after a successful git
-/// merge, the merge commit exists but the PR row still shows open; this
-/// is an accepted, narrow inconsistency window (git and SQL have no
-/// shared transaction coordinator) rather than the reverse and much
-/// worse failure mode of a PR that shows merged but isn't.
+/// Thin transport in front of `PullRequestService::merge` — resolve the
+/// session actor and hand off. The service owns the authorize → hold the
+/// repository lock → git merge → (PR state + `PullRequestMerged` outbox
+/// event, one transaction) sequence and its documented failure windows.
 #[post("/api/repos/:owner/:name/pulls/:number/merge", auth: axum_login::AuthSession<edda_auth::Backend>)]
 #[tracing::instrument(name = "pull_request.merge", skip_all, err, fields(repo.owner = %owner, repo.name = %name, pr.number = number))]
 pub async fn merge_pull_request(
@@ -373,81 +345,18 @@ pub async fn merge_pull_request(
     let Some(session_user) = &auth.user else {
         return Err(ServerFnError::new("login required"));
     };
-    let user = session_user.user.clone();
+    let user = &session_user.user;
     let actor = edda_domain::ActorContext::User(user.id);
 
-    let repository = shared
-        .authz
-        .repository_by_name(&owner, &name)
-        .await
-        .map_err(|err| ServerFnError::new(err.to_string()))?;
-    let pr = edda_db::PullRequestRepo::find_by_repository_and_number(
-        &shared.pool,
-        repository.id,
-        number,
+    edda_http::services::PullRequestService::new(
+        shared.pool.clone(),
+        shared.store.clone(),
+        shared.locks.clone(),
+        shared.authz.clone(),
     )
+    .merge(&actor, &owner, &name, number, &user.username, &user.email)
     .await
-    .map_err(|err| ServerFnError::new(err.to_string()))?
-    .ok_or_else(|| ServerFnError::new("no such pull request"))?;
-    if !pr.state.is_open() {
-        return Err(ServerFnError::new(
-            "this pull request is already merged or closed",
-        ));
-    }
-
-    let reviews = edda_db::PrReviewRepo::list_for_pull_request(&shared.pool, pr.id)
-        .await
-        .map_err(|err| ServerFnError::new(err.to_string()))?;
-    shared
-        .authz
-        .check_merge_pull_request(&actor, &repository, &pr.target, &reviews)
-        .await
-        .map_err(|err| ServerFnError::new(err.to_string()))?;
-
-    let identity = format!("{owner}/{name}");
-    let lock = shared.locks.lock_for(&identity);
-    let _guard = lock.lock().await;
-
-    let outcome = edda_git::merge_branches(
-        shared.store.as_ref(),
-        &identity,
-        &pr.source.branch,
-        &pr.target,
-        &user.username,
-        &user.email,
-        &format!("Merge pull request #{number} from {}", pr.source.branch),
-    )
     .map_err(|err| ServerFnError::new(err.to_string()))?;
-
-    let merged_state = edda_domain::PrState::Merged {
-        merged_at: edda_domain_now(),
-        merge_commit: outcome.merge_commit,
-        strategy: edda_domain::MergeStrategy::Merge,
-    };
-    edda_db::PullRequestRepo::update_state(&shared.pool, pr.id, &merged_state)
-        .await
-        .map_err(|err| ServerFnError::new(err.to_string()))?;
-
-    // Event emission happens *after* the state-changing transaction
-    // commits — a webhook must never fire for a merge that
-    // subsequently rolled back, and by this point it hasn't. A dispatch
-    // failure here is logged, not propagated: the merge itself already
-    // fully succeeded, and the caller shouldn't see it reported as failed
-    // over a webhook fan-out issue.
-    let event = edda_domain::DomainEvent::PullRequestMerged {
-        pull_request_id: pr.id,
-        repository_id: repository.id,
-    };
-    let webhook_payload = serde_json::json!({
-        "action": "merged",
-        "repository": { "owner": owner, "name": name },
-        "pull_request": { "number": number, "title": pr.title },
-    })
-    .to_string();
-    if let Err(err) = edda_jobs::dispatch(&shared.pool, &event, Some(&webhook_payload), None).await
-    {
-        tracing::error!(error = %err, "failed to dispatch pull_request.merged webhook fan-out");
-    }
 
     Ok(())
 }

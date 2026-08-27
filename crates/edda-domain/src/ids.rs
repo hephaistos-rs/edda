@@ -85,5 +85,6 @@ id_type!(WebhookId);
 id_type!(WebhookDeliveryId);
 id_type!(NotificationId);
 id_type!(JobId);
+id_type!(EventId);
 id_type!(OrganizationId);
 id_type!(TeamId);

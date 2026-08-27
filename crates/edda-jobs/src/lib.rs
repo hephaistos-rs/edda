@@ -2,11 +2,16 @@
 //! `tokio::spawn` + polling loop over `edda-db`'s `jobs` table, claimed via
 //! `edda_db::JobRepo`'s compare-and-swap batch claim. This crate owns the
 //! generic machinery — the handler-registration table, the poll/claim/
-//! dispatch/retry loop, and `dispatch`'s event-to-job fan-out — never the
-//! handler *logic* itself ("send this webhook," "send this email"), which
-//! needs `edda-auth`/an HTTP client and is registered in from
-//! `edda-web`'s composition root instead (see this crate's `Cargo.toml`
-//! doc comment for why the dependency has to run that direction).
+//! dispatch/retry loop, and (`dispatcher`) the `events` outbox → `jobs`
+//! fan-out — never the handler *logic* itself ("send this webhook," "send
+//! this email"), which needs `edda-auth`/an HTTP client and is registered
+//! in from `edda-web`'s composition root instead (see this crate's
+//! `Cargo.toml` doc comment for why the dependency has to run that
+//! direction).
+
+mod dispatcher;
+
+pub use dispatcher::{spawn_dispatcher, DispatcherConfig};
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -17,11 +22,8 @@ use std::time::Duration;
 use rand::RngExt;
 use tokio::sync::Semaphore;
 
-use edda_db::{DbPool, JobRepo, WebhookRepo};
-use edda_domain::{
-    next_retry_at, DomainEvent, JobId, JobKind, JobPayload, JobRecord, MentionSource,
-    NotificationKind, NotificationSubject, WebhookEvent,
-};
+use edda_db::{DbPool, JobRepo};
+use edda_domain::{next_retry_at, JobId, JobKind, JobPayload, JobRecord};
 
 pub type HandlerFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 type Handler = Arc<dyn Fn(JobPayload) -> HandlerFuture + Send + Sync>;
@@ -50,9 +52,9 @@ impl HandlerRegistry {
     }
 }
 
-const DEFAULT_MAX_ATTEMPTS: u32 = 5;
+pub(crate) const DEFAULT_MAX_ATTEMPTS: u32 = 5;
 
-fn now_unix() -> i64 {
+pub(crate) fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock is after the unix epoch")
@@ -66,85 +68,13 @@ fn jitter_unit() -> f64 {
 }
 
 /// Enqueues one job, due immediately, with this crate's default retry
-/// budget. The narrow primitive every fan-out (`dispatch`, or a handler
-/// that itself needs to enqueue follow-up work) builds on.
+/// budget. The narrow primitive a handler that itself needs to enqueue
+/// follow-up work builds on (the outbox fan-out in `dispatcher` enqueues
+/// through `JobRepo` directly, so its enqueue shares the event-claiming
+/// transaction).
 pub async fn enqueue(pool: &DbPool, payload: JobPayload) -> Result<(), edda_db::DbError> {
     let id = JobId::new();
     JobRepo::enqueue(pool, id, &payload, now_unix(), DEFAULT_MAX_ATTEMPTS).await
-}
-
-/// Pre-rendered email content for a `DomainEvent::UserMentioned` fan-out —
-/// `None` when the mentioned user has opted out of email notifications
-/// (`UserRepo::email_notifications_enabled`), in which case only the
-/// in-app notification is created.
-pub struct EmailContent<'a> {
-    pub to_email: &'a str,
-    pub subject: &'a str,
-    pub body_text: &'a str,
-}
-
-/// "What happened" -> "what work that implies," exhaustively matched.
-/// `webhook_payload_json` is only consulted for events that fan
-/// out to webhook deliveries; `mention_email` only for
-/// `UserMentioned` — both `None` are valid inputs for events that don't
-/// need them, not a caller error.
-pub async fn dispatch(
-    pool: &DbPool,
-    event: &DomainEvent,
-    webhook_payload_json: Option<&str>,
-    mention_email: Option<EmailContent<'_>>,
-) -> Result<(), edda_db::DbError> {
-    match *event {
-        DomainEvent::PullRequestMerged { repository_id, .. } => {
-            let payload_json = webhook_payload_json.unwrap_or("{}").to_string();
-            let webhooks =
-                WebhookRepo::find_subscribed(pool, repository_id, WebhookEvent::PullRequestMerged)
-                    .await?;
-            for webhook in webhooks {
-                enqueue(
-                    pool,
-                    JobPayload::DeliverWebhook {
-                        webhook_id: webhook.id,
-                        event: WebhookEvent::PullRequestMerged,
-                        payload_json: payload_json.clone(),
-                    },
-                )
-                .await?;
-            }
-        }
-        DomainEvent::UserMentioned {
-            mentioned_user_id,
-            source,
-        } => {
-            let subject = match source {
-                MentionSource::PullRequestComment { pull_request_id } => {
-                    NotificationSubject::PullRequest(pull_request_id)
-                }
-                MentionSource::IssueComment { issue_id } => NotificationSubject::Issue(issue_id),
-            };
-            enqueue(
-                pool,
-                JobPayload::CreateNotification {
-                    user_id: mentioned_user_id,
-                    kind: NotificationKind::Mention,
-                    subject,
-                },
-            )
-            .await?;
-            if let Some(email) = mention_email {
-                enqueue(
-                    pool,
-                    JobPayload::SendEmail {
-                        to_email: email.to_email.to_string(),
-                        subject: email.subject.to_string(),
-                        body_text: email.body_text.to_string(),
-                    },
-                )
-                .await?;
-            }
-        }
-    }
-    Ok(())
 }
 
 pub struct PollerConfig {
@@ -245,112 +175,6 @@ async fn run_one(pool: &DbPool, handlers: &HandlerRegistry, job: JobRecord) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use edda_domain::{PullRequestId, RepositoryId, UserId};
-
-    #[tokio::test]
-    async fn dispatching_a_pull_request_merged_event_enqueues_one_delivery_per_subscribed_webhook()
-    {
-        let pool = edda_db::test_pool().await;
-        let owner = UserId::new();
-        edda_db::UserRepo::insert(&pool, owner, "alice", "alice@example.com", "x")
-            .await
-            .unwrap();
-        let repository = edda_domain::Repository {
-            id: RepositoryId::new(),
-            owner: edda_domain::RepositoryOwner::User(owner),
-            name: "demo".to_string(),
-            description: None,
-            visibility: edda_domain::Visibility::Public,
-            forked_from: None,
-        };
-        edda_db::RepositoryRepo::insert_with_owner(&pool, &repository, owner)
-            .await
-            .unwrap();
-
-        let webhook_id = edda_domain::WebhookId::new();
-        WebhookRepo::insert(
-            &pool,
-            webhook_id,
-            repository.id,
-            "https://example.com/hook",
-            b"ciphertext",
-            &[WebhookEvent::PullRequestMerged],
-        )
-        .await
-        .unwrap();
-        // A second webhook that isn't subscribed to this event — must not
-        // receive a delivery job.
-        WebhookRepo::insert(
-            &pool,
-            edda_domain::WebhookId::new(),
-            repository.id,
-            "https://example.com/other",
-            b"ciphertext",
-            &[WebhookEvent::IssueOpened],
-        )
-        .await
-        .unwrap();
-
-        let event = DomainEvent::PullRequestMerged {
-            pull_request_id: PullRequestId::new(),
-            repository_id: repository.id,
-        };
-        dispatch(&pool, &event, Some(r#"{"action":"merged"}"#), None)
-            .await
-            .unwrap();
-
-        let claimed = JobRepo::claim_batch(&pool, now_unix(), 10).await.unwrap();
-        assert_eq!(claimed.len(), 1);
-        match &claimed[0].payload {
-            JobPayload::DeliverWebhook {
-                webhook_id: id,
-                event,
-                payload_json,
-            } => {
-                assert_eq!(*id, webhook_id);
-                assert_eq!(*event, WebhookEvent::PullRequestMerged);
-                assert_eq!(payload_json, r#"{"action":"merged"}"#);
-            }
-            other => panic!("unexpected payload: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn dispatching_a_mention_creates_a_notification_job_and_optionally_an_email_job() {
-        let pool = edda_db::test_pool().await;
-        let event = DomainEvent::UserMentioned {
-            mentioned_user_id: UserId::new(),
-            source: MentionSource::PullRequestComment {
-                pull_request_id: PullRequestId::new(),
-            },
-        };
-
-        dispatch(&pool, &event, None, None).await.unwrap();
-        let claimed = JobRepo::claim_batch(&pool, now_unix(), 10).await.unwrap();
-        assert_eq!(claimed.len(), 1);
-        assert!(matches!(
-            claimed[0].payload,
-            JobPayload::CreateNotification { .. }
-        ));
-
-        dispatch(
-            &pool,
-            &event,
-            None,
-            Some(EmailContent {
-                to_email: "a@example.com",
-                subject: "you were mentioned",
-                body_text: "see the PR",
-            }),
-        )
-        .await
-        .unwrap();
-        let claimed = JobRepo::claim_batch(&pool, now_unix(), 10).await.unwrap();
-        assert_eq!(claimed.len(), 2);
-        assert!(claimed
-            .iter()
-            .any(|job| matches!(job.payload, JobPayload::SendEmail { .. })));
-    }
 
     #[tokio::test]
     async fn the_poller_runs_a_registered_handler_and_marks_the_job_succeeded() {

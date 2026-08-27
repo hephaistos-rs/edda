@@ -30,12 +30,13 @@ pub use access::{
     AuthzError, RepoAccess, RepoRole, RepositoryScope,
 };
 pub use branch_protection::BranchProtectionRule;
-pub use event::{DomainEvent, MentionSource};
+pub use event::{DomainEvent, DomainEventKind, MentionSource};
 pub use ids::{
-    AccessTokenId, AuditEventId, BranchProtectionRuleId, IssueCommentId, IssueId, JobId, LabelId,
-    LfsLockId, MilestoneId, NotificationId, OAuthIdentityId, OrganizationId, PasswordResetTokenId,
-    PrCommentId, PrReviewId, PullRequestId, ReleaseAssetId, ReleaseId, RepositoryId, SshKeyId,
-    TeamId, TotpRecoveryCodeId, UserId, WebauthnCredentialId, WebhookDeliveryId, WebhookId,
+    AccessTokenId, AuditEventId, BranchProtectionRuleId, EventId, IssueCommentId, IssueId, JobId,
+    LabelId, LfsLockId, MilestoneId, NotificationId, OAuthIdentityId, OrganizationId,
+    PasswordResetTokenId, PrCommentId, PrReviewId, PullRequestId, ReleaseAssetId, ReleaseId,
+    RepositoryId, SshKeyId, TeamId, TotpRecoveryCodeId, UserId, WebauthnCredentialId,
+    WebhookDeliveryId, WebhookId,
 };
 pub use issue::{
     labels_to_unapply_for_scope, scope_of, Issue, IssueComment, IssueState, Label, Milestone,

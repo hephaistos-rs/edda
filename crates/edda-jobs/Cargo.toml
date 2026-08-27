@@ -22,6 +22,10 @@ edda-db = { workspace = true }
 edda-domain = { workspace = true }
 edda-telemetry = { workspace = true }
 rand = { workspace = true, features = ["thread_rng"] }
+# The event dispatcher (`dispatcher.rs`) builds each integration event's
+# JSON body — a webhook payload — from committed state as it fans an
+# outbox row out to `jobs`. No other part of this crate touches JSON.
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time", "sync"] }
 tracing = { workspace = true }
 

@@ -208,39 +208,17 @@ pub async fn add_issue_comment(
     body: String,
 ) -> Result<(), ServerFnError> {
     let shared = crate::shared::get();
-    let (repository, actor) = crate::server::require_write_access(&auth, &owner, &name).await?;
-    let user_id = actor.user_id().expect("User actor");
-    if body.trim().is_empty() {
-        return Err(ServerFnError::new("a comment can't be empty"));
-    }
+    let Some(session_user) = &auth.user else {
+        return Err(ServerFnError::new("login required"));
+    };
+    let actor = edda_domain::ActorContext::User(session_user.user.id);
 
-    let issue =
-        edda_db::IssueRepo::find_by_repository_and_number(&shared.pool, repository.id, number)
-            .await
-            .map_err(|err| ServerFnError::new(err.to_string()))?
-            .ok_or_else(|| ServerFnError::new("no such issue"))?;
-    edda_db::IssueCommentRepo::insert(
-        &shared.pool,
-        edda_domain::IssueCommentId::new(),
-        issue.id,
-        user_id,
-        body.trim(),
-    )
-    .await
-    .map_err(|err| ServerFnError::new(err.to_string()))?;
-
-    crate::mentions::dispatch_mentions(
-        &shared.pool,
-        body.trim(),
-        user_id,
-        edda_domain::MentionSource::IssueComment { issue_id: issue.id },
-        &format!("You were mentioned on issue #{number}"),
-        &format!(
-            "You were mentioned in a comment on issue #{number} (\"{}\") in {owner}/{name}.",
-            issue.title
-        ),
-    )
-    .await;
+    // Write authorization, the comment insert, and one `UserMentioned`
+    // outbox event per `@mention` — one transaction, in the service.
+    edda_http::services::IssueService::new(shared.pool.clone(), shared.authz.clone())
+        .add_comment(&actor, &owner, &name, number, &body)
+        .await
+        .map_err(|err| ServerFnError::new(err.to_string()))?;
 
     Ok(())
 }

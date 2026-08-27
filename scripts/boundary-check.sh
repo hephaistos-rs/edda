@@ -105,6 +105,15 @@ enforce "sqlx types stay inside crates/edda-db/" \
         | grep -vE 'crates/edda-db/|app/edda-web/src/session_store\.rs|/tests/' \
         || true)"
 
+# Transactional outbox (plan.local.md §13 / Phase 3): a domain event is
+# written to the `events` table (`EventRepo::append`) inside the same
+# transaction as its state change, and `spawn_dispatcher` fans it out —
+# never `edda_jobs::dispatch(event, …)` right after a commit, whose event
+# was lost for good if the process died in the window. That call, and the
+# `EmailContent` struct it took, no longer exist.
+enforce "no post-commit event dispatch — the outbox is the only path" \
+    "$(g '\bedda_jobs::dispatch\b|\bEmailContent\b' --include=*.rs crates app || true)"
+
 echo
 echo "── PENDING (target invariants, not yet enforced) ────────"
 

@@ -2589,6 +2589,7 @@ name = "edda-domain"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "uuid",
 ]
@@ -2631,6 +2632,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "thiserror 2.0.20",
  "tokio",
  "tower-http",
  "tower-sessions",
@@ -2647,6 +2649,7 @@ dependencies = [
  "edda-domain",
  "edda-telemetry",
  "rand 0.10.2",
+ "serde_json",
  "tokio",
  "tracing",
 ]

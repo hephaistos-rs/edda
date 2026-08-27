@@ -252,51 +252,64 @@ async fn a_pull_request_opens_is_reviewed_and_merges_against_a_real_repository()
     .await
     .expect("insert approval review");
 
-    let reviews = PrReviewRepo::list_for_pull_request(&pool, pr_id)
-        .await
-        .unwrap();
-    let authz = AuthorizationService::new(pool.clone());
-    authz
-        .check_merge_pull_request(
+    // The actual merge — `PullRequestService::merge`, the exact call
+    // `pr_server::merge_pull_request` makes after Phase 3: it re-checks
+    // authorization, holds the repo lock across the real `gix` merge, and
+    // commits the PR state change together with a `PullRequestMerged`
+    // outbox event in one transaction.
+    let service = edda_http::services::PullRequestService::new(
+        pool.clone(),
+        store.clone(),
+        locks.clone(),
+        AuthorizationService::new(pool.clone()),
+    );
+    let outcome = service
+        .merge(
             &ActorContext::User(alice_id),
-            &repository,
-            &pr.target,
-            &reviews,
+            "alice",
+            "demo",
+            pr_number,
+            "alice",
+            "alice@example.com",
         )
         .await
-        .expect("alice may merge");
-
-    // The actual merge — real `gix` merge against the real on-disk repo,
-    // same function `pr_server::merge_pull_request` calls.
-    let identity = "alice/demo";
-    let lock = locks.lock_for(identity);
-    let _guard = lock.lock().await;
-    let outcome = edda_git::merge_branches(
-        store.as_ref(),
-        identity,
-        &pr.source.branch,
-        &pr.target,
-        "alice",
-        "alice@example.com",
-        &format!("Merge pull request #{pr_number} from feature"),
-    )
-    .expect("merge succeeds — no conflicts between these two branches");
-    drop(_guard);
-
-    let merged_state = PrState::Merged {
-        merged_at: 1_700_000_000,
-        merge_commit: outcome.merge_commit.clone(),
-        strategy: MergeStrategy::Merge,
-    };
-    PullRequestRepo::update_state(&pool, pr_id, &merged_state)
-        .await
-        .expect("record the merge");
+        .expect("merge succeeds — no conflicts between these two branches");
 
     let pr = PullRequestRepo::find_by_id(&pool, pr_id)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(pr.state, merged_state);
+    assert!(
+        matches!(
+            pr.state,
+            PrState::Merged { ref merge_commit, strategy: MergeStrategy::Merge, .. }
+                if *merge_commit == outcome.merge_commit
+        ),
+        "PR recorded as merged with the merge-commit strategy, got {:?}",
+        pr.state
+    );
+
+    // The outbox holds exactly one `PullRequestMerged` for this PR,
+    // committed with the state change — the row `spawn_dispatcher` turns
+    // into the webhook delivery job.
+    let outbox = edda_db::EventRepo::fetch_unprocessed(&pool, 50)
+        .await
+        .expect("read the outbox");
+    let merged_events: Vec<_> = outbox
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.event,
+                edda_domain::DomainEvent::PullRequestMerged { pull_request_id, .. }
+                    if pull_request_id == pr_id
+            )
+        })
+        .collect();
+    assert_eq!(
+        merged_events.len(),
+        1,
+        "one PullRequestMerged event on the outbox, got {outbox:?}"
+    );
 
     // Verify against the *real* repository: `main` now points at the
     // merge commit, and a fresh clone contains both `README.md` (from

@@ -3,8 +3,6 @@ use dioxus::prelude::*;
 mod issue_server;
 #[cfg(feature = "server")]
 mod job_handlers;
-#[cfg(feature = "server")]
-mod mentions;
 mod notification_server;
 mod org_server;
 mod pr_server;
@@ -247,6 +245,13 @@ fn main() {
                 std::sync::Arc::new(handlers),
                 edda_jobs::PollerConfig::default(),
             );
+
+            // The event dispatcher: drains the `events` outbox (rows an
+            // application service wrote in the same transaction as its
+            // state change) into `jobs`. Separate task from the poller —
+            // this one turns "what happened" into "what work," the poller
+            // runs the work.
+            edda_jobs::spawn_dispatcher(pool.clone(), edda_jobs::DispatcherConfig::default());
 
             // Same `Once`-guarded pattern as the shutdown watcher below,
             // and for the same reason: this callback can re-run on

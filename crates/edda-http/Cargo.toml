@@ -48,6 +48,9 @@ serde_json = { workspace = true }
 # claimed `oid` (a hex-encoded SHA-256 digest) — the same hash Git LFS
 # itself uses to name objects.
 sha2 = { workspace = true }
+# `services::ServiceError` — the one error type the application-service
+# layer returns; a handler maps it to a status via `http_status`.
+thiserror = { workspace = true }
 # Streaming release-asset upload/download (`release_assets`) — async file
 # I/O off the request-handling task.
 tokio = { workspace = true, features = ["fs", "io-util"] }

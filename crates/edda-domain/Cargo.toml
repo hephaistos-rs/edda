@@ -17,3 +17,9 @@ workspace = true
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 uuid = { workspace = true, features = ["v7", "serde"] }
+
+[dev-dependencies]
+# Round-trip tests for the `serde` shapes this crate defines (`DomainEvent`
+# ↔ the `events.payload_json` column, in particular) — the serializer
+# itself stays out of the non-test dependency set.
+serde_json = { workspace = true }

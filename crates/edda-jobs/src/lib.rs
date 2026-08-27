@@ -1,4 +1,4 @@
-//! The background-job poller (design §12.2/§12.3): a hand-rolled
+//! The background-job poller: a hand-rolled
 //! `tokio::spawn` + polling loop over `edda-db`'s `jobs` table, claimed via
 //! `edda_db::JobRepo`'s compare-and-swap batch claim. This crate owns the
 //! generic machinery — the handler-registration table, the poll/claim/
@@ -26,9 +26,9 @@ use edda_domain::{
 pub type HandlerFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 type Handler = Arc<dyn Fn(JobPayload) -> HandlerFuture + Send + Sync>;
 
-/// A `HashMap<JobKind, Handler>` (§12.3's own words) — a plain function-
-/// pointer map, not a trait-object-per-job-kind hierarchy, since the set
-/// of job kinds is small and closed.
+/// A `HashMap<JobKind, Handler>` — a plain function-pointer map, not a
+/// trait-object-per-job-kind hierarchy, since the set of job kinds is
+/// small and closed.
 #[derive(Default)]
 pub struct HandlerRegistry {
     handlers: HashMap<JobKind, Handler>,
@@ -83,8 +83,8 @@ pub struct EmailContent<'a> {
     pub body_text: &'a str,
 }
 
-/// "What happened" -> "what work that implies," exhaustively matched
-/// (§12.1). `webhook_payload_json` is only consulted for events that fan
+/// "What happened" -> "what work that implies," exhaustively matched.
+/// `webhook_payload_json` is only consulted for events that fan
 /// out to webhook deliveries; `mention_email` only for
 /// `UserMentioned` — both `None` are valid inputs for events that don't
 /// need them, not a caller error.
@@ -168,8 +168,8 @@ impl Default for PollerConfig {
 /// cleanly on shutdown; the loop itself runs until the process ends).
 /// Concurrency within one claimed batch is bounded by
 /// `config.max_concurrent` (a `Semaphore`, not an unbounded `tokio::spawn`
-/// loop — §20's "minimize unbounded concurrency" guidance, applied here
-/// exactly as it already is in `edda-git`'s pack-building path).
+/// loop), the same bounded-concurrency approach `edda-git`'s pack-building
+/// path already uses.
 pub fn spawn_poller(
     pool: DbPool,
     handlers: Arc<HandlerRegistry>,

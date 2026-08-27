@@ -107,8 +107,8 @@ impl Config {
     /// `opentelemetry_sdk::trace::Sampler` has no `OTEL_TRACES_SAMPLER`
     /// auto-parsing (confirmed via docs.rs) — this is the manual parsing the
     /// spec variable genuinely requires. Falls back to a sensible default
-    /// (not 100% unconditionally, per the brief) rather than an error on an
-    /// unrecognized value.
+    /// (not 100% unconditionally) rather than an error on an unrecognized
+    /// value.
     pub fn sampler(&self) -> Sampler {
         let arg = || {
             env::var("OTEL_TRACES_SAMPLER_ARG")

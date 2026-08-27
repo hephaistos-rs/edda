@@ -1,7 +1,7 @@
 //! Symmetric at-rest encryption for secrets this workspace needs to
 //! *recover*, not just verify: a user's TOTP shared secret (`totp_secrets.
-//! secret_ciphertext`) and, since Phase 7, a webhook's HMAC signing
-//! secret (`webhooks.secret_ciphertext`) — both have to be decrypted back
+//! secret_ciphertext`) and a webhook's HMAC signing secret
+//! (`webhooks.secret_ciphertext`) — both have to be decrypted back
 //! to their original bytes (to compute a fresh 6-digit code; to sign an
 //! outgoing delivery) rather than merely verified, so neither can be a
 //! one-way hash the way every other credential in this workspace is

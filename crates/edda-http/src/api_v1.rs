@@ -1,20 +1,17 @@
 //! `/api/v1/*` — the versioned, documented, external-tooling-facing REST
-//! surface (§10 of the design), introduced in this phase alongside
-//! webhooks/notifications per that section's own stated ordering
-//! ("PRs/issues are the most-requested API surface, and don't exist to
-//! expose before Phase 6"). Deliberately separate from both the
-//! Dioxus-internal server-function RPC path (`edda-web`, unversioned,
-//! never a public contract) and the git-HTTP bridge's Basic-auth-or-token
-//! resolution (`git_http::resolve_actor`): only `Authorization: Bearer
-//! <PAT>` is accepted here, never a session cookie or HTTP Basic — a
-//! deliberate reason CSRF isn't a concern on this surface at all (§10.3).
+//! surface. Deliberately separate from both the Dioxus-internal
+//! server-function RPC path (`edda-web`, unversioned, never a public
+//! contract) and the git-HTTP bridge's Basic-auth-or-token resolution
+//! (`git_http::resolve_actor`): only `Authorization: Bearer <PAT>` is
+//! accepted here, never a session cookie or HTTP Basic — which is why
+//! CSRF isn't a concern on this surface at all.
 //!
 //! Versioning policy: `/api/v1/` is additive-only (new optional fields,
 //! new endpoints); a breaking change needs `/api/v2/`, not a change here.
 //! Resource shape follows the URL conventions the git-hosting-tooling
 //! ecosystem already expects (`/repos/{owner}/{repo}/...`) without
-//! claiming Forgejo/GitHub wire-compatibility (§10.2) — DTOs are defined
-//! fresh from `edda-domain`'s entities.
+//! claiming Forgejo/GitHub wire-compatibility — DTOs are defined fresh
+//! from `edda-domain`'s entities.
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -84,9 +81,8 @@ fn api_error(status: StatusCode, code: &'static str, message: impl Into<String>)
 }
 
 /// `AuthzError::NotFound` -> `404`, `AuthzError::Forbidden` -> `403` — the
-/// same information-hiding mapping used everywhere else in this
-/// workspace, verified at this new surface specifically per §7.3's own
-/// instruction not to assume it carries over automatically.
+/// same information-hiding mapping used everywhere else in this workspace,
+/// re-checked here rather than assumed to carry over automatically.
 fn authz_error_response(err: AuthzError) -> Response {
     match err {
         AuthzError::NotFound => api_error(StatusCode::NOT_FOUND, "not_found", "not found"),

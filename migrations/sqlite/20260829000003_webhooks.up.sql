@@ -5,7 +5,7 @@
 -- than merely verify). `events` is a JSON array of
 -- `edda_domain::WebhookEvent` wire strings (e.g. `["pull_request.merged"]`)
 -- — a set-valued, occasionally-extended enum, so JSON per this workspace's
--- own enum-representation rule (§5.4), not a join table.
+-- own enum-representation rule, not a join table.
 CREATE TABLE webhooks (
     id                TEXT PRIMARY KEY NOT NULL,
     repository_id     TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
@@ -18,9 +18,9 @@ CREATE TABLE webhooks (
 
 CREATE INDEX idx_webhooks_repository ON webhooks(repository_id);
 
--- One row per delivery attempt — this *is* the job-execution record
--- (§12), also directly user-visible as a "recent deliveries" list and
--- queried independently of the `jobs` table's own bookkeeping.
+-- One row per delivery attempt — this *is* the job-execution record,
+-- also directly user-visible as a "recent deliveries" list and queried
+-- independently of the `jobs` table's own bookkeeping.
 CREATE TABLE webhook_deliveries (
     id              TEXT PRIMARY KEY NOT NULL,
     webhook_id      TEXT NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,

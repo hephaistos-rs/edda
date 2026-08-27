@@ -1,5 +1,5 @@
 -- Widens `repositories.owner_type`'s CHECK to admit 'organization', now
--- that `organizations` exists (Phase 8). SQLite can't ALTER a CHECK
+-- that the `organizations` table exists. SQLite can't ALTER a CHECK
 -- constraint in place, so this follows SQLite's own documented table-
 -- rebuild procedure for schema changes ALTER TABLE doesn't support
 -- directly (https://www.sqlite.org/lang_altertable.html, "Making Other

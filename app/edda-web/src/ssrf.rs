@@ -1,5 +1,5 @@
-//! SSRF mitigation for outgoing webhook targets (§13 of the design):
-//! resolves a target URL's host and validates every resolved address
+//! SSRF mitigation for outgoing webhook targets: resolves a target URL's
+//! host and validates every resolved address
 //! against `edda_domain::is_blocked_ip`. Called independently at *both*
 //! webhook-creation time (`webhook_server::create_webhook`) and delivery
 //! time (`job_handlers::deliver_webhook`) — a target that resolves to a

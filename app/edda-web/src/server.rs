@@ -300,10 +300,9 @@ pub async fn delete_repo(owner: String, name: String) -> Result<(), ServerFnErro
         .repository_by_name(&owner, &name)
         .await
         .map_err(|err| ServerFnError::new(err.to_string()))?;
-    // Deletion is now owner-only (`check_danger_zone`), not "any
-    // collaborator" the way the pre-restructuring `require_write_access`
-    // allowed — a deliberate tightening the four-tier role model exists
-    // to make possible; see the Phase 1 completion report.
+    // Deletion is owner-only (`check_danger_zone`), not "any collaborator
+    // with write access" — a deliberate tightening the four-tier role
+    // model makes possible.
     shared
         .authz
         .check_danger_zone(&actor, &repository)
@@ -639,9 +638,8 @@ pub struct FileDiffDto {
 /// token that only makes sense in a multi-line context (an unterminated
 /// block comment or string, for instance) can highlight less accurately
 /// here than it would in `syntax::highlight`'s whole-file mode. Acceptable
-/// for a diff view — the exit criterion is "diffs render, syntax-
-/// highlighted, for a representative set of languages," not "every
-/// multi-line-token edge case highlights identically to a full-file view."
+/// for a diff view — the goal is syntax-highlighted diffs, not identical
+/// treatment of every multi-line-token edge case a full-file view gets.
 #[cfg(feature = "server")]
 fn highlighted_line_html(text: &str, filename_hint: &str) -> String {
     let wrapped = edda_render::syntax::highlight(text, filename_hint);

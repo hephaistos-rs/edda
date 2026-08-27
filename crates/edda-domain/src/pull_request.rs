@@ -4,7 +4,7 @@
 //! workspace's authorization decisions, not here) decides whether a given
 //! merge attempt is allowed.
 //!
-//! **Minimal Phase 6 slice, by design, not a discovered limitation**:
+//! **Minimal slice, by design, not a discovered limitation**:
 //! only the merge-commit strategy exists
 //! (`MergeStrategy` is a one-variant enum today, not a stringly-typed
 //! column, so a squash/rebase fast-follow is an additive match arm, not a
@@ -117,8 +117,8 @@ pub struct PullRequest {
     pub author_id: UserId,
     pub source: PrRef,
     /// A branch name within `repository_id` — always the *same*
-    /// repository as `source.repository_id` in this phase's slice (see
-    /// this module's doc comment).
+    /// repository as `source.repository_id` (see this module's doc
+    /// comment).
     pub target: String,
     pub state: PrState,
     pub created_at: i64,

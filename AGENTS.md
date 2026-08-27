@@ -110,19 +110,23 @@ application / domain
 edda-domain
      |
      v
-edda-db, edda-git, edda-auth, edda-telemetry   (infrastructure/application crates)
+edda-db, edda-git, edda-auth, edda-jobs, edda-telemetry   (infrastructure/application crates)
      |
      v
-edda-http, edda-ssh                             (transport shells)
+edda-http, edda-ssh                                       (transport shells)
      |
      v
-edda-web                                        (composition root)
+edda-web                                                  (composition root / server binary)
 ```
 
-Current crates: `edda-domain`, `edda-db`, `edda-git`, `edda-auth`,
-`edda-http`, `edda-ssh`, `edda-telemetry`, `edda-web`. (`edda-jobs`
-doesn't exist yet — add it only when a real job-queue need lands, not
-preemptively.)
+Current crates: `edda-domain`, `edda-db`, `edda-git`, `edda-render`,
+`edda-auth`, `edda-jobs`, `edda-http`, `edda-ssh`, `edda-telemetry`,
+`edda-cli`, `edda-web`. Two crates sit outside the layered chain above:
+`edda-render` is a leaf (markdown sanitization + syntax highlighting, no
+dependency on any other Edda crate) pulled in directly by `edda-web`, and
+`edda-cli` is a second binary entry point that talks to
+`edda-db`/`edda-auth` directly (no HTTP) for offline instance
+administration.
 
 - **`edda-domain`** is infrastructure-independent: entities, typed IDs,
   invariants, pure policy/authorization functions, business rules. It
@@ -140,6 +144,13 @@ preemptively.)
   shared by both `edda-http`'s smart-HTTP bridge and `edda-ssh`. Neither
   transport shells out to a `git` binary or reimplements git logic
   independently — they own protocol/transport framing only.
+- **`edda-jobs`** owns the background-job poller and the handler-registry
+  machinery only — never handler *logic*. It depends on `edda-domain` +
+  `edda-db` and must never depend on `edda-http`/`edda-auth`: the actual
+  handlers (send this webhook, send this email) need those crates'
+  capabilities, so they're defined in `edda-web`'s composition root and
+  registered *into* the poller. The dependency runs shell-calls-handler,
+  never handler-crate-depends-on-transport-crate.
 - A crate boundary must represent a real architectural seam. Don't add a
   crate for organizational aesthetics, and don't merge unrelated
   responsibilities to minimize crate count either.

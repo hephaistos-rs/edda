@@ -1,8 +1,6 @@
-//! §23's flagged-but-unresolved open question ("session cookie `SameSite`
-//! setting... should be explicitly verified against `tower-sessions`'s
-//! actual current default at implementation time rather than assumed")
-//! turned out to matter concretely once actually checked (Phase 9):
-//! `tower-sessions` 0.14.0 defaults to `SameSite=Strict`, which never
+//! The session cookie's `SameSite` setting had to be verified against
+//! `tower-sessions`'s actual current default rather than assumed, and it
+//! mattered: `tower-sessions` 0.14.0 defaults to `SameSite=Strict`, which never
 //! attaches the session cookie to the cross-site *top-level* GET an
 //! external OAuth provider's redirect-back is — meaning `oauth_routes::
 //! callback`'s `session.get(SESSION_KEY)` would always see `None` and

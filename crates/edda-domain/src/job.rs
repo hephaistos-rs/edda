@@ -34,10 +34,10 @@ pub enum JobPayload {
     },
 }
 
-/// A `HashMap`-friendly discriminant for `JobPayload`, matching §12.3's
-/// "`HashMap<JobKind, Handler>`" handler-registration design — a plain
-/// function-pointer map keyed by this, not a trait-object-per-job-kind
-/// hierarchy, since the job-kind set is small and closed.
+/// A `HashMap`-friendly discriminant for `JobPayload`: the job poller's
+/// handler registry is a plain `HashMap<JobKind, Handler>` keyed by this,
+/// not a trait-object-per-job-kind hierarchy, since the job-kind set is
+/// small and closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JobKind {
     DeliverWebhook,

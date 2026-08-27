@@ -1,10 +1,10 @@
 //! Exercises the LFS batch/upload/download surface (`crates/edda-http/src/
 //! lfs/mod.rs`) against a real `git`/`git-lfs` CLI talking to this crate's
-//! actual router over a real TCP socket — not a mocked HTTP layer. This is
-//! the Phase 4 exit-criteria test: a `git-lfs`-CLI-managed push/pull of a
-//! tracked large file must round-trip correctly against a running
-//! instance, mirroring the same "test against the real client" philosophy
-//! the git smart-HTTP bridge itself was validated with.
+//! actual router over a real TCP socket — not a mocked HTTP layer: a
+//! `git-lfs`-CLI-managed push/pull of a tracked large file must round-trip
+//! correctly against a running instance, mirroring the same "test against
+//! the real client" philosophy the git smart-HTTP bridge itself was
+//! validated with.
 //!
 //! Skips (rather than failing) if `git`/`git-lfs` aren't on `PATH` — this
 //! test needs binaries this crate's own `cargo test` can't install.

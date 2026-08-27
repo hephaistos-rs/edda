@@ -2,8 +2,7 @@
 -- anyone below `RepoRole::Admin`) and requires `required_approvals`
 -- latest-review approvals to merge a pull request targeting it — see
 -- `edda_domain::branch_protection`'s module doc comment. No glob
--- patterns: one row names one exact branch, this phase's deliberate
--- minimal slice.
+-- patterns: one row names one exact branch — a deliberate minimal slice.
 CREATE TABLE branch_protection_rules (
     id                  TEXT PRIMARY KEY NOT NULL,
     repository_id       TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,

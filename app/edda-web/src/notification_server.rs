@@ -1,7 +1,7 @@
 //! In-app notifications + the email-notification preference toggle —
 //! Dioxus server functions, read-your-own-data queries with no
-//! cross-user access question (§11.2), so no `AuthorizationService` call
-//! is needed beyond "is someone logged in."
+//! cross-user access question, so no `AuthorizationService` call is
+//! needed beyond "is someone logged in."
 
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};

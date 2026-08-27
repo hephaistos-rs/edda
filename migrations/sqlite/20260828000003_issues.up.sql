@@ -39,8 +39,8 @@ CREATE TABLE issue_comments (
 
 CREATE INDEX idx_issue_comments_issue ON issue_comments(issue_id);
 
--- Not yet organization-scoped — `repository_id` only, until organizations
--- exist in a later phase (see `edda_domain::Label`'s doc comment).
+-- Not organization-scoped — `repository_id` only (see
+-- `edda_domain::Label`'s doc comment); widening it later is additive.
 CREATE TABLE labels (
     id            TEXT PRIMARY KEY NOT NULL,
     repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,

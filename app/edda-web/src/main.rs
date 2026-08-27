@@ -132,11 +132,11 @@ fn main() {
             // directly.
             let session_store = session_store::connect(&pool).await?;
             // `SameSite=Lax`, not `tower-sessions`' own `Strict` default
-            // (§23's own flagged "verify, don't assume" item — verified
-            // directly against a real instance, and found to matter): the
-            // OAuth login/link flow (`edda-http`'s `oauth_routes::begin`)
-            // stashes its CSRF token/nonce/PKCE verifier in this exact
-            // session before redirecting to the external provider, then
+            // (verified directly against a real instance, and found to
+            // matter): the OAuth login/link flow (`edda-http`'s
+            // `oauth_routes::begin`) stashes its CSRF token/nonce/PKCE
+            // verifier in this exact session before redirecting to the
+            // external provider, then
             // reads it back in `callback` once the provider redirects the
             // browser back — a genuine cross-site *top-level* navigation
             // the provider initiates. `SameSite=Strict` never attaches the
@@ -181,7 +181,7 @@ fn main() {
                 .merge(edda_http::router(state))
                 .layer(auth_layer);
 
-            // The job poller (§12.2): handler logic is registered here,
+            // The job poller: handler logic is registered here,
             // in the composition root, because it needs `edda-auth`
             // (secret decryption, HMAC signing) and an HTTP client —
             // `edda-jobs` itself deliberately depends on neither (see

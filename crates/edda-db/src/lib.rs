@@ -181,9 +181,8 @@ pub(crate) fn get_bytes(row: &AnyRow, column: &str) -> Result<Vec<u8>, sqlx::Err
 ///
 /// `EDDA_DATABASE_URL` selects both the backend (by scheme) and the
 /// instance to connect to. Unset falls back to a local SQLite file under
-/// `EDDA_DATA_DIR` (default `./data`) — the zero-config path, unchanged
-/// in spirit from before this revision, just no longer the only path a
-/// single compiled binary can take.
+/// `EDDA_DATA_DIR` (default `./data`) — the zero-config path, and not the
+/// only path a single compiled binary can take.
 pub async fn pool() -> Result<DbPool, sqlx::Error> {
     sqlx::any::install_default_drivers();
 
@@ -347,10 +346,10 @@ async fn run_migrations(pool: &DbPool) -> Result<(), sqlx::Error> {
     static MYSQL: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations/mysql");
 
     match pool.backend {
-        // A couple of Phase 8 SQLite migrations rebuild a table other
-        // tables reference via foreign key (SQLite has no `ALTER TABLE`
-        // support for widening a `CHECK` constraint in place — see the
-        // `organization_repository_owner`/`team_repo_access` migrations'
+        // A couple of SQLite migrations rebuild a table other tables
+        // reference via foreign key (SQLite has no `ALTER TABLE` support
+        // for widening a `CHECK` constraint in place — see the
+        // `organization_repository_owner` / `team_repo_access` migrations'
         // own comments for the documented table-rebuild procedure this
         // requires). `PRAGMA foreign_keys` is a no-op once a transaction
         // is already open, so it can't be toggled from inside a

@@ -1,10 +1,10 @@
-//! General API rate limiting (Phase 9, §10.3) — a key-based token-bucket
-//! middleware over `governor`/`tower_governor`, applied to every route in
+//! General API rate limiting — a key-based token-bucket middleware over
+//! `governor`/`tower_governor`, applied to every route in
 //! [`crate::router`] *except* the git smart-HTTP bridge (`git_http`) and
-//! Git LFS (`lfs`): the plan's own compatibility caution against
-//! throttling legitimate `git clone`/`git push`/LFS transfer traffic,
-//! which routinely issues several requests in quick succession as a
-//! normal, non-abusive part of the protocol. Everything else — auth,
+//! Git LFS (`lfs`): throttling legitimate `git clone`/`git push`/LFS
+//! transfer traffic, which routinely issues several requests in quick
+//! succession as a normal, non-abusive part of the protocol, would be a
+//! git-compatibility hazard. Everything else — auth,
 //! OAuth/WebAuthn, collaborator/SSH-key management, admin, release
 //! assets, and the versioned `/api/v1/` surface — shares one limiter.
 //!

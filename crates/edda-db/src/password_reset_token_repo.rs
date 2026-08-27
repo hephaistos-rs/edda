@@ -1,9 +1,8 @@
-//! `password_reset_tokens` persistence — schema-only since the
-//! `auth_hardening` migration (Phase 5), the request/consume flow itself
-//! (`edda_auth::password_reset`) lands in this phase alongside the
-//! email-sending capability it depends on. `token_hash` is a fast SHA-256
-//! digest, not a slow hash — same reasoning as `AccessToken`'s token hash
-//! (a 32-byte random token already has 256 bits of entropy).
+//! `password_reset_tokens` persistence — the table comes from the
+//! `auth_hardening` migration; the request/consume flow that uses it is
+//! `edda_auth::password_reset`. `token_hash` is a fast SHA-256 digest,
+//! not a slow hash — same reasoning as `AccessToken`'s token hash (a
+//! 32-byte random token already has 256 bits of entropy).
 
 use edda_domain::{PasswordResetTokenId, UserId};
 
@@ -95,11 +94,9 @@ impl PasswordResetTokenRepo {
 
     /// Marks every still-outstanding token for `user_id` as used — called
     /// both when a fresh reset is requested (only one active token per
-    /// user at a time) and when 2FA enrollment completes (§6 of the
-    /// design: "2FA enrollment... does immediately invalidate outstanding
-    /// password-reset tokens" — a reset link issued before 2FA was
-    /// enabled must not bypass the second factor the account now
-    /// requires).
+    /// user at a time) and when 2FA enrollment completes: a reset link
+    /// issued before 2FA was enabled must not bypass the second factor the
+    /// account now requires.
     pub async fn invalidate_all_for_user(
         pool: &DbPool,
         user_id: UserId,

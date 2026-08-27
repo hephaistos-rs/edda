@@ -125,9 +125,8 @@ impl RepoAccessRepo {
 
     /// Every `(repository, role)` direct grant a user holds — used to
     /// annotate a repository listing with per-repo role without one query
-    /// per row (mirrors the pre-restructuring `access_roles` helper in
-    /// `server/mod.rs`, now behind this crate's boundary instead of an ad
-    /// hoc query inline in a server function). Direct grants only — a role
+    /// per row, behind this crate's boundary rather than as an ad hoc
+    /// query inline in a server function. Direct grants only — a role
     /// held only through team membership isn't reflected here; callers
     /// needing the *effective* role (direct-or-team) go through
     /// `AuthorizationService` instead.

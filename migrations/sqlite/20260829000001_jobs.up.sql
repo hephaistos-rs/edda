@@ -1,4 +1,4 @@
--- Background job queue (design §12.2): a hand-rolled polling table, not a
+-- Background job queue: a hand-rolled polling table, not a
 -- third-party queue crate. `payload` is a JSON-serialized
 -- `edda_domain::JobPayload`; `status` transitions
 -- pending -> running -> (succeeded | pending [retry] | failed

@@ -196,9 +196,7 @@ async fn signup(
         };
 
     // Newly created — the account has no repositories yet, so there is no
-    // owner grant to seed here (unlike the pre-restructuring flow, which
-    // conflated "create an account" with "grant repo ownership" only at
-    // repo-creation time too; this call site never needed one).
+    // owner grant to seed here.
     let session_user = match state.backend.get_user(&user.id.to_string()).await {
         Ok(Some(session_user)) => session_user,
         _ => {

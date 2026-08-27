@@ -112,7 +112,7 @@ pub async fn create_webhook(
         })
         .collect::<Result<_, _>>()?;
 
-    // Creation-time SSRF check (§13) — delivery re-checks independently;
+    // Creation-time SSRF check — delivery re-checks independently;
     // see `crate::ssrf`'s own doc comment for why both calls matter.
     crate::ssrf::resolve_and_check(&target_url)
         .await

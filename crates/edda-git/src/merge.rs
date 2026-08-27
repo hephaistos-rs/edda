@@ -28,8 +28,8 @@ pub struct MergeOutcome {
 /// "create a merge commit" button on a real git host does. Updates
 /// `target_branch` to point at the new commit. Returns
 /// `GitError::Conflict` (not `Ok`) if the merge left any unresolved
-/// conflict — this phase's slice has no in-browser conflict-resolution
-/// UI, so a conflicting merge simply cannot complete via this path.
+/// conflict — there is no in-browser conflict-resolution UI, so a
+/// conflicting merge simply cannot complete via this path.
 pub fn merge_branches(
     store: &dyn RepoStore,
     name: &str,

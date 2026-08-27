@@ -387,9 +387,8 @@ pub async fn finish_registration(
         &passkey_json,
     )
     .await?;
-    // §6 of the design: 2FA enrollment immediately invalidates outstanding
-    // password-reset tokens — same reasoning as `totp::activate`'s
-    // identical call.
+    // 2FA enrollment immediately invalidates outstanding password-reset
+    // tokens — same reasoning as `totp::activate`'s identical call.
     edda_db::PasswordResetTokenRepo::invalidate_all_for_user(pool, user_id).await?;
     Ok(())
 }

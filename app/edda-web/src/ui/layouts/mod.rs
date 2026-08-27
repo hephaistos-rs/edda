@@ -142,9 +142,9 @@ pub fn Navbar() -> Element {
 }
 
 /// The unread-notification count next to the nav link — reads from the
-/// same `Notification` entity the API exposes (§11.2's own rule against a
-/// separate frontend-only notification model), via the same server
-/// function `ui/pages/notifications.rs`'s page uses.
+/// same `Notification` entity the API exposes (no separate frontend-only
+/// notification model), via the same server function
+/// `ui/pages/notifications.rs`'s page uses.
 #[component]
 fn NotificationsLink() -> Element {
     let unread = use_resource(crate::notification_server::unread_notification_count);

@@ -127,8 +127,8 @@ pub struct PullRequestRepo;
 impl PullRequestRepo {
     /// Allocates the next number for `repository_id` and inserts a new,
     /// `Open` pull request. `new.source.repository_id` must equal
-    /// `repository_id` — this phase only supports same-repository pull
-    /// requests (see `edda_domain::pull_request`'s module doc comment);
+    /// `repository_id` — only same-repository pull requests are supported
+    /// (see `edda_domain::pull_request`'s module doc comment);
     /// callers construct `source` from the same repository they're
     /// opening the PR in.
     pub async fn insert(

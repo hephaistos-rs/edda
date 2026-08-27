@@ -1,7 +1,7 @@
 //! Organization creation — the one place `edda_domain::validation::
-//! is_valid_username` and the cross-table collision check (§4.7:
-//! organizations share `users.username`'s global identifier namespace)
-//! are both applied to a *new* organization name. `edda-db`'s
+//! is_valid_username` and the cross-table collision check (organizations
+//! share `users.username`'s global identifier namespace) are both applied
+//! to a *new* organization name. `edda-db`'s
 //! `OrganizationRepo::insert` only enforces uniqueness among organization
 //! names themselves (a real `UNIQUE` index); the other half — "not already
 //! a username" — has no single database constraint that can span both
@@ -103,8 +103,8 @@ mod tests {
         assert_eq!(members[0].id, alice);
     }
 
-    /// Phase 8 exit criterion: "the org-name/username shared-uniqueness
-    /// check correctly rejecting a collision either direction."
+    /// The org-name/username shared-uniqueness check rejects a collision
+    /// in either direction.
     #[tokio::test]
     async fn organization_and_username_namespaces_collide_in_both_directions() {
         let pool = edda_db::test_pool().await;

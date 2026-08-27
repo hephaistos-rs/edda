@@ -1,9 +1,7 @@
 //! Pure name-validation rules shared by account signup (`edda-auth`) and
-//! repository naming (`edda-git`) — moved here unchanged from the
-//! pre-restructuring `auth::is_valid_username` and
-//! `git::{validate_repo_segment, split_owner_repo, validate_name}` so both
-//! consumers stay backed by exactly one definition of "a valid username" /
-//! "a valid repository identity."
+//! repository naming (`edda-git`), so both consumers stay backed by
+//! exactly one definition of "a valid username" / "a valid repository
+//! identity."
 
 /// Charset and shape a username (== a repository owner segment, since a
 /// repo's `{owner}/{repo}` identity resolves `owner` to an account

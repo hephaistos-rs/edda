@@ -20,7 +20,7 @@ CREATE INDEX idx_oauth_identities_user ON oauth_identities(user_id);
 -- must be recovered in full to compute a code on each verification, so it
 -- can't be one-way hashed. `activated_at` is NULL until the user proves
 -- control by submitting one valid code after enrollment; a row with
--- `activated_at IS NULL` does not yet gate login (see `edda_auth::totp`).
+-- `activated_at IS NULL` does not gate login (see `edda_auth::totp`).
 CREATE TABLE totp_secrets (
     user_id           TEXT PRIMARY KEY NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     secret_ciphertext BLOB NOT NULL,
@@ -60,10 +60,9 @@ CREATE TABLE webauthn_credentials (
 
 CREATE INDEX idx_webauthn_credentials_user ON webauthn_credentials(user_id);
 
--- Schema only for now — the request/confirm/email-delivery flow that uses
--- this table is deferred to a later phase, since it depends on an
--- email-sending capability that doesn't exist yet. Single-use,
--- short-lived, hashed the same way access tokens are.
+-- The request/confirm/email-delivery flow that uses this table lives in
+-- `edda_auth::password_reset`. Single-use, short-lived, hashed the same
+-- way access tokens are.
 CREATE TABLE password_reset_tokens (
     id         TEXT PRIMARY KEY NOT NULL,
     user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

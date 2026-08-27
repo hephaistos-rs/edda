@@ -83,8 +83,8 @@ gix-actor = "0.41.2"
 gix-hash = "0.26.0"
 gix-object = "0.63.0"
 gloo-net = "0.7.0"
-# The core rate-limiting algorithm `tower_governor` (Phase 9, `edda_http::
-# rate_limit`) is built on — already a transitive dependency of that crate;
+# The core rate-limiting algorithm `tower_governor` (`edda_http::rate_limit`)
+# is built on — already a transitive dependency of that crate;
 # named directly here only so `edda-http` can spell out its middleware's
 # concrete generic type (`governor::middleware::NoOpMiddleware<governor::
 # clock::QuantaInstant>`) instead of an opaque `impl Trait` return, not to
@@ -178,7 +178,7 @@ tokio = "1.53.1"
 # for server-side secret generation + `otpauth` for the `otpauth://` URI
 # manual-entry/QR string.
 totp-rs = { version = "6.0.0", features = ["gen_secret", "otpauth"] }
-# General API rate limiting (Phase 9, `edda_http::rate_limit`) — a
+# General API rate limiting (`edda_http::rate_limit`) — a
 # key-based token-bucket middleware over the pure-Rust `governor` crate
 # (no native/C dependency, matching this workspace's existing preference).
 # `default-features = false` drops the default `tonic` feature (this

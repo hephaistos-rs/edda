@@ -50,9 +50,9 @@ impl RepoRole {
     }
 }
 
-/// Who a `repo_access` grant is made to — an individual account, or
-/// (Phase 8) a `Team`, so an organization can grant its repositories to a
-/// group of people at once instead of one `RepoAccess` row per member.
+/// Who a `repo_access` grant is made to — an individual account, or a
+/// `Team`, so an organization can grant its repositories to a group of
+/// people at once instead of one `RepoAccess` row per member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessSubject {
     User(UserId),
@@ -67,11 +67,10 @@ pub struct RepoAccess {
 }
 
 /// Which repositories a bearer-token identity may act against. `All` is
-/// what every token issued today gets — unscoped, matching a personal
-/// access token's pre-restructuring behavior exactly, so introducing this
-/// type changes nothing about what an existing-shaped token can do.
-/// `PublicOnly`/`Specific` exist so a future token-creation UI can narrow
-/// a *new* token's reach without a further domain change.
+/// what every token issued today gets — unscoped, so this type changes
+/// nothing about what an existing token can do. `PublicOnly`/`Specific`
+/// exist so a future token-creation UI can narrow a *new* token's reach
+/// without a further domain change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepositoryScope {
     All,

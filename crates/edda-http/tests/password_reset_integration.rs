@@ -85,8 +85,8 @@ async fn a_full_password_reset_round_trip_changes_which_password_logs_in() {
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();
 
-    // Request a reset — always 200, regardless of what it finds (§7.3-style
-    // information hiding applied to account-existence-by-email).
+    // Request a reset — always 200, regardless of what it finds
+    // (information hiding applied to account-existence-by-email).
     let response = client
         .post(format!("{base}/api/auth/password-reset/request"))
         .json(&serde_json::json!({ "email": "alice@example.com" }))

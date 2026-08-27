@@ -1,8 +1,8 @@
-//! Phase 7 exit-criteria test: "creating a release with an uploaded asset
-//! works and the asset downloads correctly." Exercises the real
-//! `edda_http::router` over real HTTP with a real multipart upload and a
-//! real GET download — the same "test against the real client" approach
-//! `lfs_integration.rs`/`branch_protection_integration.rs` already use,
+//! Integration test: creating a release with an uploaded asset works and
+//! the asset downloads correctly. Exercises the real `edda_http::router`
+//! over real HTTP with a real multipart upload and a real GET download —
+//! the same "test against the real client" approach
+//! `lfs_integration.rs`/`branch_protection_integration.rs` use,
 //! standing `reqwest` in as the real client (a release asset's real
 //! client is any plain HTTP client, unlike LFS/git-http's protocol-
 //! specific ones).

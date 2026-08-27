@@ -255,7 +255,7 @@ impl RepositoryRepo {
     }
 
     /// Resolves an `{owner}` URL/clone-path segment to whichever entity it
-    /// names — a user, or (Phase 8) an organization. The two share one
+    /// names — a user or an organization. The two share one
     /// global identifier namespace (`edda-auth`'s signup and organization-
     /// creation paths both enforce that at write time), so this resolves
     /// unambiguously: at most one of the two lookups below can ever find a

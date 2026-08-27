@@ -351,8 +351,8 @@ pub async fn submit_pull_request_review(
     Ok(())
 }
 
-/// The full merge sequence (§9.2's worked example): authorize, hold this
-/// repository's lock for the *entire* remainder (git merge, then the SQL
+/// The full merge sequence: authorize, hold this repository's lock for
+/// the *entire* remainder (git merge, then the SQL
 /// state update — not released in between, so no other write can
 /// interleave and observe the git merge commit without the matching PR
 /// row, or vice versa), perform the git-level merge, then record it. If
@@ -429,7 +429,7 @@ pub async fn merge_pull_request(
         .map_err(|err| ServerFnError::new(err.to_string()))?;
 
     // Event emission happens *after* the state-changing transaction
-    // commits (§9.2/§12.1) — a webhook must never fire for a merge that
+    // commits — a webhook must never fire for a merge that
     // subsequently rolled back, and by this point it hasn't. A dispatch
     // failure here is logged, not propagated: the merge itself already
     // fully succeeded, and the caller shouldn't see it reported as failed

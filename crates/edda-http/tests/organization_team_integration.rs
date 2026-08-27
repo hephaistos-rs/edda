@@ -1,11 +1,11 @@
-//! Phase 8 exit criterion: "a team with `Write` on the `Code` unit grants
-//! its members push access to every repo the team is attached to, verified
-//! by an integration test using a team-member identity with no *direct*
-//! `RepoAccess` grant." Exercises the real git-over-HTTP push path
-//! (`edda_http::router`) against a real `git` CLI, the same approach
-//! `branch_protection_integration.rs` already established — proving the
-//! authorization decision is actually reachable end-to-end, not just
-//! correct in isolation at the `AuthorizationService` layer.
+//! Integration test: a team with `Write` on the `Code` unit grants its
+//! members push access to every repo the team is attached to — verified
+//! with a team-member identity that has no *direct* `RepoAccess` grant.
+//! Exercises the real git-over-HTTP push path (`edda_http::router`)
+//! against a real `git` CLI, the same approach
+//! `branch_protection_integration.rs` uses — proving the authorization
+//! decision is reachable end-to-end, not just correct in isolation at the
+//! `AuthorizationService` layer.
 
 use std::net::SocketAddr;
 use std::path::Path;

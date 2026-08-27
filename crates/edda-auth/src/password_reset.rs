@@ -6,10 +6,8 @@
 //! "shown once" discipline already used for PATs (`tokens::create`) and
 //! TOTP recovery codes (`totp::activate`).
 //!
-//! `password_reset_tokens` itself is schema-only from Phase 5 (see that
-//! migration's own comment) — this module is the request/consume flow
-//! that table was always meant for, completed now that email delivery
-//! exists to carry the link.
+//! The `password_reset_tokens` table is defined by the `auth_hardening`
+//! migration; this module is the request/consume flow that uses it.
 
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use base64::Engine;

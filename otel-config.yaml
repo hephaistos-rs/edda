@@ -1,8 +1,8 @@
 # Minimal OpenTelemetry Collector pipeline for local development: receive
 # OTLP (from Edda) over HTTP, forward it on to the local Grafana OTel-LGTM
-# stack's own OTLP receiver. Kept deliberately small — this is the
-# backend-neutral boundary the brief calls for, not a place to bolt on
-# processing Edda itself doesn't need locally.
+# stack's own OTLP receiver. Kept deliberately small — this is Edda's
+# backend-neutral boundary, not a place to bolt on processing Edda itself
+# doesn't need locally.
 receivers:
   otlp:
     protocols:

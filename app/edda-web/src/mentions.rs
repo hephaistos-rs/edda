@@ -58,8 +58,8 @@ mod tests {
         id
     }
 
-    /// Phase 7 exit criterion: "a user mentioned in a PR comment receives
-    /// both an in-app notification and, if enabled, an email." This
+    /// A user mentioned in a PR comment receives both an in-app
+    /// notification and, if enabled, an email. This
     /// drives the exact function `pr_server::add_pull_request_comment`/
     /// `issue_server::add_issue_comment` call after inserting a comment,
     /// and inspects the real jobs it enqueues in the real `jobs` table —

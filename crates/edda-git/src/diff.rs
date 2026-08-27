@@ -51,9 +51,8 @@ pub enum DiffLine {
 /// alignment below (an O(old_lines * new_lines) table) is skipped in favor
 /// of a single "every old line removed, every new line added" hunk. That
 /// table's memory cost grows quadratically, which is fine for source files
-/// (this phase's actual target — see the exit-criteria test against Rust/
-/// Python/Markdown fixtures) but would be a real cost for a large generated
-/// file landing in a diff.
+/// (the common case, covered by the Rust/Python/Markdown fixture tests)
+/// but would be a real cost for a large generated file landing in a diff.
 const MAX_DIFF_LINES: usize = 2000;
 
 /// The diff of commit `commit_id` against its first parent, or against the
@@ -62,7 +61,7 @@ const MAX_DIFF_LINES: usize = 2000;
 /// detection is deliberately disabled (`Options::track_rewrites(None)`): a
 /// renamed-with-changes file then simply appears as a `Deletion` of the old
 /// path plus an `Addition` of the new one, which is a strictly simpler
-/// output shape for this phase's callers (diff rendering, not a rename UI)
+/// output shape for this crate's callers (diff rendering, not a rename UI)
 /// to handle than the tree-diff's own three-way `Rewrite` variant.
 pub fn commit_diff(
     store: &dyn RepoStore,

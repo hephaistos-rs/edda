@@ -801,9 +801,8 @@ fn diff_file_header(file: &FileDiffDto) -> String {
     }
 }
 
-/// A single unified diff view (not side-by-side) for a commit — this
-/// phase's exit criterion is diff rendering existing and working, ready
-/// for Phase 6's PR review UI to build on, not a full review interface.
+/// A single unified diff view (not side-by-side) for a commit — a
+/// foundation the PR review UI builds on, not a full review interface.
 #[component]
 fn CommitDiffView(files: Vec<FileDiffDto>) -> Element {
     let is_empty = files.is_empty();

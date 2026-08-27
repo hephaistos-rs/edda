@@ -29,8 +29,8 @@ Self-hosted: the operator installs and runs the binary themselves (own server/VP
 ## Capabilities and Constraints
 
 - Deployment: single binary, SQLite-backed by default, no required external services (e.g. no mandatory external Postgres/Redis) to run. PostgreSQL and MySQL/MariaDB are both available as explicitly-chosen, first-class backends for operators who want them — never the default, never required, but not lesser options either.
-- Codebase currently scaffolds (empty stubs, no logic yet): `api`, `auth`, `db`, `git`, `migrations`, `server` modules, plus a `ui` module for the frontend (`layouts`, `pages`, `components`).
-- Feature scope beyond core git hosting (PRs/issues/CI/etc.) is undecided — not yet confirmed.
+- Codebase is an implemented Cargo workspace: `edda-domain`, `edda-db`, `edda-git`, `edda-render`, `edda-auth`, `edda-jobs`, `edda-http`, `edda-ssh`, `edda-telemetry`, `edda-cli`, and the `edda-web` composition root (Dioxus UI: `layouts`, `pages`, `components`).
+- Implemented beyond core git hosting: pull request review/merge, issues with labels and milestones, protected branches, tagged releases with assets, signed outbound webhooks, in-app/email notifications, organizations/teams with per-repo roles, and optional TOTP/WebAuthn/OAuth. CI/CD and package registries are deliberately out of scope for now.
 
 ## Evidence on Hand
 

@@ -1,7 +1,5 @@
-//! Phase 6 exit-criteria test: "a full PR lifecycle — open (via push +
-//! UI, or directly via API) → inline review comment → approve → merge
-//! (merge-commit strategy) — works end to end against a real
-//! repository, verified by integration test."
+//! Full PR lifecycle end to end against a real repository: open (via push)
+//! → inline review comment → approve → merge (merge-commit strategy).
 //!
 //! The source/target branches are created via real `git push` over a
 //! real HTTP server (`edda_http::router`, the same "test against the
@@ -14,12 +12,9 @@
 //! drives them directly rather than through Dioxus's own HTTP routing,
 //! since `dioxus::server::serve`'s router is constructed only inside
 //! `edda-web`'s `main()` and isn't independently spinnable the way
-//! `edda_http::router()` is (the same reason Phase 5's own validation
-//! notes drove server functions with manual `curl` against a running
-//! `cargo run --features server` process rather than an automated
-//! `cargo test`). What's verified here is the real business logic this
-//! whole phase is actually about — real git merge, real conflict/
-//! approval enforcement, real persistence — not (redundantly) that
+//! `edda_http::router()` is. What's verified here is the real business
+//! logic — real git merge, real conflict/approval enforcement, real
+//! persistence — not (redundantly) that
 //! Dioxus's macro-generated routing itself works, which the compile-time
 //! guarantees of `#[get]`/`#[post]` already give more cheaply than an
 //! HTTP round trip would.

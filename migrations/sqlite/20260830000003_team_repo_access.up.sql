@@ -1,5 +1,5 @@
 -- Widens `repo_access` from a `user_id`-only grant to a polymorphic
--- `AccessSubject` (`User` or `Team`, Phase 8) — the same table-rebuild
+-- `AccessSubject` (`User` or `Team`) — the same table-rebuild
 -- procedure as the `organization_repository_owner` migration, for the
 -- same reason (SQLite can't drop a `FOREIGN KEY`/change a composite
 -- primary key in place). `PRAGMA foreign_keys` is off for the whole

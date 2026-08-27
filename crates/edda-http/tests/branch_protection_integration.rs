@@ -1,10 +1,8 @@
-//! Phase 6 exit-criteria test: "a branch-protection rule with
-//! `required_approvals: 1` actually blocks a direct push to the
-//! protected branch by a non-admin collaborator (verified by an
-//! integration test attempting exactly that push and asserting
-//! rejection)." Exercises the real git-over-HTTP push path (`edda_http::
-//! router`) against a real `git` CLI, the same "test against the real
-//! client" approach `lfs_integration.rs` already established — branch
+//! Integration test: a branch-protection rule with `required_approvals: 1`
+//! blocks a direct push to the protected branch by a non-admin
+//! collaborator. Exercises the real git-over-HTTP push path
+//! (`edda_http::router`) against a real `git` CLI, the same "test against
+//! the real client" approach `lfs_integration.rs` uses — branch
 //! protection is enforced inside `edda_git::protocol::apply_receive_pack`
 //! itself, so this has to go through a real `git push`, not a direct
 //! function call, to prove the wire-level rejection actually reaches the

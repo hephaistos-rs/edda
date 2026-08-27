@@ -40,7 +40,7 @@ impl AuthorizationService {
 
     /// The actor's *effective* access on `repository`: the maximum of any
     /// direct grant and any grant reachable through team membership
-    /// (`edda_domain::effective_repo_role`, Phase 8's extension of the
+    /// (`edda_domain::effective_repo_role`, an extension of the
     /// "fetch, then decide" split — see that function's own doc comment).
     /// Wrapped back into a `RepoAccess` so every pure decision function in
     /// `edda_domain::access` stays unchanged: this is the "assembled
@@ -77,7 +77,7 @@ impl AuthorizationService {
     /// Whether `actor` administers `organization_id` — currently exactly
     /// "is a member of its Owners team" (`OrganizationRepo::insert`
     /// creates that team alongside the organization itself; there is no
-    /// separate, more general org-admin concept in this phase). Used to
+    /// separate, more general org-admin concept). Used to
     /// gate organization-level actions: creating a team, creating a
     /// repository under the organization, managing team membership.
     pub async fn check_administer_organization(

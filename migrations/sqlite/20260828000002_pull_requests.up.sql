@@ -1,7 +1,7 @@
 -- Pull requests. `source_repository_id`/`source_branch` model a PR's
 -- source as a repository/branch pair (`edda_domain::PrRef`) so a future
 -- cross-repo (fork-sourced) PR is representable without widening this
--- table — but this phase's slice only ever creates same-repository PRs,
+-- table — but only same-repository PRs are created today,
 -- enforced here by the `CHECK` tying `source_repository_id` back to
 -- `repository_id`, not just in application code.
 --

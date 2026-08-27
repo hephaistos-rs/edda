@@ -30,12 +30,11 @@ use tower_http::trace::TraceLayer;
 /// `.merge()`d with Dioxus's own router and wrapped in the session/auth
 /// layer by the composition root (`edda-web`).
 ///
-/// Rate limiting (`rate_limit`, §10.3) applies to every route here
-/// *except* the git smart-HTTP bridge and LFS — real `git`/`git-lfs`
-/// clients routinely issue several requests in quick succession as
-/// ordinary protocol behavior, not abuse, and throttling that traffic is
-/// explicitly the compatibility risk the plan calls out for this
-/// middleware. `.route_layer(...)`, not `.layer(...)`, for the same
+/// Rate limiting (`rate_limit`) applies to every route here *except* the
+/// git smart-HTTP bridge and LFS — real `git`/`git-lfs` clients routinely
+/// issue several requests in quick succession as ordinary protocol
+/// behavior, not abuse, and throttling that traffic would be a
+/// git-compatibility hazard. `.route_layer(...)`, not `.layer(...)`, for the same
 /// reason `with_http_observability` below already uses it: applied before
 /// merging the exempt routes in, so it only ever wraps a route that
 /// actually matched inside this half of the router.

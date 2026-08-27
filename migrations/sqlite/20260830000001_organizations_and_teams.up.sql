@@ -1,5 +1,5 @@
 -- Organizations share the global username namespace with `users.username`
--- (Phase 8, the org-vs-username collision rule) — enforced by a combined
+-- (the org-vs-username collision rule) — enforced by a combined
 -- uniqueness check in `edda-auth`, called from both signup and
 -- organization creation. This table's own unique index only guarantees
 -- organization names are unique among themselves; the cross-table half of
@@ -41,10 +41,10 @@ CREATE TABLE team_members (
 CREATE INDEX idx_team_members_user_id ON team_members(user_id);
 
 -- Per-unit override of a team's default `permission` — `'code'` is the
--- only unit Phase 8 actually wires into repository authorization (see
+-- only unit currently wired into repository authorization (see
 -- `edda_domain::team::Team::code_permission`); the rest of Forgejo's unit
--- list is modeled now so a later phase adding issue/PR/release-scoped team
--- permissions is additive, not a schema change.
+-- list is modeled now so a later change adding issue/PR/release-scoped
+-- team permissions is additive, not a schema change.
 CREATE TABLE team_unit_permissions (
     team_id    TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
     unit       TEXT NOT NULL CHECK (unit IN ('code', 'issues', 'pull_requests', 'releases', 'wiki', 'projects', 'packages', 'actions')),

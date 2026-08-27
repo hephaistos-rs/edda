@@ -23,18 +23,21 @@ Early and actively developed, but broad: git hosting over HTTP and SSH, reposito
 ```bash
 cp .env.example .env
 cargo install dioxus-cli          # provides `dx`
-cd app/edda-web && dx serve --platform web
+dx serve --package edda --platform web
 ```
 
 `dx serve` builds the client and server together, links the web UI's
-assets, and hot-reloads on change. Edda listens on `127.0.0.1:8080` by
-default; repository data and the SQLite database live under `./data`.
+assets, and hot-reloads on change. Run it from the workspace root, not
+from `app/edda-web`: `dx serve` inside the member directory trips a
+path-resolution panic in dioxus-cli 0.7.10 on some setups. (`just run` is
+the same command.) Edda listens on `127.0.0.1:8080` by default; repository
+data and the SQLite database live under `./data`.
 
-`cargo run --features server` (from the workspace root) also starts the
-server and is enough for the git endpoints and the REST API, but it does
-**not** run the Dioxus asset pipeline, so the served HTML references
-unresolved asset paths and the browser UI renders unstyled — use `dx` for
-the web UI.
+`cargo run -p edda --features server` (from the workspace root, or `just
+run-server`) also starts the server and is enough for the git endpoints
+and the REST API, but it does **not** run the Dioxus asset pipeline, so
+the served HTML references unresolved asset paths and the browser UI
+renders unstyled — use `dx serve` for the web UI.
 
 Clone a repository hosted on this instance the normal way:
 
@@ -44,6 +47,14 @@ git clone ssh://git@127.0.0.1:2222/<owner>/<repo>.git   # SSH (add an SSH key in
 ```
 
 Pushing over HTTP requires being logged in (a browser session cookie) or a personal access token (created from the UI, sent as the HTTP Basic password). Pushing over SSH uses a registered SSH key.
+
+Web signup creates ordinary accounts; there is no "first user becomes admin" rule. Create the first admin with the offline CLI, run on the same host as the server (it reads the same `EDDA_DATABASE_URL`/`EDDA_DATA_DIR`):
+
+```bash
+cargo run -p edda-cli -- user create <username> <email> --admin
+```
+
+That account has no password set — sign in via a password reset or an SSH key. `cargo run -p edda-cli -- user` lists the other subcommands (`list`, `disable`, `enable`, `delete`).
 
 ### Configuration
 
@@ -56,8 +67,9 @@ Runtime behavior is controlled by environment variables — none of them are rea
 | `EDDA_SSH_PORT`  | `2222`               | Port the git-over-SSH listener binds to (on `IP`).         |
 
 See `.env.example` for the full list — database URL, `EDDA_SECRET_KEY`
-(required before TOTP enrollment), OAuth/WebAuthn/SMTP settings, rate-limit
-tuning, and the observability variables documented below.
+(required before TOTP enrollment or webhook creation), OAuth/WebAuthn/SMTP
+settings, rate-limit tuning, and the observability variables documented
+below.
 
 ### Database backend
 
@@ -85,11 +97,12 @@ One disclosed trade-off of a single binary supporting all three backends at runt
 First-time setup: `cp .env.example .env`.
 
 ```bash
-cd app/edda-web
-dx serve --platform web
+dx serve --package edda --platform web    # or: just run
 ```
 
-runs the client/server dev loop with hot reload — `dx` locates `Dioxus.toml` in the current directory, so this needs to run from `app/edda-web`, not the workspace root. Use `--platform desktop` to run it as a desktop app instead. Tailwind is compiled automatically as of Dioxus 0.7 — no separate Tailwind install needed unless you want to customize the input/output paths (see `app/edda-web/Dioxus.toml`) or use Tailwind plugins, in which case install the [Tailwind CLI](https://tailwindcss.com/docs/installation/tailwind-cli) and run it directly:
+runs the client/server dev loop with hot reload, from the workspace root
+(see the Quick start note on why not from `app/edda-web`). Swap
+`--platform desktop` to run it as a desktop app instead. Tailwind is compiled automatically as of Dioxus 0.7 — no separate Tailwind install needed unless you want to customize the input/output paths (see `app/edda-web/Dioxus.toml`) or use Tailwind plugins, in which case install the [Tailwind CLI](https://tailwindcss.com/docs/installation/tailwind-cli) and run it directly:
 
 ```bash
 npx @tailwindcss/cli -i ./input.css -o ./assets/tailwind.css --watch
@@ -128,7 +141,7 @@ crates/
 ├─ edda-git/        # repository storage and gix-backed operations (protocol core, diff, merge, LFS) — transport-agnostic
 ├─ edda-render/     # markdown rendering (sanitized) and syntax highlighting
 ├─ edda-auth/       # authentication (passwords/sessions/tokens/TOTP/WebAuthn/OAuth/SSH keys) and the authorization service
-├─ edda-http/       # axum app: git smart-HTTP bridge, LFS, auth/token/collaborator/admin/webhook routes, REST /api/v1, rate limiting
+├─ edda-http/       # axum app: git smart-HTTP bridge, LFS, auth/OAuth/WebAuthn/token/collaborator/admin/SSH-key routes, release-asset transfer, REST /api/v1, rate limiting
 ├─ edda-ssh/        # git-over-SSH transport (russh), reusing edda-git's protocol core
 ├─ edda-jobs/       # the background-job poller and handler registry (handler logic is wired in app/edda-web)
 ├─ edda-cli/        # `edda-cli` — offline instance administration (user create/list/disable/enable/delete)
@@ -147,7 +160,7 @@ The `server` build is instrumented with [`tracing`](https://docs.rs/tracing) thr
 ### What Edda produces
 
 - **Structured logs**: every request, and the meaningful operations inside it (`repository.get`, `git.read_tree`, `authentication.login`, ...) emit structured `tracing` events, printed to stdout — pretty-printed in debug builds, JSON in release builds (override with `EDDA_LOG_FORMAT=pretty|json`).
-- **Distributed traces**: nested spans following the real work a request does, e.g. `HTTP GET /api/repos/{name}/commits` → `repository.commits` → `git.open` → `git.resolve_revision` → `git.read_commit_log`. Git object-store operations (`gix`), server functions, and the raw git-HTTP clone/push bridge are all instrumented; database query timing (SQLite or PostgreSQL, whichever is compiled in) comes from `sqlx`'s own built-in `tracing` instrumentation rather than a redundant custom wrapper.
+- **Distributed traces**: nested spans following the real work a request does, e.g. `HTTP GET /api/repos/{name}/commits` → `repository.commits` → `git.open` → `git.resolve_revision` → `git.read_commit_log`. Git object-store operations (`gix`), server functions, and the raw git-HTTP clone/push bridge are all instrumented; database query timing (whichever of SQLite/PostgreSQL/MySQL is connected at runtime) comes from `sqlx`'s own built-in `tracing` instrumentation rather than a redundant custom wrapper.
 - **Metrics**: two histograms only, `edda.http.server.request.duration` and `edda.git.operation.duration`, both with low-cardinality attributes (`operation`/`status`/`http.route`/`http.method`/`http.status_code` — never a repository name or id).
 - **Log/trace correlation**: when OTel export is enabled, `tracing` events are bridged to OTel logs and automatically carry the active `trace_id`/`span_id`, so a log line in Grafana/Loki links straight to its trace in Tempo.
 
@@ -189,7 +202,7 @@ Point `OTEL_EXPORTER_OTLP_ENDPOINT` at your OpenTelemetry Collector (never at a 
 
 ### What Edda deliberately never emits
 
-Passwords, password hashes, session tokens/cookies, `Authorization` headers, personal access tokens (only a user-chosen _label_ like `authentication.token.create`'s `token.name` field is recorded, never the token value), private repository file contents, or raw request bodies. Repository names appear as `tracing` span fields (there's no internal repository id to prefer — audited: no `repos` table exists) but never as a metric label. SQL statement text may appear in `sqlx`'s own query-timing logs; it's always parameterized, never bound values.
+Passwords, password hashes, session tokens/cookies, `Authorization` headers, personal access tokens (only a user-chosen _label_ like `authentication.token.create`'s `token.name` field is recorded, never the token value), private repository file contents, or raw request bodies. Repository names appear as `tracing` span fields but never as a metric label. SQL statement text may appear in `sqlx`'s own query-timing logs; it's always parameterized, never bound values.
 
 ### Known limitations
 

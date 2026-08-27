@@ -16,7 +16,7 @@ use crate::ids::{RepositoryId, WebhookDeliveryId, WebhookId};
 /// Deliberately a small, closed set — extended additively as real
 /// consumers need more events, never a stringly-typed catch-all. Stored as
 /// a JSON array column (`webhooks.events`), per this workspace's own
-/// enum-representation rule (§5.4: small/closed → `TEXT`+`CHECK`,
+/// enum-representation rule (small/closed → `TEXT`+`CHECK`,
 /// set-valued/extensible → `JSON`) — a webhook's event subscription is
 /// exactly the set-valued case that rule calls out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,10 +75,10 @@ impl Webhook {
     }
 }
 
-/// One delivery attempt's record — this *is* the job-execution record
-/// (§12 of the design), listed here because it's also directly
-/// user-visible ("recent deliveries") and queried independently of the
-/// job queue's own bookkeeping.
+/// One delivery attempt's record — this *is* the job-execution record,
+/// modeled here because it's also directly user-visible ("recent
+/// deliveries") and queried independently of the job queue's own
+/// bookkeeping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebhookDelivery {
     pub id: WebhookDeliveryId,

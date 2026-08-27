@@ -40,11 +40,9 @@ pub struct IssueComment {
     pub created_at: i64,
 }
 
-/// A label applied to issues/pull requests within one repository. Not yet
-/// organization-scoped (`owner_scope` from the wider design is
-/// `RepositoryId` only until organizations exist in a later phase) —
-/// kept as a plain `repository_id` column rather than a polymorphic
-/// owner pair for that reason; widening it later is additive.
+/// A label applied to issues/pull requests within one repository. Not
+/// organization-scoped — kept as a plain `repository_id` column rather
+/// than a polymorphic owner pair; widening it later is additive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Label {
     pub id: LabelId,

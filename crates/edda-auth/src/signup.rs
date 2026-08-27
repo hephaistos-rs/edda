@@ -60,8 +60,8 @@ pub async fn signup(
     if !is_valid_username(username) {
         return Err(SignupError::InvalidUsername);
     }
-    // Usernames and organization names (Phase 8) share one global
-    // identifier namespace — `edda-auth::organization::create_organization`
+    // Usernames and organization names share one global identifier
+    // namespace — `edda-auth::organization::create_organization`
     // performs the same check in the other direction. See that module's
     // own doc comment for why this can't be a single database constraint.
     if OrganizationRepo::find_by_name(pool, username)

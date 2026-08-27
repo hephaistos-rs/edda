@@ -101,9 +101,9 @@ pub async fn activate(
     }
 
     TotpRepo::activate(pool, user_id).await?;
-    // §6 of the design: 2FA enrollment immediately invalidates outstanding
-    // password-reset tokens — a reset link issued before 2FA was enabled
-    // must not bypass the second factor the account now requires.
+    // 2FA enrollment immediately invalidates outstanding password-reset
+    // tokens — a reset link issued before 2FA was enabled must not bypass
+    // the second factor the account now requires.
     PasswordResetTokenRepo::invalidate_all_for_user(pool, user_id).await?;
 
     let raw_codes: Vec<String> = (0..RECOVERY_CODE_COUNT)
@@ -171,10 +171,9 @@ mod tests {
     }
 
     /// Generates the code a real authenticator app would show right now,
-    /// for a test to submit — this is the "exit criterion" test: an
-    /// account with 2FA enrolled and activated can only complete login
-    /// with a correct code, and enrollment alone (before activation)
-    /// does not yet gate anything.
+    /// for a test to submit: an account with 2FA enrolled and activated
+    /// can only complete login with a correct code, and enrollment alone
+    /// (before activation) does not gate anything.
     fn current_code_for(secret_bytes: &[u8], account_name: &str) -> String {
         let totp = build_totp(secret_bytes.to_vec(), account_name);
         totp.generate_current().to_string()

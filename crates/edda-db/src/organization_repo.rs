@@ -162,7 +162,7 @@ impl OrganizationRepo {
     /// Every organization the given user belongs to at least one team of —
     /// used to render "your organizations" without a separate
     /// org-membership concept of its own (an organization's members *are*
-    /// its teams' members, per this phase's model).
+    /// its teams' members).
     pub async fn list_for_user(
         pool: &DbPool,
         user_id: UserId,

@@ -34,8 +34,8 @@ pub fn build_pack(repo: &gix::Repository, wants: &[ObjectId]) -> Result<Vec<u8>,
 /// already has. This is the entire negotiation algorithm: an incremental
 /// `git fetch` sends its ref tips as `have` lines, and a server that
 /// actually honors them (rather than treating `wants` as "send full
-/// history," which is what `build_pack` alone did before Phase 2) responds
-/// with only the new objects. See `edda_git::protocol::parse_upload_pack_request`
+/// history," which is what plain `build_pack` does) responds with only the
+/// new objects. See `edda_git::protocol::parse_upload_pack_request`
 /// for where `haves` comes from on the wire.
 #[tracing::instrument(name = "git.build_pack", skip_all, err, fields(wants = wants.len(), haves = haves.len()))]
 pub fn build_pack_excluding(

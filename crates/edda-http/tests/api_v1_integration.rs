@@ -1,10 +1,10 @@
-//! Phase 7 exit-criteria test: "`/api/v1/repos/{owner}/{repo}` returns
-//! correct data for an unauthenticated request to a public repo and 404s
-//! correctly for a private one without credentials (the same
-//! information-hiding rule, §7.3, verified at the new API surface
-//! specifically, not assumed to carry over automatically)." Also checks
-//! that a valid PAT does see the private repo, and that a session cookie
-//! alone (no bearer token) is *not* accepted on this surface (§10.3).
+//! Integration test for `/api/v1/repos/{owner}/{repo}`: an unauthenticated
+//! request to a public repo returns correct data; the same request to a
+//! private repo 404s (not 403) without credentials — the workspace-wide
+//! information-hiding rule, re-checked at this surface rather than assumed
+//! to carry over. Also checks that a valid PAT does see the private repo,
+//! and that a session cookie alone (no bearer token) is *not* accepted
+//! here.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

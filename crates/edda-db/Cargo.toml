@@ -15,8 +15,8 @@ authors.workspace = true
 # `sqlx::query!` (compile-
 # time-checked, but tied to one fixed schema) isn't used here anymore —
 # every query goes through the runtime-checked `sqlx::query`/`query_as`
-# instead, so `macros` isn't needed and the `.sqlx/` offline cache from
-# the previous revision no longer applies.
+# instead, so the `macros` feature isn't needed and there is no `.sqlx/`
+# offline cache to maintain.
 [dependencies]
 edda-domain = { workspace = true }
 serde_json = { workspace = true }

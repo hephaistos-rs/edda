@@ -1,7 +1,5 @@
-//! Integration-style tests against a real (in-memory) SQLite database —
-//! the pattern the pre-restructuring `access::mod` tests already used,
-//! carried forward here since that's where the equivalent logic now
-//! lives. See `edda-domain`'s own test module for the pure-authorization-
+//! Integration-style tests against a real (in-memory) SQLite database.
+//! See `edda-domain`'s own test module for the pure-authorization-
 //! decision tests this crate deliberately doesn't duplicate (this module
 //! tests persistence and schema behavior, not authorization policy).
 
@@ -205,11 +203,9 @@ async fn deleting_a_repository_cascades_its_access_grants() {
 
     RepositoryRepo::delete(&pool, alice_repo.id).await.unwrap();
 
-    // Unlike the pre-restructuring code (which had to remember a separate
-    // `access::revoke_all` call after deleting a repo), this is now
-    // structurally guaranteed by `repo_access`'s `ON DELETE CASCADE`
-    // foreign key — nothing in this test calls anything access-specific
-    // after `delete`.
+    // Repo-access rows are removed by `repo_access`'s `ON DELETE CASCADE`
+    // foreign key, not a separate cleanup call — nothing in this test
+    // calls anything access-specific after `delete`.
     assert!(
         RepoAccessRepo::find(&pool, alice_repo.id, AccessSubject::User(alice))
             .await
@@ -682,7 +678,7 @@ async fn audit_events_list_most_recent_first() {
     assert_eq!(events[1].event_type, "auth.login.success");
 }
 
-// --- Phase 6: pull requests, issues, labels, milestones, branch protection ---
+// --- pull requests, issues, labels, milestones, branch protection ---
 
 #[tokio::test]
 async fn pull_requests_and_issues_share_one_numbering_sequence_per_repository() {
@@ -1006,9 +1002,8 @@ async fn an_issue_can_be_assigned_a_milestone_and_closed() {
     assert_eq!(milestones[0].state, MilestoneState::Closed);
 }
 
-/// Phase 6 exit-criteria test, in its exact stated sequence: "an issue
-/// can be created, labeled (including a scoped-label mutual-exclusion
-/// check), commented on, and closed."
+/// An issue can be created, labeled (including a scoped-label
+/// mutual-exclusion check), commented on, and closed.
 #[tokio::test]
 async fn an_issue_can_be_created_labeled_commented_on_and_closed() {
     let pool = crate::test_pool().await;

@@ -1,7 +1,7 @@
-//! Phase 9 exit criterion: "sustained-request-rate testing against the
-//! public API confirms limits engage correctly without false-positiving
-//! on legitimate git-over-HTTP clone traffic." Two things proven together,
-//! against one real server: rapid-fire requests against a rate-limited
+//! Sustained-request-rate test against the public API: limits engage
+//! correctly without false-positiving on legitimate git-over-HTTP clone
+//! traffic. Two things proven together, against one real server:
+//! rapid-fire requests against a rate-limited
 //! `/api/v1/` endpoint eventually get a real `429 Too Many Requests`, and
 //! a real `git clone` over HTTP — several of them, well past the request
 //! count that tripped the limiter above — keeps succeeding throughout,

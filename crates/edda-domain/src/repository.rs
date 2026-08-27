@@ -1,8 +1,8 @@
 use crate::ids::{OrganizationId, RepositoryId, UserId};
 
-/// Who owns a repository — an individual account, or (Phase 8) an
-/// `Organization`. Kept as an enum, not a plain id column, so an owner
-/// that's neither or ambiguously both is unrepresentable.
+/// Who owns a repository — an individual account, or an `Organization`.
+/// Kept as an enum, not a plain id column, so an owner that's neither or
+/// ambiguously both is unrepresentable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepositoryOwner {
     User(UserId),
@@ -51,8 +51,8 @@ impl RepositoryOwner {
 
 /// A repository's identity of record — the persisted metadata `edda-db`
 /// owns. Its `id`, not its `{owner}/{name}` URL/clone-path form (derived,
-/// and could change if the owning account is ever transferred in a later
-/// phase), is what every other entity (pull requests, issues, access
+/// and could change if the owning account is ever transferred), is what
+/// every other entity (pull requests, issues, access
 /// grants) references — a stable identity that survives an owner rename
 /// or transfer, unlike a filesystem-path-derived identity would.
 ///

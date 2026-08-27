@@ -9,8 +9,7 @@
 //! this is "what happened," that is "what work that implies" — collapsing
 //! them would force every event to imply exactly one job, which doesn't
 //! hold once a single event fans out to more than one (`PullRequestMerged`
-//! implies both webhook delivery *and*, if the plan's admin-tooling
-//! roadmap ever wants it, a merge notification).
+//! implies both webhook delivery *and* a merge notification).
 
 use crate::ids::{IssueId, PullRequestId, RepositoryId, UserId};
 

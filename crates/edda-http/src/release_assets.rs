@@ -5,7 +5,7 @@
 //! list/publish) is a Dioxus server function (`edda-web`'s
 //! `release_server`) — this module only ever touches the bytes.
 //!
-//! Upload enforces §13's "size limits enforced before buffering the full
+//! Upload enforces the "size limits enforced before buffering the full
 //! body in memory" rule via `Field::chunk()` (per-chunk streaming, not
 //! `Field::bytes()`, which would buffer the whole upload first) and
 //! serves every asset back as `application/octet-stream` regardless of

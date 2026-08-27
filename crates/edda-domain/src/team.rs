@@ -1,10 +1,11 @@
 //! Teams: an organization's unit of grouped repository access. A team
 //! grants its members a default `RepoRole` on every repository it's
 //! attached to (via a `repo_access` row targeting `AccessSubject::Team`,
-//! `edda_domain::access`), overridable per `TeamUnit` — Phase 8 only wires
-//! the `Code` unit into repository authorization (see `Team::code_role`);
-//! the rest of the unit list exists so a later phase scoping team access
-//! to issues/PRs/releases individually is additive, not a schema change.
+//! `edda_domain::access`), overridable per `TeamUnit` — only the `Code`
+//! unit is currently wired into repository authorization (see
+//! `Team::code_role`); the rest of the unit list exists so a later change
+//! scoping team access to issues/PRs/releases individually is additive,
+//! not a schema change.
 
 use crate::access::RepoRole;
 use crate::ids::{OrganizationId, TeamId, UserId};
@@ -58,9 +59,9 @@ impl TeamPermission {
     }
 }
 
-/// Forgejo's confirmed per-team resource-unit list — modeled in full now
-/// even though only `Code` is wired into an actual authorization decision
-/// this phase (see this module's own doc comment).
+/// Forgejo's per-team resource-unit list — modeled in full even though
+/// only `Code` is currently wired into an actual authorization decision
+/// (see this module's own doc comment).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeamUnit {
     Code,
@@ -121,8 +122,8 @@ impl Team {
     /// access check, so a permission change made after attachment takes
     /// effect on repositories the team is attached to *after* that
     /// change, not retroactively. Re-attaching (or an explicit "sync"
-    /// action, not built in this phase) is how an existing attachment
-    /// picks up a later permission change.
+    /// action, not currently built) is how an existing attachment picks
+    /// up a later permission change.
     pub fn code_role(&self, code_unit_override: Option<TeamPermission>) -> Option<RepoRole> {
         code_unit_override.unwrap_or(self.permission).as_repo_role()
     }
@@ -145,9 +146,8 @@ pub struct TeamMember {
 /// any direct grant a user holds and any grant reachable through team
 /// membership — still a pure function once both are already fetched
 /// (`edda-auth::AuthorizationService` assembles them from `edda-db`, per
-/// `edda_domain::access`'s own "fetch, then decide" split; this is that
-/// split's Phase 8 extension, named `effective_repo_role` in the plan this
-/// implements).
+/// `edda_domain::access`'s own "fetch, then decide" split; this is the
+/// team-aware extension of that split).
 pub fn effective_repo_role(direct: Option<RepoRole>, team_grants: &[RepoRole]) -> Option<RepoRole> {
     team_grants.iter().copied().chain(direct).max()
 }

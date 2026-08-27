@@ -4,9 +4,9 @@
 
 use edda_domain::{PrReview, PrReviewId, PullRequestId, ReviewState, UserId};
 
-use crate::{get_i64, get_opt_string, get_string, Backend, DbPool};
+use crate::{get_i64, get_opt_string, get_string, Backend, DbConn, DbError};
 
-fn row_to_review(row: sqlx::any::AnyRow) -> Result<PrReview, sqlx::Error> {
+fn row_to_review(row: sqlx::any::AnyRow) -> Result<PrReview, DbError> {
     Ok(PrReview {
         id: get_string(&row, "id")?
             .parse()
@@ -27,19 +27,20 @@ fn row_to_review(row: sqlx::any::AnyRow) -> Result<PrReview, sqlx::Error> {
 pub struct PrReviewRepo;
 
 impl PrReviewRepo {
-    pub async fn insert(
-        pool: &DbPool,
+    pub async fn insert<'c>(
+        db: impl DbConn<'c>,
         id: PrReviewId,
         pull_request_id: PullRequestId,
         reviewer_id: UserId,
         state: ReviewState,
         body: Option<&str>,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let id_text = id.to_string();
         let pull_request_id_text = pull_request_id.to_string();
         let reviewer_id_text = reviewer_id.to_string();
         let created_at = crate::now_unix();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "INSERT INTO pr_reviews (id, pull_request_id, reviewer_id, state, body, created_at) VALUES ($1, $2, $3, $4, $5, $6)"
             }
@@ -54,7 +55,7 @@ impl PrReviewRepo {
             .bind(state.as_db_str())
             .bind(body)
             .bind(created_at)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
@@ -62,12 +63,13 @@ impl PrReviewRepo {
     /// Every review ever submitted on this pull request, oldest first —
     /// callers needing only the current verdict per reviewer reduce this
     /// via `edda_domain::latest_reviews`.
-    pub async fn list_for_pull_request(
-        pool: &DbPool,
+    pub async fn list_for_pull_request<'c>(
+        db: impl DbConn<'c>,
         pull_request_id: PullRequestId,
-    ) -> Result<Vec<PrReview>, sqlx::Error> {
+    ) -> Result<Vec<PrReview>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let pull_request_id_text = pull_request_id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT id, pull_request_id, reviewer_id, state, body, created_at FROM pr_reviews WHERE pull_request_id = $1 ORDER BY created_at"
             }
@@ -77,7 +79,7 @@ impl PrReviewRepo {
         };
         let rows = sqlx::query(sql)
             .bind(&pull_request_id_text)
-            .fetch_all(&pool.any)
+            .fetch_all(&mut *h.conn())
             .await?;
         rows.into_iter().map(row_to_review).collect()
     }

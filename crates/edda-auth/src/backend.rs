@@ -40,7 +40,7 @@ pub struct Credentials {
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
     #[error(transparent)]
-    Db(#[from] sqlx::Error),
+    Db(#[from] edda_db::DbError),
     #[error("{0}")]
     Hash(argon2::password_hash::Error),
 }

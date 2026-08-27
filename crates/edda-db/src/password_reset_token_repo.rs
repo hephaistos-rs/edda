@@ -6,20 +6,21 @@
 
 use edda_domain::{PasswordResetTokenId, UserId};
 
-use crate::{get_string, Backend, DbPool};
+use crate::{get_string, Backend, DbConn, DbError};
 
 pub struct PasswordResetTokenRepo;
 
 impl PasswordResetTokenRepo {
-    pub async fn insert(
-        pool: &DbPool,
+    pub async fn insert<'c>(
+        db: impl DbConn<'c>,
         id: PasswordResetTokenId,
         user_id: UserId,
         token_hash: &str,
         expires_at: i64,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let created_at = crate::now_unix();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "INSERT INTO password_reset_tokens (id, user_id, token_hash, created_at, expires_at) VALUES ($1, $2, $3, $4, $5)"
             }
@@ -33,7 +34,7 @@ impl PasswordResetTokenRepo {
             .bind(token_hash)
             .bind(created_at)
             .bind(expires_at)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
@@ -43,12 +44,13 @@ impl PasswordResetTokenRepo {
     /// `expires_at`, all indistinguishable to the caller (a reset link
     /// either works or it doesn't; which of those three reasons doesn't
     /// change the response).
-    pub async fn find_valid_by_hash(
-        pool: &DbPool,
+    pub async fn find_valid_by_hash<'c>(
+        db: impl DbConn<'c>,
         token_hash: &str,
         now: i64,
-    ) -> Result<Option<(PasswordResetTokenId, UserId)>, sqlx::Error> {
-        let sql = match pool.backend {
+    ) -> Result<Option<(PasswordResetTokenId, UserId)>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT id, user_id FROM password_reset_tokens WHERE token_hash = $1 AND used_at IS NULL AND expires_at > $2"
             }
@@ -59,7 +61,7 @@ impl PasswordResetTokenRepo {
         let row = sqlx::query(sql)
             .bind(token_hash)
             .bind(now)
-            .fetch_optional(&pool.any)
+            .fetch_optional(&mut *h.conn())
             .await?;
         row.map(|row| {
             Ok((
@@ -74,9 +76,13 @@ impl PasswordResetTokenRepo {
         .transpose()
     }
 
-    pub async fn mark_used(pool: &DbPool, id: PasswordResetTokenId) -> Result<bool, sqlx::Error> {
+    pub async fn mark_used<'c>(
+        db: impl DbConn<'c>,
+        id: PasswordResetTokenId,
+    ) -> Result<bool, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let used_at = crate::now_unix();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "UPDATE password_reset_tokens SET used_at = $1 WHERE id = $2 AND used_at IS NULL"
             }
@@ -87,7 +93,7 @@ impl PasswordResetTokenRepo {
         let result = sqlx::query(sql)
             .bind(used_at)
             .bind(id.to_string())
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(result.rows_affected() > 0)
     }
@@ -97,12 +103,13 @@ impl PasswordResetTokenRepo {
     /// user at a time) and when 2FA enrollment completes: a reset link
     /// issued before 2FA was enabled must not bypass the second factor the
     /// account now requires.
-    pub async fn invalidate_all_for_user(
-        pool: &DbPool,
+    pub async fn invalidate_all_for_user<'c>(
+        db: impl DbConn<'c>,
         user_id: UserId,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let used_at = crate::now_unix();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "UPDATE password_reset_tokens SET used_at = $1 WHERE user_id = $2 AND used_at IS NULL"
             }
@@ -113,7 +120,7 @@ impl PasswordResetTokenRepo {
         sqlx::query(sql)
             .bind(used_at)
             .bind(user_id.to_string())
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }

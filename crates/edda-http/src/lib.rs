@@ -61,8 +61,8 @@ pub fn router(state: AppState) -> Router {
 }
 
 async fn healthz(State(state): State<AppState>) -> Response {
-    match sqlx::query("SELECT 1").execute(&state.pool.any).await {
-        Ok(_) => StatusCode::OK.into_response(),
+    match edda_db::health(&state.pool).await {
+        Ok(()) => StatusCode::OK.into_response(),
         Err(err) => (StatusCode::SERVICE_UNAVAILABLE, err.to_string()).into_response(),
     }
 }

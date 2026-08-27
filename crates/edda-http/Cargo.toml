@@ -48,13 +48,6 @@ serde_json = { workspace = true }
 # claimed `oid` (a hex-encoded SHA-256 digest) — the same hash Git LFS
 # itself uses to name objects.
 sha2 = { workspace = true }
-# This crate's one direct `sqlx::query` use (the `/healthz` liveness
-# check, `SELECT 1`, identical on every backend) goes through
-# `sqlx::AnyPool` via `edda_db::DbPool`'s exposed `.any` field, so it
-# needs the `any` feature enabled — the concrete driver features come
-# from `edda-db`, which always compiles all three in (runtime backend
-# selection).
-sqlx = { workspace = true, features = ["any"] }
 # Streaming release-asset upload/download (`release_assets`) — async file
 # I/O off the request-handling task.
 tokio = { workspace = true, features = ["fs", "io-util"] }

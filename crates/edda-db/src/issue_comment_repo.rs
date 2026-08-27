@@ -1,8 +1,8 @@
 use edda_domain::{IssueComment, IssueCommentId, IssueId, UserId};
 
-use crate::{get_i64, get_string, Backend, DbPool};
+use crate::{get_i64, get_string, Backend, DbConn, DbError};
 
-fn row_to_comment(row: sqlx::any::AnyRow) -> Result<IssueComment, sqlx::Error> {
+fn row_to_comment(row: sqlx::any::AnyRow) -> Result<IssueComment, DbError> {
     Ok(IssueComment {
         id: get_string(&row, "id")?
             .parse()
@@ -21,18 +21,19 @@ fn row_to_comment(row: sqlx::any::AnyRow) -> Result<IssueComment, sqlx::Error> {
 pub struct IssueCommentRepo;
 
 impl IssueCommentRepo {
-    pub async fn insert(
-        pool: &DbPool,
+    pub async fn insert<'c>(
+        db: impl DbConn<'c>,
         id: IssueCommentId,
         issue_id: IssueId,
         author_id: UserId,
         body: &str,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let id_text = id.to_string();
         let issue_id_text = issue_id.to_string();
         let author_id_text = author_id.to_string();
         let created_at = crate::now_unix();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "INSERT INTO issue_comments (id, issue_id, author_id, body, created_at) VALUES ($1, $2, $3, $4, $5)"
             }
@@ -46,17 +47,18 @@ impl IssueCommentRepo {
             .bind(&author_id_text)
             .bind(body)
             .bind(created_at)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
 
-    pub async fn list_for_issue(
-        pool: &DbPool,
+    pub async fn list_for_issue<'c>(
+        db: impl DbConn<'c>,
         issue_id: IssueId,
-    ) -> Result<Vec<IssueComment>, sqlx::Error> {
+    ) -> Result<Vec<IssueComment>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let issue_id_text = issue_id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT id, issue_id, author_id, body, created_at FROM issue_comments WHERE issue_id = $1 ORDER BY created_at"
             }
@@ -66,7 +68,7 @@ impl IssueCommentRepo {
         };
         let rows = sqlx::query(sql)
             .bind(&issue_id_text)
-            .fetch_all(&pool.any)
+            .fetch_all(&mut *h.conn())
             .await?;
         rows.into_iter().map(row_to_comment).collect()
     }

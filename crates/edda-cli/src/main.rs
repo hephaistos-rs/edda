@@ -49,7 +49,9 @@ async fn run(args: &[String]) -> Result<(), String> {
         std::env::var("EDDA_DATABASE_URL").ok().as_deref(),
         &data_dir,
     );
-    let pool = edda_db::pool(&url)
+    // The CLI is short-lived and single-threaded in practice — the default
+    // pool shape is more than enough; it has no `Settings` to draw from.
+    let pool = edda_db::pool(&url, edda_db::PoolOptions::default())
         .await
         .map_err(|err| format!("could not connect to the database: {err}"))?;
 

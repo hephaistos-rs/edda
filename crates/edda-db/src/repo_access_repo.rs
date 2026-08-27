@@ -1,6 +1,6 @@
 use edda_domain::{AccessSubject, RepoAccess, RepoRole, RepositoryId, TeamId, User, UserId};
 
-use crate::{get_bool, get_i64, get_opt_i64, get_string, Backend, DbPool};
+use crate::{get_bool, get_i64, get_opt_i64, get_string, Backend, DbConn, DbError};
 
 /// One row of `list_collaborators`: the access grant plus enough of the
 /// grantee's identity to render a collaborator list without a second
@@ -45,20 +45,21 @@ impl RepoAccessRepo {
     /// the "ignore conflict" form: there's nothing to conflict with for a
     /// repository that didn't exist a moment ago, and a conflict here
     /// would mean a real bug upstream.
-    pub async fn grant_owner(
-        pool: &DbPool,
+    pub async fn grant_owner<'c>(
+        db: impl DbConn<'c>,
         repository_id: RepositoryId,
         subject: AccessSubject,
-    ) -> Result<(), sqlx::Error> {
-        Self::grant(pool, repository_id, subject, RepoRole::Owner).await
+    ) -> Result<(), DbError> {
+        Self::grant(db, repository_id, subject, RepoRole::Owner).await
     }
 
-    pub async fn grant(
-        pool: &DbPool,
+    pub async fn grant<'c>(
+        db: impl DbConn<'c>,
         repository_id: RepositoryId,
         subject: AccessSubject,
         role: RepoRole,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let repository_id_text = repository_id.to_string();
         let subject_type = subject_type_db_str(subject);
         let subject_id_text = subject_id(subject).to_string();
@@ -67,7 +68,7 @@ impl RepoAccessRepo {
         // Three genuinely different "insert, ignore if it already
         // exists" dialects — not a portability shortcut, this is the
         // actual syntax each backend requires.
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Sqlite => {
                 "INSERT OR IGNORE INTO repo_access (repository_id, subject_type, subject_id, role, added_at) VALUES (?, ?, ?, ?, ?)"
             }
@@ -84,20 +85,21 @@ impl RepoAccessRepo {
             .bind(&subject_id_text)
             .bind(role)
             .bind(added_at)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
 
-    pub async fn find(
-        pool: &DbPool,
+    pub async fn find<'c>(
+        db: impl DbConn<'c>,
         repository_id: RepositoryId,
         subject: AccessSubject,
-    ) -> Result<Option<RepoAccess>, sqlx::Error> {
+    ) -> Result<Option<RepoAccess>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let repository_id_text = repository_id.to_string();
         let subject_type = subject_type_db_str(subject);
         let subject_id_text = subject_id(subject).to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT role FROM repo_access WHERE repository_id = $1 AND subject_type = $2 AND subject_id = $3"
             }
@@ -109,7 +111,7 @@ impl RepoAccessRepo {
             .bind(&repository_id_text)
             .bind(subject_type)
             .bind(&subject_id_text)
-            .fetch_optional(&pool.any)
+            .fetch_optional(&mut *h.conn())
             .await?;
         row.map(|row| {
             let role = RepoRole::from_db_str(&get_string(&row, "role")?)
@@ -130,12 +132,13 @@ impl RepoAccessRepo {
     /// held only through team membership isn't reflected here; callers
     /// needing the *effective* role (direct-or-team) go through
     /// `AuthorizationService` instead.
-    pub async fn roles_for_user(
-        pool: &DbPool,
+    pub async fn roles_for_user<'c>(
+        db: impl DbConn<'c>,
         user_id: UserId,
-    ) -> Result<Vec<(RepositoryId, RepoRole)>, sqlx::Error> {
+    ) -> Result<Vec<(RepositoryId, RepoRole)>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let user_id_text = user_id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT repository_id, role FROM repo_access WHERE subject_type = 'user' AND subject_id = $1"
             }
@@ -145,7 +148,7 @@ impl RepoAccessRepo {
         };
         let rows = sqlx::query(sql)
             .bind(&user_id_text)
-            .fetch_all(&pool.any)
+            .fetch_all(&mut *h.conn())
             .await?;
         rows.into_iter()
             .map(|row| {
@@ -164,14 +167,15 @@ impl RepoAccessRepo {
     /// grant on this repository, one role per such team. Used by
     /// `AuthorizationService::access_for` to compute the effective role
     /// (`edda_domain::effective_repo_role`) alongside any direct grant.
-    pub async fn team_roles_for_user(
-        pool: &DbPool,
+    pub async fn team_roles_for_user<'c>(
+        db: impl DbConn<'c>,
         repository_id: RepositoryId,
         user_id: UserId,
-    ) -> Result<Vec<RepoRole>, sqlx::Error> {
+    ) -> Result<Vec<RepoRole>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let repository_id_text = repository_id.to_string();
         let user_id_text = user_id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 r#"SELECT a.role FROM repo_access a
                    JOIN team_members m ON m.team_id = a.subject_id
@@ -186,7 +190,7 @@ impl RepoAccessRepo {
         let rows = sqlx::query(sql)
             .bind(&repository_id_text)
             .bind(&user_id_text)
-            .fetch_all(&pool.any)
+            .fetch_all(&mut *h.conn())
             .await?;
         rows.into_iter()
             .map(|row| {
@@ -196,12 +200,13 @@ impl RepoAccessRepo {
             .collect()
     }
 
-    pub async fn list_collaborators(
-        pool: &DbPool,
+    pub async fn list_collaborators<'c>(
+        db: impl DbConn<'c>,
         repository_id: RepositoryId,
-    ) -> Result<Vec<CollaboratorRow>, sqlx::Error> {
+    ) -> Result<Vec<CollaboratorRow>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let repository_id_text = repository_id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 r#"SELECT u.id as user_id, u.username, u.email, u.is_admin, u.disabled_at, a.role, a.added_at
                    FROM repo_access a JOIN users u ON u.id = a.subject_id AND a.subject_type = 'user'
@@ -215,7 +220,7 @@ impl RepoAccessRepo {
         };
         let rows = sqlx::query(sql)
             .bind(&repository_id_text)
-            .fetch_all(&pool.any)
+            .fetch_all(&mut *h.conn())
             .await?;
         rows.into_iter()
             .map(|row| {
@@ -240,12 +245,13 @@ impl RepoAccessRepo {
     /// Every team currently attached to `repository_id`, alongside the
     /// role that attachment grants — the team-subject counterpart of
     /// `list_collaborators`.
-    pub async fn list_team_grants(
-        pool: &DbPool,
+    pub async fn list_team_grants<'c>(
+        db: impl DbConn<'c>,
         repository_id: RepositoryId,
-    ) -> Result<Vec<TeamGrantRow>, sqlx::Error> {
+    ) -> Result<Vec<TeamGrantRow>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let repository_id_text = repository_id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 r#"SELECT t.id as team_id, t.name as team_name, a.role, a.added_at
                    FROM repo_access a JOIN teams t ON t.id = a.subject_id AND a.subject_type = 'team'
@@ -259,7 +265,7 @@ impl RepoAccessRepo {
         };
         let rows = sqlx::query(sql)
             .bind(&repository_id_text)
-            .fetch_all(&pool.any)
+            .fetch_all(&mut *h.conn())
             .await?;
         rows.into_iter()
             .map(|row| {
@@ -282,15 +288,16 @@ impl RepoAccessRepo {
     /// own one-owner invariant, but checked here too so the caller gets a
     /// clear "no such collaborator" outcome rather than a constraint-
     /// violation error).
-    pub async fn remove_grant(
-        pool: &DbPool,
+    pub async fn remove_grant<'c>(
+        db: impl DbConn<'c>,
         repository_id: RepositoryId,
         subject: AccessSubject,
-    ) -> Result<bool, sqlx::Error> {
+    ) -> Result<bool, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let repository_id_text = repository_id.to_string();
         let subject_type = subject_type_db_str(subject);
         let subject_id_text = subject_id(subject).to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "DELETE FROM repo_access WHERE repository_id = $1 AND subject_type = $2 AND subject_id = $3 AND role != 'owner'"
             }
@@ -302,7 +309,7 @@ impl RepoAccessRepo {
             .bind(&repository_id_text)
             .bind(subject_type)
             .bind(&subject_id_text)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(result.rows_affected() > 0)
     }

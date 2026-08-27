@@ -1,8 +1,8 @@
 use edda_domain::{Milestone, MilestoneId, MilestoneState, RepositoryId};
 
-use crate::{get_opt_i64, get_opt_string, get_string, Backend, DbPool};
+use crate::{get_opt_i64, get_opt_string, get_string, Backend, DbConn, DbError};
 
-fn row_to_milestone(row: sqlx::any::AnyRow) -> Result<Milestone, sqlx::Error> {
+fn row_to_milestone(row: sqlx::any::AnyRow) -> Result<Milestone, DbError> {
     Ok(Milestone {
         id: get_string(&row, "id")?
             .parse()
@@ -23,17 +23,18 @@ const COLUMNS: &str = "id, repository_id, title, description, due_on, state";
 pub struct MilestoneRepo;
 
 impl MilestoneRepo {
-    pub async fn insert(
-        pool: &DbPool,
+    pub async fn insert<'c>(
+        db: impl DbConn<'c>,
         id: MilestoneId,
         repository_id: RepositoryId,
         title: &str,
         description: Option<&str>,
         due_on: Option<i64>,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let id_text = id.to_string();
         let repository_id_text = repository_id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "INSERT INTO milestones (id, repository_id, title, description, due_on, state) VALUES ($1, $2, $3, $4, $5, 'open')"
             }
@@ -47,17 +48,18 @@ impl MilestoneRepo {
             .bind(title)
             .bind(description)
             .bind(due_on)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
 
-    pub async fn list_for_repository(
-        pool: &DbPool,
+    pub async fn list_for_repository<'c>(
+        db: impl DbConn<'c>,
         repository_id: RepositoryId,
-    ) -> Result<Vec<Milestone>, sqlx::Error> {
+    ) -> Result<Vec<Milestone>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let repository_id_text = repository_id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 format!("SELECT {COLUMNS} FROM milestones WHERE repository_id = $1 ORDER BY due_on IS NULL, due_on")
             }
@@ -67,25 +69,26 @@ impl MilestoneRepo {
         };
         let rows = sqlx::query(&sql)
             .bind(&repository_id_text)
-            .fetch_all(&pool.any)
+            .fetch_all(&mut *h.conn())
             .await?;
         rows.into_iter().map(row_to_milestone).collect()
     }
 
-    pub async fn update_state(
-        pool: &DbPool,
+    pub async fn update_state<'c>(
+        db: impl DbConn<'c>,
         id: MilestoneId,
         state: MilestoneState,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let id_text = id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => "UPDATE milestones SET state = $1 WHERE id = $2",
             Backend::Sqlite | Backend::MySql => "UPDATE milestones SET state = ? WHERE id = ?",
         };
         sqlx::query(sql)
             .bind(state.as_db_str())
             .bind(&id_text)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }

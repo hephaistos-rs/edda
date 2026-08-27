@@ -61,11 +61,6 @@ serde = { workspace = true, features = ["derive"] }
 # (de)serialization, `edda-db` just stores the resulting string.
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-# No `sqlite`/`postgres` driver feature: this crate only ever holds an
-# `edda_db::DbPool` (opaque to it) and uses `sqlx::Error` in its own error
-# enums, neither of which needs a specific backend driver compiled in
-# here.
-sqlx = { workspace = true }
 thiserror = { workspace = true }
 totp-rs = { workspace = true }
 tracing = { workspace = true }

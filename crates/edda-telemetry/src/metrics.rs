@@ -6,9 +6,9 @@
 //! logging already answer "did something fail and why" without a redundant,
 //! low-information counter duplicating them.
 //!
-//! No database duration metric — sqlx already emits a `tracing` event with
-//! per-query duration; a custom histogram around every `sqlx::query!` call
-//! would just duplicate that.
+//! No database duration metric — the query layer already emits a `tracing`
+//! event with per-query duration; a custom histogram around every query
+//! call would just duplicate that.
 //!
 //! Neither histogram ever carries a repository name or id as an attribute —
 //! only `operation`/`status`/`http.route`/`http.method`/`http.status_code`,

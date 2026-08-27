@@ -31,6 +31,15 @@ sqlx = { workspace = true, features = [
     "mysql",
     "runtime-tokio",
     "migrate",
+    # Networked PostgreSQL/MySQL over TLS. `tls-rustls-ring` selects the
+    # `rustls` stack with the `ring` crypto provider and webpki (bundled
+    # Mozilla) roots — matching this workspace's ring-over-aws-lc-rs
+    # policy and its no-`native-tls` rule. `sqlx::Any` forwards a
+    # connection URL verbatim to the concrete driver, which parses
+    # `?sslmode=`/`?ssl-mode=` (and `?sslrootcert=` for a private CA)
+    # itself, so TLS needs no `Any`-level plumbing here — see
+    # `pool()`'s doc comment.
+    "tls-rustls-ring",
 ] }
 thiserror = { workspace = true }
 

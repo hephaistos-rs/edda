@@ -3,9 +3,9 @@
 
 use edda_domain::{DiffAnchor, PrComment, PrCommentId, PullRequestId, UserId};
 
-use crate::{get_i64, get_opt_i64, get_opt_string, get_string, Backend, DbPool};
+use crate::{get_i64, get_opt_i64, get_opt_string, get_string, Backend, DbConn, DbError};
 
-fn row_to_comment(row: sqlx::any::AnyRow) -> Result<PrComment, sqlx::Error> {
+fn row_to_comment(row: sqlx::any::AnyRow) -> Result<PrComment, DbError> {
     let anchor_file_path = get_opt_string(&row, "anchor_file_path")?;
     let anchor = match anchor_file_path {
         Some(file_path) => Some(DiffAnchor {
@@ -45,14 +45,15 @@ const COLUMNS: &str = "id, pull_request_id, author_id, body, anchor_file_path, a
 pub struct PrCommentRepo;
 
 impl PrCommentRepo {
-    pub async fn insert(
-        pool: &DbPool,
+    pub async fn insert<'c>(
+        db: impl DbConn<'c>,
         id: PrCommentId,
         pull_request_id: PullRequestId,
         author_id: UserId,
         body: &str,
         anchor: Option<&DiffAnchor>,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let id_text = id.to_string();
         let pull_request_id_text = pull_request_id.to_string();
         let author_id_text = author_id.to_string();
@@ -67,7 +68,7 @@ impl PrCommentRepo {
             None => (None, None, None, None),
         };
 
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "INSERT INTO pr_comments (id, pull_request_id, author_id, body, anchor_file_path, anchor_line_start, anchor_line_end, anchor_commit_sha, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
             }
@@ -85,17 +86,18 @@ impl PrCommentRepo {
             .bind(line_end)
             .bind(commit_sha)
             .bind(created_at)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
 
-    pub async fn list_for_pull_request(
-        pool: &DbPool,
+    pub async fn list_for_pull_request<'c>(
+        db: impl DbConn<'c>,
         pull_request_id: PullRequestId,
-    ) -> Result<Vec<PrComment>, sqlx::Error> {
+    ) -> Result<Vec<PrComment>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let pull_request_id_text = pull_request_id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 format!("SELECT {COLUMNS} FROM pr_comments WHERE pull_request_id = $1 ORDER BY created_at")
             }
@@ -105,7 +107,7 @@ impl PrCommentRepo {
         };
         let rows = sqlx::query(&sql)
             .bind(&pull_request_id_text)
-            .fetch_all(&pool.any)
+            .fetch_all(&mut *h.conn())
             .await?;
         rows.into_iter().map(row_to_comment).collect()
     }

@@ -1388,6 +1388,71 @@ async fn team_membership_can_be_added_and_removed() {
         .unwrap());
 }
 
+/// Phase 2: the point of making every repo method generic over
+/// `impl DbConn` — a caller opens one `pool.begin()` transaction and
+/// threads `&mut tx` through several repo calls, and they commit or roll
+/// back as one unit.
+#[tokio::test]
+async fn composed_repo_writes_commit_as_one_unit() {
+    let pool = crate::test_pool().await;
+    let alice = UserId::new();
+    let repository = repo(alice, "atomic", Visibility::Public);
+    let repo_id = repository.id;
+
+    let mut tx = pool.begin().await.unwrap();
+    UserRepo::insert(&mut tx, alice, "alice", "alice@example.com", "x")
+        .await
+        .unwrap();
+    RepositoryRepo::insert_with_owner(&mut tx, &repository, alice)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert!(UserRepo::find_by_id(&pool, alice).await.unwrap().is_some());
+    assert!(RepositoryRepo::find_by_id(&pool, repo_id)
+        .await
+        .unwrap()
+        .is_some());
+    // The owner grant written by `insert_with_owner` is there too.
+    assert!(
+        RepoAccessRepo::find(&pool, repo_id, edda_domain::AccessSubject::User(alice),)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+/// The rollback half: an abort in the middle of a composed operation
+/// leaves *nothing* behind — not the first write, not the second.
+#[tokio::test]
+async fn composed_repo_writes_roll_back_as_one_unit() {
+    let pool = crate::test_pool().await;
+    let alice = UserId::new();
+    let repository = repo(alice, "doomed", Visibility::Public);
+    let repo_id = repository.id;
+
+    let mut tx = pool.begin().await.unwrap();
+    UserRepo::insert(&mut tx, alice, "alice", "alice@example.com", "x")
+        .await
+        .unwrap();
+    RepositoryRepo::insert_with_owner(&mut tx, &repository, alice)
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+
+    assert!(
+        UserRepo::find_by_id(&pool, alice).await.unwrap().is_none(),
+        "the user write must not survive the rollback"
+    );
+    assert!(
+        RepositoryRepo::find_by_id(&pool, repo_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the repository write must not survive the rollback"
+    );
+}
+
 #[tokio::test]
 async fn organization_names_are_unique_case_insensitively() {
     let pool = crate::test_pool().await;

@@ -146,7 +146,7 @@ fn main() {
         let shutdown_watcher_started = shutdown_watcher_started.clone();
         let ssh_server_started = ssh_server_started.clone();
         async move {
-            let pool = edda_db::pool(&settings.db.url).await?;
+            let pool = edda_db::pool(&settings.db.url, settings.db.pool_options()).await?;
 
             // Session cookies persist in the same configured database as
             // everything else, via a second small typed connection

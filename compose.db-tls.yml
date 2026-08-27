@@ -1,0 +1,36 @@
+# A TLS-enabled PostgreSQL on :5433, for the opt-in
+# `crates/edda-db/tests/tls_connection.rs` check (Phase 2 —
+# "networked pg/mysql connect over TLS"). Separate from `compose.db.yml`
+# so the ordinary multi-backend test loop doesn't need it.
+#
+#   docker compose -f compose.db-tls.yml up -d
+#   EDDA_TEST_TLS_DATABASE_URL='postgres://edda:edda@localhost:5433/eddadb?sslmode=require' \
+#     cargo test -p edda-db --test tls_connection
+#
+# Self-signed cert generated on container start, so `sslmode=require`
+# (encrypt, don't verify the chain) is the right client setting; a real
+# deployment uses `verify-full` + `sslrootcert=`.
+services:
+  postgres-tls:
+    image: postgres:18.6
+    container_name: postgres-tls
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: edda
+      POSTGRES_PASSWORD: edda
+      POSTGRES_DB: eddadb
+    ports:
+      - "5433:5432"
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        cert=/var/lib/postgresql/server.crt
+        key=/var/lib/postgresql/server.key
+        if [ ! -f "$$key" ]; then
+          openssl req -new -x509 -days 365 -nodes -subj '/CN=localhost' -keyout "$$key" -out "$$cert"
+          chmod 600 "$$key"
+          chown postgres:postgres "$$key" "$$cert"
+        fi
+        exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file="$$cert" -c ssl_key_file="$$key"

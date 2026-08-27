@@ -8,14 +8,14 @@ use edda_domain::{
 };
 
 use crate::repo_number_repo::{NextNumberError, RepoNumberRepo};
-use crate::{get_i64, get_opt_i64, get_opt_string, get_string, Backend, DbPool};
+use crate::{get_i64, get_opt_i64, get_opt_string, get_string, Backend, DbConn, DbError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum InsertPullRequestError {
     #[error(transparent)]
     NextNumber(#[from] NextNumberError),
     #[error(transparent)]
-    Db(#[from] sqlx::Error),
+    Db(#[from] DbError),
 }
 
 /// `(state, merged_at, merge_commit, merge_strategy, closed_at, close_reason)`.
@@ -55,7 +55,7 @@ fn state_columns(state: &PrState) -> StateColumns {
     }
 }
 
-fn row_to_pull_request(row: sqlx::any::AnyRow) -> Result<PullRequest, sqlx::Error> {
+fn row_to_pull_request(row: sqlx::any::AnyRow) -> Result<PullRequest, DbError> {
     let state_str = get_string(&row, "state")?;
     let state = match state_str.as_str() {
         "open" => PrState::Open,
@@ -111,8 +111,8 @@ const COLUMNS: &str = "id, repository_id, number, title, body, author_id, source
 /// The fields a caller supplies when opening a pull request — bundled
 /// into one struct (rather than `PullRequestRepo::insert` taking each as
 /// its own argument) purely to stay under clippy's argument-count lint;
-/// `pool`/`id`/`repository_id` stay top-level params, matching every
-/// other repo method's `pool`-then-`id` convention.
+/// `db`/`id`/`repository_id` stay top-level params, matching every
+/// other repo method's `db`-then-`id` convention.
 pub struct NewPullRequest<'a> {
     pub title: &'a str,
     pub body: Option<&'a str>,
@@ -131,12 +131,13 @@ impl PullRequestRepo {
     /// (see `edda_domain::pull_request`'s module doc comment);
     /// callers construct `source` from the same repository they're
     /// opening the PR in.
-    pub async fn insert(
-        pool: &DbPool,
+    pub async fn insert<'c>(
+        db: impl DbConn<'c>,
         id: PullRequestId,
         repository_id: RepositoryId,
         new: NewPullRequest<'_>,
     ) -> Result<i64, InsertPullRequestError> {
+        let mut h = crate::conn::open(db).await?;
         let NewPullRequest {
             title,
             body,
@@ -145,7 +146,7 @@ impl PullRequestRepo {
             target,
             draft,
         } = new;
-        let number = RepoNumberRepo::next_number(pool, repository_id).await?;
+        let number = RepoNumberRepo::next_number(&mut h, repository_id).await?;
         let id_text = id.to_string();
         let repository_id_text = repository_id.to_string();
         let author_id_text = author_id.to_string();
@@ -153,7 +154,7 @@ impl PullRequestRepo {
         let state = if draft { "draft" } else { "open" };
         let created_at = crate::now_unix();
 
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "INSERT INTO pull_requests (id, repository_id, number, title, body, author_id, source_repository_id, source_branch, target_branch, state, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
             }
@@ -173,17 +174,19 @@ impl PullRequestRepo {
             .bind(target)
             .bind(state)
             .bind(created_at)
-            .execute(&pool.any)
-            .await?;
+            .execute(&mut *h.conn())
+            .await
+            .map_err(DbError::from)?;
         Ok(number)
     }
 
-    pub async fn find_by_id(
-        pool: &DbPool,
+    pub async fn find_by_id<'c>(
+        db: impl DbConn<'c>,
         id: PullRequestId,
-    ) -> Result<Option<PullRequest>, sqlx::Error> {
+    ) -> Result<Option<PullRequest>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let id_text = id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => format!("SELECT {COLUMNS} FROM pull_requests WHERE id = $1"),
             Backend::Sqlite | Backend::MySql => {
                 format!("SELECT {COLUMNS} FROM pull_requests WHERE id = ?")
@@ -191,18 +194,19 @@ impl PullRequestRepo {
         };
         let row = sqlx::query(&sql)
             .bind(&id_text)
-            .fetch_optional(&pool.any)
+            .fetch_optional(&mut *h.conn())
             .await?;
         row.map(row_to_pull_request).transpose()
     }
 
-    pub async fn find_by_repository_and_number(
-        pool: &DbPool,
+    pub async fn find_by_repository_and_number<'c>(
+        db: impl DbConn<'c>,
         repository_id: RepositoryId,
         number: i64,
-    ) -> Result<Option<PullRequest>, sqlx::Error> {
+    ) -> Result<Option<PullRequest>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let repository_id_text = repository_id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 format!(
                     "SELECT {COLUMNS} FROM pull_requests WHERE repository_id = $1 AND number = $2"
@@ -217,18 +221,19 @@ impl PullRequestRepo {
         let row = sqlx::query(&sql)
             .bind(&repository_id_text)
             .bind(number)
-            .fetch_optional(&pool.any)
+            .fetch_optional(&mut *h.conn())
             .await?;
         row.map(row_to_pull_request).transpose()
     }
 
     /// Every pull request in `repository_id`, most recently created first.
-    pub async fn list_for_repository(
-        pool: &DbPool,
+    pub async fn list_for_repository<'c>(
+        db: impl DbConn<'c>,
         repository_id: RepositoryId,
-    ) -> Result<Vec<PullRequest>, sqlx::Error> {
+    ) -> Result<Vec<PullRequest>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let repository_id_text = repository_id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 format!("SELECT {COLUMNS} FROM pull_requests WHERE repository_id = $1 ORDER BY number DESC")
             }
@@ -238,7 +243,7 @@ impl PullRequestRepo {
         };
         let rows = sqlx::query(&sql)
             .bind(&repository_id_text)
-            .fetch_all(&pool.any)
+            .fetch_all(&mut *h.conn())
             .await?;
         rows.into_iter().map(row_to_pull_request).collect()
     }
@@ -249,15 +254,16 @@ impl PullRequestRepo {
     /// transition being valid (this method does not check the *current*
     /// state); `edda-http`'s handlers only ever call this from a state
     /// they've already verified is `Open`/`Draft`.
-    pub async fn update_state(
-        pool: &DbPool,
+    pub async fn update_state<'c>(
+        db: impl DbConn<'c>,
         id: PullRequestId,
         state: &PrState,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let (state_str, merged_at, merge_commit, merge_strategy, closed_at, close_reason) =
             state_columns(state);
         let id_text = id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "UPDATE pull_requests SET state = $1, merged_at = $2, merge_commit = $3, merge_strategy = $4, closed_at = $5, close_reason = $6 WHERE id = $7"
             }
@@ -273,7 +279,7 @@ impl PullRequestRepo {
             .bind(closed_at)
             .bind(close_reason)
             .bind(&id_text)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }

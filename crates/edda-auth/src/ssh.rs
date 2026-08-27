@@ -19,7 +19,7 @@ pub enum AddSshKeyError {
     #[error("that key is already registered")]
     FingerprintTaken,
     #[error(transparent)]
-    Db(#[from] sqlx::Error),
+    Db(#[from] edda_db::DbError),
 }
 
 impl From<InsertSshKeyError> for AddSshKeyError {
@@ -71,11 +71,15 @@ pub async fn add(
     })
 }
 
-pub async fn list(pool: &DbPool, user_id: UserId) -> Result<Vec<SshKey>, sqlx::Error> {
+pub async fn list(pool: &DbPool, user_id: UserId) -> Result<Vec<SshKey>, edda_db::DbError> {
     SshKeyRepo::list_for_user(pool, user_id).await
 }
 
-pub async fn revoke(pool: &DbPool, user_id: UserId, key_id: SshKeyId) -> Result<bool, sqlx::Error> {
+pub async fn revoke(
+    pool: &DbPool,
+    user_id: UserId,
+    key_id: SshKeyId,
+) -> Result<bool, edda_db::DbError> {
     SshKeyRepo::revoke(pool, user_id, key_id).await
 }
 

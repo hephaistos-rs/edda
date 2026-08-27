@@ -26,7 +26,7 @@ pub enum TotpError {
     #[error(transparent)]
     SecretBox(#[from] crate::secret_box::SecretBoxError),
     #[error(transparent)]
-    Db(#[from] sqlx::Error),
+    Db(#[from] edda_db::DbError),
 }
 
 fn hash_recovery_code(raw: &str) -> String {
@@ -148,12 +148,12 @@ pub async fn verify(
 /// Whether `user_id` has an activated TOTP credential — what the login
 /// flow's first step checks to decide whether to challenge for a second
 /// factor at all.
-pub async fn is_activated(pool: &DbPool, user_id: UserId) -> Result<bool, sqlx::Error> {
+pub async fn is_activated(pool: &DbPool, user_id: UserId) -> Result<bool, edda_db::DbError> {
     TotpRepo::is_activated(pool, user_id).await
 }
 
 /// Disables 2FA entirely for `user_id`.
-pub async fn disable(pool: &DbPool, user_id: UserId) -> Result<(), sqlx::Error> {
+pub async fn disable(pool: &DbPool, user_id: UserId) -> Result<(), edda_db::DbError> {
     TotpRepo::delete(pool, user_id).await
 }
 

@@ -5,7 +5,7 @@
 
 use edda_domain::{UserId, WebauthnCredentialId};
 
-use crate::{get_i64, get_opt_i64, get_string, Backend, DbPool};
+use crate::{get_i64, get_opt_i64, get_string, Backend, DbConn, DbError};
 
 pub struct WebauthnCredentialRow {
     pub id: WebauthnCredentialId,
@@ -16,7 +16,7 @@ pub struct WebauthnCredentialRow {
     pub last_used_at: Option<i64>,
 }
 
-fn row_to_credential(row: sqlx::any::AnyRow) -> Result<WebauthnCredentialRow, sqlx::Error> {
+fn row_to_credential(row: sqlx::any::AnyRow) -> Result<WebauthnCredentialRow, DbError> {
     Ok(WebauthnCredentialRow {
         id: get_string(&row, "id")?
             .parse()
@@ -34,17 +34,18 @@ fn row_to_credential(row: sqlx::any::AnyRow) -> Result<WebauthnCredentialRow, sq
 pub struct WebauthnRepo;
 
 impl WebauthnRepo {
-    pub async fn insert(
-        pool: &DbPool,
+    pub async fn insert<'c>(
+        db: impl DbConn<'c>,
         id: WebauthnCredentialId,
         user_id: UserId,
         label: &str,
         passkey_json: &str,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let id_text = id.to_string();
         let user_id_text = user_id.to_string();
         let created_at = crate::now_unix();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "INSERT INTO webauthn_credentials (id, user_id, label, passkey_json, created_at) VALUES ($1, $2, $3, $4, $5)"
             }
@@ -58,17 +59,18 @@ impl WebauthnRepo {
             .bind(label)
             .bind(passkey_json)
             .bind(created_at)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
 
-    pub async fn list_for_user(
-        pool: &DbPool,
+    pub async fn list_for_user<'c>(
+        db: impl DbConn<'c>,
         user_id: UserId,
-    ) -> Result<Vec<WebauthnCredentialRow>, sqlx::Error> {
+    ) -> Result<Vec<WebauthnCredentialRow>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let user_id_text = user_id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT id, user_id, label, passkey_json, created_at, last_used_at FROM webauthn_credentials WHERE user_id = $1 ORDER BY created_at"
             }
@@ -78,19 +80,20 @@ impl WebauthnRepo {
         };
         let rows = sqlx::query(sql)
             .bind(&user_id_text)
-            .fetch_all(&pool.any)
+            .fetch_all(&mut *h.conn())
             .await?;
         rows.into_iter().map(row_to_credential).collect()
     }
 
-    pub async fn update_passkey(
-        pool: &DbPool,
+    pub async fn update_passkey<'c>(
+        db: impl DbConn<'c>,
         id: WebauthnCredentialId,
         passkey_json: &str,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let id_text = id.to_string();
         let last_used_at = crate::now_unix();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "UPDATE webauthn_credentials SET passkey_json = $1, last_used_at = $2 WHERE id = $3"
             }
@@ -102,21 +105,22 @@ impl WebauthnRepo {
             .bind(passkey_json)
             .bind(last_used_at)
             .bind(&id_text)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
 
     /// Scoped to `user_id` — see `SshKeyRepo::revoke`'s identical
     /// reasoning for why.
-    pub async fn delete(
-        pool: &DbPool,
+    pub async fn delete<'c>(
+        db: impl DbConn<'c>,
         user_id: UserId,
         id: WebauthnCredentialId,
-    ) -> Result<bool, sqlx::Error> {
+    ) -> Result<bool, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let user_id_text = user_id.to_string();
         let id_text = id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => "DELETE FROM webauthn_credentials WHERE id = $1 AND user_id = $2",
             Backend::Sqlite | Backend::MySql => {
                 "DELETE FROM webauthn_credentials WHERE id = ? AND user_id = ?"
@@ -125,7 +129,7 @@ impl WebauthnRepo {
         let result = sqlx::query(sql)
             .bind(&id_text)
             .bind(&user_id_text)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(result.rows_affected() > 0)
     }

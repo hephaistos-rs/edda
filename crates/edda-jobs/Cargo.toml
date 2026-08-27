@@ -22,11 +22,6 @@ edda-db = { workspace = true }
 edda-domain = { workspace = true }
 edda-telemetry = { workspace = true }
 rand = { workspace = true, features = ["thread_rng"] }
-# No sqlite/postgres/mysql driver feature: this crate only ever holds an
-# `edda_db::DbPool` (opaque to it) and uses `sqlx::Error` in its own
-# function signatures — the same narrow reasoning already documented in
-# `crates/edda-auth/Cargo.toml`.
-sqlx = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time", "sync"] }
 tracing = { workspace = true }
 

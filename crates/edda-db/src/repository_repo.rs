@@ -1,13 +1,13 @@
 use edda_domain::{Repository, RepositoryId, RepositoryOwner, TeamId, UserId, Visibility};
 
-use crate::{get_opt_string, get_string, Backend, DbPool};
+use crate::{get_opt_string, get_string, Backend, DbConn, DbError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum InsertRepositoryError {
     #[error("a repository named \"{0}\" already exists for this owner")]
     AlreadyExists(String),
     #[error(transparent)]
-    Db(#[from] sqlx::Error),
+    Db(#[from] DbError),
 }
 
 fn row_to_repository(
@@ -42,10 +42,11 @@ fn row_to_repository(
 pub struct RepositoryRepo;
 
 impl RepositoryRepo {
-    pub async fn insert(
-        pool: &DbPool,
+    pub async fn insert<'c>(
+        db: impl DbConn<'c>,
         repository: &Repository,
     ) -> Result<(), InsertRepositoryError> {
+        let mut h = crate::conn::open(db).await?;
         let id = repository.id.to_string();
         let owner_type = repository.owner.owner_type_db_str();
         let owner_id = repository.owner.owner_id().to_string();
@@ -53,7 +54,7 @@ impl RepositoryRepo {
         let forked_from = repository.forked_from.map(|id| id.to_string());
         let created_at = crate::now_unix();
 
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "INSERT INTO repositories (id, owner_type, owner_id, name, description, visibility, forked_from, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
             }
@@ -61,7 +62,7 @@ impl RepositoryRepo {
                 "INSERT INTO repositories (id, owner_type, owner_id, name, description, visibility, forked_from, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
             }
         };
-        let result = sqlx::query(sql)
+        match sqlx::query(sql)
             .bind(&id)
             .bind(owner_type)
             .bind(&owner_id)
@@ -70,14 +71,14 @@ impl RepositoryRepo {
             .bind(visibility)
             .bind(&forked_from)
             .bind(created_at)
-            .execute(&pool.any)
-            .await;
-
-        match result {
+            .execute(&mut *h.conn())
+            .await
+            .map_err(DbError::from)
+        {
             Ok(_) => Ok(()),
-            Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => Err(
-                InsertRepositoryError::AlreadyExists(repository.name.clone()),
-            ),
+            Err(DbError::UniqueViolation) => Err(InsertRepositoryError::AlreadyExists(
+                repository.name.clone(),
+            )),
             Err(err) => Err(InsertRepositoryError::Db(err)),
         }
     }
@@ -89,12 +90,15 @@ impl RepositoryRepo {
     /// gap that a server-grade backend's real MVCC concurrency would not
     /// (a reader could observe a repository that exists with zero access
     /// grants). Callers must go through this method rather than the two
-    /// steps separately.
-    pub async fn insert_with_owner(
-        pool: &DbPool,
+    /// steps separately. When `db` is already a caller transaction this
+    /// runs as a savepoint, so it composes.
+    pub async fn insert_with_owner<'c>(
+        db: impl DbConn<'c>,
         repository: &Repository,
         owner_user_id: UserId,
     ) -> Result<(), InsertRepositoryError> {
+        let mut h = crate::conn::open(db).await?;
+        let backend = h.backend();
         let id = repository.id.to_string();
         let owner_type = repository.owner.owner_type_db_str();
         let owner_id = repository.owner.owner_id().to_string();
@@ -102,9 +106,9 @@ impl RepositoryRepo {
         let forked_from = repository.forked_from.map(|id| id.to_string());
         let created_at = crate::now_unix();
 
-        let mut tx = pool.any.begin().await?;
+        let mut tx = h.begin().await?;
 
-        let insert_sql = match pool.backend {
+        let insert_sql = match backend {
             Backend::Postgres => {
                 "INSERT INTO repositories (id, owner_type, owner_id, name, description, visibility, forked_from, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
             }
@@ -112,7 +116,7 @@ impl RepositoryRepo {
                 "INSERT INTO repositories (id, owner_type, owner_id, name, description, visibility, forked_from, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
             }
         };
-        let result = sqlx::query(insert_sql)
+        match sqlx::query(insert_sql)
             .bind(&id)
             .bind(owner_type)
             .bind(&owner_id)
@@ -122,10 +126,11 @@ impl RepositoryRepo {
             .bind(&forked_from)
             .bind(created_at)
             .execute(&mut *tx)
-            .await;
-        match result {
+            .await
+            .map_err(DbError::from)
+        {
             Ok(_) => {}
-            Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
+            Err(DbError::UniqueViolation) => {
                 return Err(InsertRepositoryError::AlreadyExists(
                     repository.name.clone(),
                 ));
@@ -136,7 +141,7 @@ impl RepositoryRepo {
         let owner_user_id_text = owner_user_id.to_string();
         let role = edda_domain::RepoRole::Owner.as_db_str();
         let granted_at = crate::now_unix();
-        let grant_sql = match pool.backend {
+        let grant_sql = match backend {
             Backend::Postgres => {
                 "INSERT INTO repo_access (repository_id, subject_type, subject_id, role, added_at) VALUES ($1, 'user', $2, $3, $4)"
             }
@@ -150,9 +155,10 @@ impl RepositoryRepo {
             .bind(role)
             .bind(granted_at)
             .execute(&mut *tx)
-            .await?;
+            .await
+            .map_err(DbError::from)?;
 
-        tx.commit().await?;
+        tx.commit().await.map_err(DbError::from)?;
         Ok(())
     }
 
@@ -162,11 +168,13 @@ impl RepositoryRepo {
     /// doc comment) instead of to an individual user — `AccessSubject` has
     /// no separate `Organization` variant of its own, so an org-owned
     /// repository's owner grant is always a team grant.
-    pub async fn insert_with_owner_team(
-        pool: &DbPool,
+    pub async fn insert_with_owner_team<'c>(
+        db: impl DbConn<'c>,
         repository: &Repository,
         owner_team_id: TeamId,
     ) -> Result<(), InsertRepositoryError> {
+        let mut h = crate::conn::open(db).await?;
+        let backend = h.backend();
         let id = repository.id.to_string();
         let owner_type = repository.owner.owner_type_db_str();
         let owner_id = repository.owner.owner_id().to_string();
@@ -174,9 +182,9 @@ impl RepositoryRepo {
         let forked_from = repository.forked_from.map(|id| id.to_string());
         let created_at = crate::now_unix();
 
-        let mut tx = pool.any.begin().await?;
+        let mut tx = h.begin().await?;
 
-        let insert_sql = match pool.backend {
+        let insert_sql = match backend {
             Backend::Postgres => {
                 "INSERT INTO repositories (id, owner_type, owner_id, name, description, visibility, forked_from, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
             }
@@ -184,7 +192,7 @@ impl RepositoryRepo {
                 "INSERT INTO repositories (id, owner_type, owner_id, name, description, visibility, forked_from, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
             }
         };
-        let result = sqlx::query(insert_sql)
+        match sqlx::query(insert_sql)
             .bind(&id)
             .bind(owner_type)
             .bind(&owner_id)
@@ -194,10 +202,11 @@ impl RepositoryRepo {
             .bind(&forked_from)
             .bind(created_at)
             .execute(&mut *tx)
-            .await;
-        match result {
+            .await
+            .map_err(DbError::from)
+        {
             Ok(_) => {}
-            Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
+            Err(DbError::UniqueViolation) => {
                 return Err(InsertRepositoryError::AlreadyExists(
                     repository.name.clone(),
                 ));
@@ -208,7 +217,7 @@ impl RepositoryRepo {
         let owner_team_id_text = owner_team_id.to_string();
         let role = edda_domain::RepoRole::Owner.as_db_str();
         let granted_at = crate::now_unix();
-        let grant_sql = match pool.backend {
+        let grant_sql = match backend {
             Backend::Postgres => {
                 "INSERT INTO repo_access (repository_id, subject_type, subject_id, role, added_at) VALUES ($1, 'team', $2, $3, $4)"
             }
@@ -222,20 +231,22 @@ impl RepositoryRepo {
             .bind(role)
             .bind(granted_at)
             .execute(&mut *tx)
-            .await?;
+            .await
+            .map_err(DbError::from)?;
 
-        tx.commit().await?;
+        tx.commit().await.map_err(DbError::from)?;
         Ok(())
     }
 
-    pub async fn find_by_owner_and_name(
-        pool: &DbPool,
+    pub async fn find_by_owner_and_name<'c>(
+        db: impl DbConn<'c>,
         owner: RepositoryOwner,
         name: &str,
-    ) -> Result<Option<Repository>, sqlx::Error> {
+    ) -> Result<Option<Repository>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let owner_type = owner.owner_type_db_str();
         let owner_id = owner.owner_id().to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 r#"SELECT id, owner_type, owner_id, name, description, visibility, forked_from
                    FROM repositories WHERE owner_type = $1 AND owner_id = $2 AND name = $3"#
@@ -249,7 +260,7 @@ impl RepositoryRepo {
             .bind(owner_type)
             .bind(&owner_id)
             .bind(name)
-            .fetch_optional(&pool.any)
+            .fetch_optional(&mut *h.conn())
             .await?;
         row.map(row_to_repository_row).transpose()
     }
@@ -260,15 +271,17 @@ impl RepositoryRepo {
     /// creation paths both enforce that at write time), so this resolves
     /// unambiguously: at most one of the two lookups below can ever find a
     /// match.
-    pub async fn resolve_owner(
-        pool: &DbPool,
+    pub async fn resolve_owner<'c>(
+        db: impl DbConn<'c>,
         owner_name: &str,
-    ) -> Result<Option<RepositoryOwner>, sqlx::Error> {
-        if let Some(user) = crate::user_repo::UserRepo::find_by_username(pool, owner_name).await? {
+    ) -> Result<Option<RepositoryOwner>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        if let Some(user) = crate::user_repo::UserRepo::find_by_username(&mut h, owner_name).await?
+        {
             return Ok(Some(RepositoryOwner::User(user.id)));
         }
         if let Some(org) =
-            crate::organization_repo::OrganizationRepo::find_by_name(pool, owner_name).await?
+            crate::organization_repo::OrganizationRepo::find_by_name(&mut h, owner_name).await?
         {
             return Ok(Some(RepositoryOwner::Organization(org.id)));
         }
@@ -277,23 +290,25 @@ impl RepositoryRepo {
 
     /// Resolves the `{owner_username}/{repo_name}` form used in URLs and
     /// clone paths back to a `Repository` row.
-    pub async fn find_by_owner_username_and_name(
-        pool: &DbPool,
+    pub async fn find_by_owner_username_and_name<'c>(
+        db: impl DbConn<'c>,
         owner_username: &str,
         name: &str,
-    ) -> Result<Option<Repository>, sqlx::Error> {
-        let Some(owner) = Self::resolve_owner(pool, owner_username).await? else {
+    ) -> Result<Option<Repository>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let Some(owner) = Self::resolve_owner(&mut h, owner_username).await? else {
             return Ok(None);
         };
-        Self::find_by_owner_and_name(pool, owner, name).await
+        Self::find_by_owner_and_name(&mut h, owner, name).await
     }
 
-    pub async fn find_by_id(
-        pool: &DbPool,
+    pub async fn find_by_id<'c>(
+        db: impl DbConn<'c>,
         id: RepositoryId,
-    ) -> Result<Option<Repository>, sqlx::Error> {
+    ) -> Result<Option<Repository>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let id_text = id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT id, owner_type, owner_id, name, description, visibility, forked_from FROM repositories WHERE id = $1"
             }
@@ -303,7 +318,7 @@ impl RepositoryRepo {
         };
         let row = sqlx::query(sql)
             .bind(&id_text)
-            .fetch_optional(&pool.any)
+            .fetch_optional(&mut *h.conn())
             .await?;
         row.map(row_to_repository_row).transpose()
     }
@@ -313,11 +328,12 @@ impl RepositoryRepo {
     /// private repo they hold a grant on) — there is no per-owner or
     /// per-visibility variant yet because nothing needs one at the
     /// instance's current expected scale.
-    pub async fn list_all(pool: &DbPool) -> Result<Vec<Repository>, sqlx::Error> {
+    pub async fn list_all<'c>(db: impl DbConn<'c>) -> Result<Vec<Repository>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let rows = sqlx::query(
             "SELECT id, owner_type, owner_id, name, description, visibility, forked_from FROM repositories ORDER BY owner_id, name",
         )
-        .fetch_all(&pool.any)
+        .fetch_all(&mut *h.conn())
         .await?;
         rows.into_iter().map(row_to_repository_row).collect()
     }
@@ -329,9 +345,10 @@ impl RepositoryRepo {
     /// listing DTO needs the `{owner}/{name}` display form, and resolving
     /// that per-row here avoids an N+1 owner-name lookup in `edda-web`'s
     /// `list_repos` server function.
-    pub async fn list_all_with_owner_username(
-        pool: &DbPool,
-    ) -> Result<Vec<(Repository, String)>, sqlx::Error> {
+    pub async fn list_all_with_owner_username<'c>(
+        db: impl DbConn<'c>,
+    ) -> Result<Vec<(Repository, String)>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let rows = sqlx::query(
             r#"SELECT r.id, r.owner_type, r.owner_id, r.name, r.description, r.visibility, r.forked_from,
                       COALESCE(u.username, o.name) as owner_username
@@ -340,7 +357,7 @@ impl RepositoryRepo {
                LEFT JOIN organizations o ON o.id = r.owner_id AND r.owner_type = 'organization'
                ORDER BY owner_username, r.name"#,
         )
-        .fetch_all(&pool.any)
+        .fetch_all(&mut *h.conn())
         .await?;
         rows.into_iter()
             .map(|row| {
@@ -350,13 +367,14 @@ impl RepositoryRepo {
             .collect()
     }
 
-    pub async fn update_description(
-        pool: &DbPool,
+    pub async fn update_description<'c>(
+        db: impl DbConn<'c>,
         id: RepositoryId,
         description: Option<&str>,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let id_text = id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => "UPDATE repositories SET description = $1 WHERE id = $2",
             Backend::Sqlite | Backend::MySql => {
                 "UPDATE repositories SET description = ? WHERE id = ?"
@@ -365,19 +383,20 @@ impl RepositoryRepo {
         sqlx::query(sql)
             .bind(description)
             .bind(&id_text)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
 
-    pub async fn update_visibility(
-        pool: &DbPool,
+    pub async fn update_visibility<'c>(
+        db: impl DbConn<'c>,
         id: RepositoryId,
         visibility: Visibility,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let id_text = id.to_string();
         let visibility = visibility.as_db_str();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => "UPDATE repositories SET visibility = $1 WHERE id = $2",
             Backend::Sqlite | Backend::MySql => {
                 "UPDATE repositories SET visibility = ? WHERE id = ?"
@@ -386,23 +405,27 @@ impl RepositoryRepo {
         sqlx::query(sql)
             .bind(visibility)
             .bind(&id_text)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
 
-    pub async fn delete(pool: &DbPool, id: RepositoryId) -> Result<(), sqlx::Error> {
+    pub async fn delete<'c>(db: impl DbConn<'c>, id: RepositoryId) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let id_text = id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => "DELETE FROM repositories WHERE id = $1",
             Backend::Sqlite | Backend::MySql => "DELETE FROM repositories WHERE id = ?",
         };
-        sqlx::query(sql).bind(&id_text).execute(&pool.any).await?;
+        sqlx::query(sql)
+            .bind(&id_text)
+            .execute(&mut *h.conn())
+            .await?;
         Ok(())
     }
 }
 
-fn row_to_repository_row(row: sqlx::any::AnyRow) -> Result<Repository, sqlx::Error> {
+fn row_to_repository_row(row: sqlx::any::AnyRow) -> Result<Repository, DbError> {
     Ok(row_to_repository(
         get_string(&row, "id")?,
         get_string(&row, "owner_type")?,

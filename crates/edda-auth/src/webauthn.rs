@@ -90,7 +90,7 @@ pub enum WebauthnError {
     #[error("that passkey response was not valid")]
     InvalidResponse,
     #[error(transparent)]
-    Db(#[from] sqlx::Error),
+    Db(#[from] edda_db::DbError),
 }
 
 /// This instance's Relying Party identity. `rp_id` is the registrable
@@ -520,7 +520,7 @@ pub async fn finish_authentication(
 pub async fn list(
     pool: &DbPool,
     user_id: UserId,
-) -> Result<Vec<WebauthnCredentialRow>, sqlx::Error> {
+) -> Result<Vec<WebauthnCredentialRow>, edda_db::DbError> {
     WebauthnRepo::list_for_user(pool, user_id).await
 }
 
@@ -528,7 +528,7 @@ pub async fn revoke(
     pool: &DbPool,
     user_id: UserId,
     id: WebauthnCredentialId,
-) -> Result<bool, sqlx::Error> {
+) -> Result<bool, edda_db::DbError> {
     WebauthnRepo::delete(pool, user_id, id).await
 }
 

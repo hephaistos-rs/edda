@@ -45,7 +45,7 @@ async fn disabling_a_user_via_the_cli_blocks_their_next_login() {
         db_path.to_str().unwrap().replace('\\', "/")
     );
 
-    let pool = edda_db::pool(&db_url)
+    let pool = edda_db::pool(&db_url, edda_db::PoolOptions::default())
         .await
         .expect("connect and migrate test database");
 

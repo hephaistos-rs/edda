@@ -90,11 +90,23 @@ enforce "only edda-http::config + the binaries read EDDA_* / IP / PORT from the 
         | grep -vE 'edda-http/src/config\.rs|edda-telemetry/src/config\.rs|/src/main\.rs|/tests/|EDDA_TEST_' \
         || true)"
 
+# One persistence boundary (plan.local.md §5.1 / Phase 2): SQL, `sqlx`
+# types, and `sqlx::Error` live only in `edda-db`; every other crate names
+# `edda_db::DbError` and the narrow repo methods instead. Exceptions, each
+# deliberate:
+#   - app/edda-web/src/session_store.rs — `tower-sessions-sqlx-store` needs
+#     a *concrete* `SqlitePool`/`PgPool`/`MySqlPool` that `AnyPool` can't
+#     provide; this one composition-root module opens that typed pool
+#     itself (moves into the `edda` binary in Phase 4).
+#   - tests/ dirs — integration-test harnesses stand up their own session
+#     store / fixtures the same way.
+enforce "sqlx types stay inside crates/edda-db/" \
+    "$(g '\bsqlx::' --include=*.rs crates app \
+        | grep -vE 'crates/edda-db/|app/edda-web/src/session_store\.rs|/tests/' \
+        || true)"
+
 echo
 echo "── PENDING (target invariants, not yet enforced) ────────"
-
-pending "Phase 2" "sqlx:: outside crates/edda-db/" \
-    "$(g '\bsqlx::' --include=*.rs crates app | grep -v 'crates/edda-db/' || true)"
 
 pending "Phase 4" "axum:: / http:: outside the HTTP app crate" \
     "$(g '\b(axum|http)::' --include=*.rs crates app | grep -vE 'crates/edda-http/|:[0-9]+:\s*(//|//!)' || true)"

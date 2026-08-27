@@ -5,7 +5,7 @@
 
 use edda_domain::AuditEventId;
 
-use crate::{get_i64, get_opt_string, get_string, Backend, DbPool};
+use crate::{get_i64, get_opt_string, get_string, Backend, DbConn, DbError};
 
 #[derive(Debug, Clone)]
 pub struct AuditEvent {
@@ -22,18 +22,19 @@ pub struct AuditEventRepo;
 
 impl AuditEventRepo {
     #[allow(clippy::too_many_arguments)]
-    pub async fn insert(
-        pool: &DbPool,
+    pub async fn insert<'c>(
+        db: impl DbConn<'c>,
         id: AuditEventId,
         event_type: &str,
         actor_id: Option<&str>,
         target_type: Option<&str>,
         target_id: Option<&str>,
         detail_json: Option<&str>,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let id_text = id.to_string();
         let occurred_at = crate::now_unix();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "INSERT INTO audit_events (id, occurred_at, event_type, actor_id, target_type, target_id, detail_json)
                  VALUES ($1, $2, $3, $4, $5, $6, $7)"
@@ -51,7 +52,7 @@ impl AuditEventRepo {
             .bind(target_type)
             .bind(target_id)
             .bind(detail_json)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
@@ -60,8 +61,12 @@ impl AuditEventRepo {
     /// paginated, matching this codebase's existing "no pagination yet,
     /// solo-developer scale" precedent (see `UserRepo::list_all`'s own
     /// comment on this).
-    pub async fn list_recent(pool: &DbPool, limit: i64) -> Result<Vec<AuditEvent>, sqlx::Error> {
-        let sql = match pool.backend {
+    pub async fn list_recent<'c>(
+        db: impl DbConn<'c>,
+        limit: i64,
+    ) -> Result<Vec<AuditEvent>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT id, occurred_at, event_type, actor_id, target_type, target_id, detail_json
                  FROM audit_events ORDER BY occurred_at DESC LIMIT $1"
@@ -71,7 +76,10 @@ impl AuditEventRepo {
                  FROM audit_events ORDER BY occurred_at DESC LIMIT ?"
             }
         };
-        let rows = sqlx::query(sql).bind(limit).fetch_all(&pool.any).await?;
+        let rows = sqlx::query(sql)
+            .bind(limit)
+            .fetch_all(&mut *h.conn())
+            .await?;
         rows.into_iter()
             .map(|row| {
                 Ok(AuditEvent {

@@ -4,19 +4,19 @@
 use edda_domain::{CloseReason, Issue, IssueId, IssueState, MilestoneId, RepositoryId, UserId};
 
 use crate::repo_number_repo::{NextNumberError, RepoNumberRepo};
-use crate::{get_i64, get_opt_i64, get_opt_string, get_string, Backend, DbPool};
+use crate::{get_i64, get_opt_i64, get_opt_string, get_string, Backend, DbConn, DbError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum InsertIssueError {
     #[error(transparent)]
     NextNumber(#[from] NextNumberError),
     #[error(transparent)]
-    Db(#[from] sqlx::Error),
+    Db(#[from] DbError),
 }
 
 const COLUMNS: &str = "id, repository_id, number, title, body, author_id, state, closed_at, close_reason, milestone_id, created_at";
 
-fn row_to_issue(row: sqlx::any::AnyRow) -> Result<Issue, sqlx::Error> {
+fn row_to_issue(row: sqlx::any::AnyRow) -> Result<Issue, DbError> {
     let state_str = get_string(&row, "state")?;
     let state = match state_str.as_str() {
         "open" => IssueState::Open,
@@ -53,21 +53,22 @@ fn row_to_issue(row: sqlx::any::AnyRow) -> Result<Issue, sqlx::Error> {
 pub struct IssueRepo;
 
 impl IssueRepo {
-    pub async fn insert(
-        pool: &DbPool,
+    pub async fn insert<'c>(
+        db: impl DbConn<'c>,
         id: IssueId,
         repository_id: RepositoryId,
         title: &str,
         body: Option<&str>,
         author_id: UserId,
     ) -> Result<i64, InsertIssueError> {
-        let number = RepoNumberRepo::next_number(pool, repository_id).await?;
+        let mut h = crate::conn::open(db).await?;
+        let number = RepoNumberRepo::next_number(&mut h, repository_id).await?;
         let id_text = id.to_string();
         let repository_id_text = repository_id.to_string();
         let author_id_text = author_id.to_string();
         let created_at = crate::now_unix();
 
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "INSERT INTO issues (id, repository_id, number, title, body, author_id, state, created_at) VALUES ($1, $2, $3, $4, $5, $6, 'open', $7)"
             }
@@ -83,14 +84,19 @@ impl IssueRepo {
             .bind(body)
             .bind(&author_id_text)
             .bind(created_at)
-            .execute(&pool.any)
-            .await?;
+            .execute(&mut *h.conn())
+            .await
+            .map_err(DbError::from)?;
         Ok(number)
     }
 
-    pub async fn find_by_id(pool: &DbPool, id: IssueId) -> Result<Option<Issue>, sqlx::Error> {
+    pub async fn find_by_id<'c>(
+        db: impl DbConn<'c>,
+        id: IssueId,
+    ) -> Result<Option<Issue>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let id_text = id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => format!("SELECT {COLUMNS} FROM issues WHERE id = $1"),
             Backend::Sqlite | Backend::MySql => {
                 format!("SELECT {COLUMNS} FROM issues WHERE id = ?")
@@ -98,18 +104,19 @@ impl IssueRepo {
         };
         let row = sqlx::query(&sql)
             .bind(&id_text)
-            .fetch_optional(&pool.any)
+            .fetch_optional(&mut *h.conn())
             .await?;
         row.map(row_to_issue).transpose()
     }
 
-    pub async fn find_by_repository_and_number(
-        pool: &DbPool,
+    pub async fn find_by_repository_and_number<'c>(
+        db: impl DbConn<'c>,
         repository_id: RepositoryId,
         number: i64,
-    ) -> Result<Option<Issue>, sqlx::Error> {
+    ) -> Result<Option<Issue>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let repository_id_text = repository_id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 format!("SELECT {COLUMNS} FROM issues WHERE repository_id = $1 AND number = $2")
             }
@@ -120,17 +127,18 @@ impl IssueRepo {
         let row = sqlx::query(&sql)
             .bind(&repository_id_text)
             .bind(number)
-            .fetch_optional(&pool.any)
+            .fetch_optional(&mut *h.conn())
             .await?;
         row.map(row_to_issue).transpose()
     }
 
-    pub async fn list_for_repository(
-        pool: &DbPool,
+    pub async fn list_for_repository<'c>(
+        db: impl DbConn<'c>,
         repository_id: RepositoryId,
-    ) -> Result<Vec<Issue>, sqlx::Error> {
+    ) -> Result<Vec<Issue>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let repository_id_text = repository_id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 format!(
                     "SELECT {COLUMNS} FROM issues WHERE repository_id = $1 ORDER BY number DESC"
@@ -142,16 +150,17 @@ impl IssueRepo {
         };
         let rows = sqlx::query(&sql)
             .bind(&repository_id_text)
-            .fetch_all(&pool.any)
+            .fetch_all(&mut *h.conn())
             .await?;
         rows.into_iter().map(row_to_issue).collect()
     }
 
-    pub async fn update_state(
-        pool: &DbPool,
+    pub async fn update_state<'c>(
+        db: impl DbConn<'c>,
         id: IssueId,
         state: &IssueState,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let (state_str, closed_at, close_reason) = match state {
             IssueState::Open => ("open", None, None),
             IssueState::Closed { closed_at, reason } => {
@@ -159,7 +168,7 @@ impl IssueRepo {
             }
         };
         let id_text = id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "UPDATE issues SET state = $1, closed_at = $2, close_reason = $3 WHERE id = $4"
             }
@@ -172,26 +181,27 @@ impl IssueRepo {
             .bind(closed_at)
             .bind(close_reason)
             .bind(&id_text)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
 
-    pub async fn set_milestone(
-        pool: &DbPool,
+    pub async fn set_milestone<'c>(
+        db: impl DbConn<'c>,
         id: IssueId,
         milestone_id: Option<MilestoneId>,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let id_text = id.to_string();
         let milestone_id_text = milestone_id.map(|id| id.to_string());
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => "UPDATE issues SET milestone_id = $1 WHERE id = $2",
             Backend::Sqlite | Backend::MySql => "UPDATE issues SET milestone_id = ? WHERE id = ?",
         };
         sqlx::query(sql)
             .bind(&milestone_id_text)
             .bind(&id_text)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }

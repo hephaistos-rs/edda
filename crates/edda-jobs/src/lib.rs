@@ -68,7 +68,7 @@ fn jitter_unit() -> f64 {
 /// Enqueues one job, due immediately, with this crate's default retry
 /// budget. The narrow primitive every fan-out (`dispatch`, or a handler
 /// that itself needs to enqueue follow-up work) builds on.
-pub async fn enqueue(pool: &DbPool, payload: JobPayload) -> Result<(), sqlx::Error> {
+pub async fn enqueue(pool: &DbPool, payload: JobPayload) -> Result<(), edda_db::DbError> {
     let id = JobId::new();
     JobRepo::enqueue(pool, id, &payload, now_unix(), DEFAULT_MAX_ATTEMPTS).await
 }
@@ -93,7 +93,7 @@ pub async fn dispatch(
     event: &DomainEvent,
     webhook_payload_json: Option<&str>,
     mention_email: Option<EmailContent<'_>>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), edda_db::DbError> {
     match *event {
         DomainEvent::PullRequestMerged { repository_id, .. } => {
             let payload_json = webhook_payload_json.unwrap_or("{}").to_string();

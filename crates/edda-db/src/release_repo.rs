@@ -2,7 +2,7 @@
 
 use edda_domain::{Release, ReleaseAsset, ReleaseAssetId, ReleaseId, RepositoryId, UserId};
 
-use crate::{get_bool, get_i64, get_opt_i64, get_opt_string, get_string, Backend, DbPool};
+use crate::{get_bool, get_i64, get_opt_i64, get_opt_string, get_string, Backend, DbConn, DbError};
 
 pub struct NewRelease<'a> {
     pub tag_name: &'a str,
@@ -19,7 +19,7 @@ pub enum InsertReleaseError {
     #[error("a release for this tag already exists")]
     AlreadyExists,
     #[error(transparent)]
-    Db(#[from] sqlx::Error),
+    Db(#[from] DbError),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -55,7 +55,7 @@ fn row_to_release(
 
 const RELEASE_COLUMNS: &str = "id, repository_id, tag_name, target_commit, name, body, draft, prerelease, published_at, author_id, created_at";
 
-fn row_to_release_from_sqlx(row: &sqlx::any::AnyRow) -> Result<Release, sqlx::Error> {
+fn row_to_release_from_sqlx(row: &sqlx::any::AnyRow) -> Result<Release, DbError> {
     Ok(row_to_release(
         get_string(row, "id")?,
         get_string(row, "repository_id")?,
@@ -74,12 +74,13 @@ fn row_to_release_from_sqlx(row: &sqlx::any::AnyRow) -> Result<Release, sqlx::Er
 pub struct ReleaseRepo;
 
 impl ReleaseRepo {
-    pub async fn insert(
-        pool: &DbPool,
+    pub async fn insert<'c>(
+        db: impl DbConn<'c>,
         id: ReleaseId,
         repository_id: RepositoryId,
         new: NewRelease<'_>,
     ) -> Result<(), InsertReleaseError> {
+        let mut h = crate::conn::open(db).await?;
         let id_text = id.to_string();
         let repository_id_text = repository_id.to_string();
         let author_id_text = new.author_id.to_string();
@@ -92,7 +93,7 @@ impl ReleaseRepo {
         };
         let created_at = crate::now_unix();
 
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "INSERT INTO releases (id, repository_id, tag_name, target_commit, name, body, draft, prerelease, published_at, author_id, created_at)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
@@ -102,7 +103,7 @@ impl ReleaseRepo {
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             }
         };
-        let result = sqlx::query(sql)
+        match sqlx::query(sql)
             .bind(&id_text)
             .bind(&repository_id_text)
             .bind(new.tag_name)
@@ -114,40 +115,41 @@ impl ReleaseRepo {
             .bind(published_at)
             .bind(&author_id_text)
             .bind(created_at)
-            .execute(&pool.any)
-            .await;
-
-        match result {
+            .execute(&mut *h.conn())
+            .await
+            .map_err(DbError::from)
+        {
             Ok(_) => Ok(()),
-            Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
-                Err(InsertReleaseError::AlreadyExists)
-            }
+            Err(DbError::UniqueViolation) => Err(InsertReleaseError::AlreadyExists),
             Err(err) => Err(InsertReleaseError::Db(err)),
         }
     }
 
-    pub async fn find_by_id(pool: &DbPool, id: ReleaseId) -> Result<Option<Release>, sqlx::Error> {
-        let sql = format!(
-            "SELECT {RELEASE_COLUMNS} FROM releases WHERE id = {}",
-            if pool.backend == Backend::Postgres {
-                "$1"
-            } else {
-                "?"
-            }
-        );
+    pub async fn find_by_id<'c>(
+        db: impl DbConn<'c>,
+        id: ReleaseId,
+    ) -> Result<Option<Release>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let placeholder = if h.backend() == Backend::Postgres {
+            "$1"
+        } else {
+            "?"
+        };
+        let sql = format!("SELECT {RELEASE_COLUMNS} FROM releases WHERE id = {placeholder}");
         let row = sqlx::query(&sql)
             .bind(id.to_string())
-            .fetch_optional(&pool.any)
+            .fetch_optional(&mut *h.conn())
             .await?;
         row.as_ref().map(row_to_release_from_sqlx).transpose()
     }
 
-    pub async fn find_by_repository_and_tag(
-        pool: &DbPool,
+    pub async fn find_by_repository_and_tag<'c>(
+        db: impl DbConn<'c>,
         repository_id: RepositoryId,
         tag_name: &str,
-    ) -> Result<Option<Release>, sqlx::Error> {
-        let sql = match pool.backend {
+    ) -> Result<Option<Release>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Postgres => format!(
                 "SELECT {RELEASE_COLUMNS} FROM releases WHERE repository_id = $1 AND tag_name = $2"
             ),
@@ -158,18 +160,19 @@ impl ReleaseRepo {
         let row = sqlx::query(&sql)
             .bind(repository_id.to_string())
             .bind(tag_name)
-            .fetch_optional(&pool.any)
+            .fetch_optional(&mut *h.conn())
             .await?;
         row.as_ref().map(row_to_release_from_sqlx).transpose()
     }
 
     /// Newest-published first (drafts last, since they have no
     /// `published_at` to sort by) — the repository's release list view.
-    pub async fn list_for_repository(
-        pool: &DbPool,
+    pub async fn list_for_repository<'c>(
+        db: impl DbConn<'c>,
         repository_id: RepositoryId,
-    ) -> Result<Vec<Release>, sqlx::Error> {
-        let sql = match pool.backend {
+    ) -> Result<Vec<Release>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Postgres => format!(
                 "SELECT {RELEASE_COLUMNS} FROM releases WHERE repository_id = $1 ORDER BY published_at IS NULL, published_at DESC, created_at DESC"
             ),
@@ -179,7 +182,7 @@ impl ReleaseRepo {
         };
         let rows = sqlx::query(&sql)
             .bind(repository_id.to_string())
-            .fetch_all(&pool.any)
+            .fetch_all(&mut *h.conn())
             .await?;
         rows.iter().map(row_to_release_from_sqlx).collect()
     }
@@ -210,17 +213,18 @@ fn row_to_asset(
 pub struct ReleaseAssetRepo;
 
 impl ReleaseAssetRepo {
-    pub async fn insert(
-        pool: &DbPool,
+    pub async fn insert<'c>(
+        db: impl DbConn<'c>,
         id: ReleaseAssetId,
         release_id: ReleaseId,
         filename: &str,
         size_bytes: i64,
         content_type: &str,
         storage_key: &str,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let created_at = crate::now_unix();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "INSERT INTO release_assets (id, release_id, filename, size_bytes, content_type, storage_key, created_at)
                  VALUES ($1, $2, $3, $4, $5, $6, $7)"
@@ -238,16 +242,17 @@ impl ReleaseAssetRepo {
             .bind(content_type)
             .bind(storage_key)
             .bind(created_at)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
 
-    pub async fn list_for_release(
-        pool: &DbPool,
+    pub async fn list_for_release<'c>(
+        db: impl DbConn<'c>,
         release_id: ReleaseId,
-    ) -> Result<Vec<ReleaseAsset>, sqlx::Error> {
-        let sql = match pool.backend {
+    ) -> Result<Vec<ReleaseAsset>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT id, release_id, filename, size_bytes, content_type, storage_key, created_at
                  FROM release_assets WHERE release_id = $1 ORDER BY filename"
@@ -259,7 +264,7 @@ impl ReleaseAssetRepo {
         };
         let rows = sqlx::query(sql)
             .bind(release_id.to_string())
-            .fetch_all(&pool.any)
+            .fetch_all(&mut *h.conn())
             .await?;
         rows.into_iter()
             .map(|row| {
@@ -276,12 +281,13 @@ impl ReleaseAssetRepo {
             .collect()
     }
 
-    pub async fn find_by_release_and_filename(
-        pool: &DbPool,
+    pub async fn find_by_release_and_filename<'c>(
+        db: impl DbConn<'c>,
         release_id: ReleaseId,
         filename: &str,
-    ) -> Result<Option<ReleaseAsset>, sqlx::Error> {
-        let sql = match pool.backend {
+    ) -> Result<Option<ReleaseAsset>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT id, release_id, filename, size_bytes, content_type, storage_key, created_at
                  FROM release_assets WHERE release_id = $1 AND filename = $2"
@@ -294,7 +300,7 @@ impl ReleaseAssetRepo {
         let row = sqlx::query(sql)
             .bind(release_id.to_string())
             .bind(filename)
-            .fetch_optional(&pool.any)
+            .fetch_optional(&mut *h.conn())
             .await?;
         row.map(|row| {
             Ok(row_to_asset(

@@ -1,6 +1,6 @@
 use edda_domain::{AccessToken, AccessTokenId, RepositoryScope, User, UserId};
 
-use crate::{get_bool, get_i64, get_opt_i64, get_string, Backend, DbPool};
+use crate::{get_bool, get_i64, get_opt_i64, get_string, Backend, DbConn, DbError};
 
 fn scope_to_json(scope: &RepositoryScope) -> String {
     serde_json::to_string(scope).expect("RepositoryScope always serializes")
@@ -14,19 +14,20 @@ fn scope_from_json(json: &str) -> RepositoryScope {
 pub struct AccessTokenRepo;
 
 impl AccessTokenRepo {
-    pub async fn insert(
-        pool: &DbPool,
+    pub async fn insert<'c>(
+        db: impl DbConn<'c>,
         id: AccessTokenId,
         user_id: UserId,
         name: &str,
         token_hash: &str,
         repository_scope: &RepositoryScope,
-    ) -> Result<i64, sqlx::Error> {
+    ) -> Result<i64, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let id_text = id.to_string();
         let user_id_text = user_id.to_string();
         let scope_json = scope_to_json(repository_scope);
         let created_at = crate::now_unix();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "INSERT INTO access_tokens (id, user_id, name, token_hash, repository_scope, created_at) VALUES ($1, $2, $3, $4, $5, $6)"
             }
@@ -41,17 +42,18 @@ impl AccessTokenRepo {
             .bind(token_hash)
             .bind(&scope_json)
             .bind(created_at)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(created_at)
     }
 
-    pub async fn list_for_user(
-        pool: &DbPool,
+    pub async fn list_for_user<'c>(
+        db: impl DbConn<'c>,
         user_id: UserId,
-    ) -> Result<Vec<AccessToken>, sqlx::Error> {
+    ) -> Result<Vec<AccessToken>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let user_id_text = user_id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT id, name, repository_scope, created_at, last_used_at FROM access_tokens WHERE user_id = $1 ORDER BY created_at DESC"
             }
@@ -61,7 +63,7 @@ impl AccessTokenRepo {
         };
         let rows = sqlx::query(sql)
             .bind(&user_id_text)
-            .fetch_all(&pool.any)
+            .fetch_all(&mut *h.conn())
             .await?;
         rows.into_iter()
             .map(|row| {
@@ -82,14 +84,15 @@ impl AccessTokenRepo {
     /// `Ok(true)` if a token owned by `user_id` was revoked — deliberately
     /// scoped to that owner, so revoking someone else's token by guessing
     /// its id looks identical to "no such token."
-    pub async fn revoke(
-        pool: &DbPool,
+    pub async fn revoke<'c>(
+        db: impl DbConn<'c>,
         user_id: UserId,
         token_id: AccessTokenId,
-    ) -> Result<bool, sqlx::Error> {
+    ) -> Result<bool, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let user_id_text = user_id.to_string();
         let token_id_text = token_id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => "DELETE FROM access_tokens WHERE id = $1 AND user_id = $2",
             Backend::Sqlite | Backend::MySql => {
                 "DELETE FROM access_tokens WHERE id = ? AND user_id = ?"
@@ -98,7 +101,7 @@ impl AccessTokenRepo {
         let result = sqlx::query(sql)
             .bind(&token_id_text)
             .bind(&user_id_text)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(result.rows_affected() > 0)
     }
@@ -107,11 +110,12 @@ impl AccessTokenRepo {
     /// token's own scope. Also best-effort records `last_used_at` — a
     /// failure to record that shouldn't fail the authentication it's just
     /// accounting for.
-    pub async fn find_by_hash(
-        pool: &DbPool,
+    pub async fn find_by_hash<'c>(
+        db: impl DbConn<'c>,
         token_hash: &str,
-    ) -> Result<Option<(User, RepositoryScope)>, sqlx::Error> {
-        let select_sql = match pool.backend {
+    ) -> Result<Option<(User, RepositoryScope)>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let select_sql = match h.backend() {
             Backend::Postgres => {
                 r#"SELECT u.id as user_id, u.username, u.email, u.is_admin, u.disabled_at, t.repository_scope
                    FROM access_tokens t JOIN users u ON u.id = t.user_id
@@ -125,12 +129,12 @@ impl AccessTokenRepo {
         };
         let row = sqlx::query(select_sql)
             .bind(token_hash)
-            .fetch_optional(&pool.any)
+            .fetch_optional(&mut *h.conn())
             .await?;
         let Some(row) = row else { return Ok(None) };
 
         let last_used_at = crate::now_unix();
-        let update_sql = match pool.backend {
+        let update_sql = match h.backend() {
             Backend::Postgres => "UPDATE access_tokens SET last_used_at = $1 WHERE token_hash = $2",
             Backend::Sqlite | Backend::MySql => {
                 "UPDATE access_tokens SET last_used_at = ? WHERE token_hash = ?"
@@ -139,7 +143,7 @@ impl AccessTokenRepo {
         let _ = sqlx::query(update_sql)
             .bind(last_used_at)
             .bind(token_hash)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await;
 
         let user = User {

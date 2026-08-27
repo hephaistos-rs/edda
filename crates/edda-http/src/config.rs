@@ -15,6 +15,7 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
 
 /// One thing wrong with the environment. Carries the variable name so the
 /// startup error can point at exactly what to fix.
@@ -118,10 +119,26 @@ pub struct SshConfig {
 }
 
 /// The resolved database connection URL — `EDDA_DATABASE_URL` verbatim, or
-/// a SQLite file under the data dir when unset (the zero-config default).
+/// a SQLite file under the data dir when unset (the zero-config default) —
+/// plus the connection-pool tunables `edda_db::pool` needs.
 #[derive(Debug, Clone)]
 pub struct DbConfig {
     pub url: String,
+    /// `EDDA_DB_MAX_CONNECTIONS` (default 10).
+    pub max_connections: u32,
+    /// `EDDA_DB_ACQUIRE_TIMEOUT_SECONDS` (default 30).
+    pub acquire_timeout: Duration,
+}
+
+impl DbConfig {
+    /// The shape `edda_db::pool` takes.
+    #[must_use]
+    pub fn pool_options(&self) -> edda_db::PoolOptions {
+        edda_db::PoolOptions {
+            max_connections: self.max_connections,
+            acquire_timeout: self.acquire_timeout,
+        }
+    }
 }
 
 /// Where bare repositories live on disk (`{data_dir}/repos`).
@@ -270,6 +287,14 @@ impl Settings {
         };
 
         let db_url = edda_db::effective_url(env.get("EDDA_DATABASE_URL").as_deref(), &data_dir);
+        let db_max_connections = env.parse_or::<u32>("EDDA_DB_MAX_CONNECTIONS", 10);
+        if db_max_connections == 0 {
+            env.fail("EDDA_DB_MAX_CONNECTIONS", "must be greater than 0");
+        }
+        let db_acquire_timeout_secs = env.parse_or::<u64>("EDDA_DB_ACQUIRE_TIMEOUT_SECONDS", 30);
+        if db_acquire_timeout_secs == 0 {
+            env.fail("EDDA_DB_ACQUIRE_TIMEOUT_SECONDS", "must be greater than 0");
+        }
 
         let secret_keys = parse_secret_keys(&mut env);
         let webauthn = parse_webauthn(&mut env);
@@ -298,7 +323,11 @@ impl Settings {
                 bind: SocketAddr::new(ip, ssh_port),
                 host_key_path: data_dir.join("ssh_host_ed25519_key"),
             },
-            db: DbConfig { url: db_url },
+            db: DbConfig {
+                url: db_url,
+                max_connections: db_max_connections,
+                acquire_timeout: Duration::from_secs(db_acquire_timeout_secs),
+            },
             git: GitConfig {
                 repo_root: data_dir.join("repos"),
             },

@@ -6,22 +6,23 @@
 
 use edda_domain::{OAuthIdentity, OAuthIdentityId, UserId};
 
-use crate::{get_i64, get_string, Backend, DbPool};
+use crate::{get_i64, get_string, Backend, DbConn, DbError};
 
 pub struct OAuthIdentityRepo;
 
 impl OAuthIdentityRepo {
-    pub async fn insert(
-        pool: &DbPool,
+    pub async fn insert<'c>(
+        db: impl DbConn<'c>,
         id: OAuthIdentityId,
         user_id: UserId,
         provider: &str,
         subject_id: &str,
-    ) -> Result<i64, sqlx::Error> {
+    ) -> Result<i64, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let id_text = id.to_string();
         let user_id_text = user_id.to_string();
         let created_at = crate::now_unix();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "INSERT INTO oauth_identities (id, user_id, provider, subject_id, created_at) VALUES ($1, $2, $3, $4, $5)"
             }
@@ -35,19 +36,20 @@ impl OAuthIdentityRepo {
             .bind(provider)
             .bind(subject_id)
             .bind(created_at)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(created_at)
     }
 
     /// The lookup a returning OAuth login resolves through — the only way
     /// this repo ever resolves an identity to a user.
-    pub async fn find_by_provider_subject(
-        pool: &DbPool,
+    pub async fn find_by_provider_subject<'c>(
+        db: impl DbConn<'c>,
         provider: &str,
         subject_id: &str,
-    ) -> Result<Option<OAuthIdentity>, sqlx::Error> {
-        let sql = match pool.backend {
+    ) -> Result<Option<OAuthIdentity>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT id, user_id, provider, subject_id, created_at FROM oauth_identities WHERE provider = $1 AND subject_id = $2"
             }
@@ -58,17 +60,18 @@ impl OAuthIdentityRepo {
         let row = sqlx::query(sql)
             .bind(provider)
             .bind(subject_id)
-            .fetch_optional(&pool.any)
+            .fetch_optional(&mut *h.conn())
             .await?;
         row.map(row_to_identity).transpose()
     }
 
-    pub async fn list_for_user(
-        pool: &DbPool,
+    pub async fn list_for_user<'c>(
+        db: impl DbConn<'c>,
         user_id: UserId,
-    ) -> Result<Vec<OAuthIdentity>, sqlx::Error> {
+    ) -> Result<Vec<OAuthIdentity>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let user_id_text = user_id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT id, user_id, provider, subject_id, created_at FROM oauth_identities WHERE user_id = $1 ORDER BY created_at DESC"
             }
@@ -78,7 +81,7 @@ impl OAuthIdentityRepo {
         };
         let rows = sqlx::query(sql)
             .bind(&user_id_text)
-            .fetch_all(&pool.any)
+            .fetch_all(&mut *h.conn())
             .await?;
         rows.into_iter().map(row_to_identity).collect()
     }
@@ -87,14 +90,15 @@ impl OAuthIdentityRepo {
     /// the same way `SshKeyRepo::revoke`/`AccessTokenRepo::revoke` are, so
     /// unlinking someone else's identity by guessing its id looks
     /// identical to "no such identity."
-    pub async fn delete(
-        pool: &DbPool,
+    pub async fn delete<'c>(
+        db: impl DbConn<'c>,
         user_id: UserId,
         id: OAuthIdentityId,
-    ) -> Result<bool, sqlx::Error> {
+    ) -> Result<bool, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let user_id_text = user_id.to_string();
         let id_text = id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => "DELETE FROM oauth_identities WHERE id = $1 AND user_id = $2",
             Backend::Sqlite | Backend::MySql => {
                 "DELETE FROM oauth_identities WHERE id = ? AND user_id = ?"
@@ -103,13 +107,13 @@ impl OAuthIdentityRepo {
         let result = sqlx::query(sql)
             .bind(&id_text)
             .bind(&user_id_text)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(result.rows_affected() > 0)
     }
 }
 
-fn row_to_identity(row: sqlx::any::AnyRow) -> Result<OAuthIdentity, sqlx::Error> {
+fn row_to_identity(row: sqlx::any::AnyRow) -> Result<OAuthIdentity, DbError> {
     Ok(OAuthIdentity {
         id: get_string(&row, "id")?
             .parse()

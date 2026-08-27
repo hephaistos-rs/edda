@@ -11,7 +11,7 @@
 
 use edda_domain::{JobId, JobPayload, JobRecord, JobStatus};
 
-use crate::{get_i64, get_opt_string, get_string, Backend, DbPool};
+use crate::{get_i64, get_opt_string, get_string, Backend, DbConn, DbError};
 
 fn payload_to_json(payload: &JobPayload) -> String {
     serde_json::to_string(payload).expect("JobPayload always serializes")
@@ -48,17 +48,18 @@ fn row_to_record(
 pub struct JobRepo;
 
 impl JobRepo {
-    pub async fn enqueue(
-        pool: &DbPool,
+    pub async fn enqueue<'c>(
+        db: impl DbConn<'c>,
         id: JobId,
         payload: &JobPayload,
         run_at: i64,
         max_attempts: u32,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let id_text = id.to_string();
         let payload_json = payload_to_json(payload);
         let created_at = crate::now_unix();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "INSERT INTO jobs (id, payload, status, attempts, max_attempts, run_at, created_at)
                  VALUES ($1, $2, 'pending', 0, $3, $4, $5)"
@@ -74,7 +75,7 @@ impl JobRepo {
             .bind(max_attempts as i64)
             .bind(run_at)
             .bind(created_at)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
@@ -85,12 +86,13 @@ impl JobRepo {
     /// even if two pollers ran concurrently (not a real deployment shape
     /// today, per this workspace's single-process positioning, but the
     /// claim is still correct if that ever changes).
-    pub async fn claim_batch(
-        pool: &DbPool,
+    pub async fn claim_batch<'c>(
+        db: impl DbConn<'c>,
         now: i64,
         limit: i64,
-    ) -> Result<Vec<JobRecord>, sqlx::Error> {
-        let select_sql = match pool.backend {
+    ) -> Result<Vec<JobRecord>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let select_sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT id, payload, status, attempts, max_attempts, run_at, last_error, created_at
                  FROM jobs WHERE status = 'pending' AND run_at <= $1 ORDER BY run_at LIMIT $2"
@@ -103,10 +105,10 @@ impl JobRepo {
         let candidates = sqlx::query(select_sql)
             .bind(now)
             .bind(limit)
-            .fetch_all(&pool.any)
+            .fetch_all(&mut *h.conn())
             .await?;
 
-        let claim_sql = match pool.backend {
+        let claim_sql = match h.backend() {
             Backend::Postgres => {
                 "UPDATE jobs SET status = 'running' WHERE id = $1 AND status = 'pending'"
             }
@@ -118,7 +120,10 @@ impl JobRepo {
         let mut claimed = Vec::new();
         for row in candidates {
             let id = get_string(&row, "id")?;
-            let result = sqlx::query(claim_sql).bind(&id).execute(&pool.any).await?;
+            let result = sqlx::query(claim_sql)
+                .bind(&id)
+                .execute(&mut *h.conn())
+                .await?;
             if result.rows_affected() > 0 {
                 claimed.push(row_to_record(
                     id,
@@ -135,14 +140,15 @@ impl JobRepo {
         Ok(claimed)
     }
 
-    pub async fn mark_succeeded(pool: &DbPool, id: JobId) -> Result<(), sqlx::Error> {
-        let sql = match pool.backend {
+    pub async fn mark_succeeded<'c>(db: impl DbConn<'c>, id: JobId) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Postgres => "UPDATE jobs SET status = 'succeeded' WHERE id = $1",
             Backend::Sqlite | Backend::MySql => "UPDATE jobs SET status = 'succeeded' WHERE id = ?",
         };
         sqlx::query(sql)
             .bind(id.to_string())
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
@@ -151,14 +157,15 @@ impl JobRepo {
     /// `'pending'`, a fresh `run_at`, `attempts` incremented) — called
     /// when the caller's own `attempts + 1 < max_attempts` check says
     /// there's budget left; see `mark_dead` for the terminal case.
-    pub async fn mark_retry(
-        pool: &DbPool,
+    pub async fn mark_retry<'c>(
+        db: impl DbConn<'c>,
         id: JobId,
         attempts: u32,
         run_at: i64,
         error: &str,
-    ) -> Result<(), sqlx::Error> {
-        let sql = match pool.backend {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "UPDATE jobs SET status = 'pending', attempts = $1, run_at = $2, last_error = $3 WHERE id = $4"
             }
@@ -171,7 +178,7 @@ impl JobRepo {
             .bind(run_at)
             .bind(error)
             .bind(id.to_string())
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
@@ -179,13 +186,14 @@ impl JobRepo {
     /// Terminal failure — `max_attempts` exhausted. The row is retained
     /// (`status = 'failed'`), visible as a dead letter in admin tooling,
     /// never silently dropped.
-    pub async fn mark_dead(
-        pool: &DbPool,
+    pub async fn mark_dead<'c>(
+        db: impl DbConn<'c>,
         id: JobId,
         attempts: u32,
         error: &str,
-    ) -> Result<(), sqlx::Error> {
-        let sql = match pool.backend {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "UPDATE jobs SET status = 'failed', attempts = $1, last_error = $2 WHERE id = $3"
             }
@@ -197,15 +205,19 @@ impl JobRepo {
             .bind(attempts as i64)
             .bind(error)
             .bind(id.to_string())
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
 
     /// Most recent `limit` jobs regardless of status, newest first — the
     /// admin-visible dead-letter/activity list.
-    pub async fn list_recent(pool: &DbPool, limit: i64) -> Result<Vec<JobRecord>, sqlx::Error> {
-        let sql = match pool.backend {
+    pub async fn list_recent<'c>(
+        db: impl DbConn<'c>,
+        limit: i64,
+    ) -> Result<Vec<JobRecord>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT id, payload, status, attempts, max_attempts, run_at, last_error, created_at
                  FROM jobs ORDER BY created_at DESC LIMIT $1"
@@ -215,7 +227,10 @@ impl JobRepo {
                  FROM jobs ORDER BY created_at DESC LIMIT ?"
             }
         };
-        let rows = sqlx::query(sql).bind(limit).fetch_all(&pool.any).await?;
+        let rows = sqlx::query(sql)
+            .bind(limit)
+            .fetch_all(&mut *h.conn())
+            .await?;
         rows.into_iter()
             .map(|row| {
                 Ok(row_to_record(

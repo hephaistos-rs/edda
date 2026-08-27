@@ -17,7 +17,7 @@ pub enum TokenError {
     #[error("token name can't be empty")]
     Empty,
     #[error(transparent)]
-    Db(#[from] sqlx::Error),
+    Db(#[from] edda_db::DbError),
 }
 
 fn generate_raw_token() -> String {

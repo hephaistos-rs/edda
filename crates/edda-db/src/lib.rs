@@ -14,6 +14,9 @@
 //! behavioral test suite running against all three backends is what
 //! stands in for that now (see `tests.rs`).
 
+mod conn;
+mod error;
+
 pub mod access_token_repo;
 pub mod audit_event_repo;
 pub mod branch_protection_repo;
@@ -43,6 +46,9 @@ pub mod webhook_repo;
 
 #[cfg(test)]
 mod tests;
+
+pub use conn::{DbConn, DbTx, Handle};
+pub use error::DbError;
 
 pub use access_token_repo::AccessTokenRepo;
 pub use audit_event_repo::{AuditEvent, AuditEventRepo};
@@ -127,6 +133,39 @@ impl DbPool {
     pub fn backend(&self) -> Backend {
         self.backend
     }
+
+    /// Opens a transaction. Thread the returned `DbTx` as `&mut tx`
+    /// through several repository methods and then `commit` — the way an
+    /// application service makes a multi-aggregate operation atomic.
+    /// Dropping without committing rolls back.
+    pub async fn begin(&self) -> Result<DbTx, DbError> {
+        let inner = self.any.begin().await.map_err(DbError::from)?;
+        Ok(DbTx {
+            inner,
+            backend: self.backend,
+        })
+    }
+}
+
+/// Tunables for the connection pool, surfaced from `Settings` by the
+/// composition root. `Default` matches what a small single-instance
+/// deployment wants; a busy PostgreSQL/MySQL instance raises
+/// `max_connections`.
+#[derive(Debug, Clone, Copy)]
+pub struct PoolOptions {
+    /// Upper bound on connections held open at once.
+    pub max_connections: u32,
+    /// How long `acquire` waits for a free connection before erroring.
+    pub acquire_timeout: std::time::Duration,
+}
+
+impl Default for PoolOptions {
+    fn default() -> Self {
+        Self {
+            max_connections: 10,
+            acquire_timeout: std::time::Duration::from_secs(30),
+        }
+    }
 }
 
 /// The current unix-seconds timestamp, computed once in application code
@@ -199,9 +238,44 @@ pub fn effective_url(configured: Option<&str>, data_dir: &std::path::Path) -> St
 /// existing (`edda_http::config` / `edda-cli` create it at startup); a
 /// file-backed SQLite URL under a missing directory fails here with a
 /// clear IO error rather than silently creating a tree.
-pub async fn pool(url: &str) -> Result<DbPool, sqlx::Error> {
+///
+/// Networked PostgreSQL/MySQL connect over TLS when the URL asks for it:
+/// `sqlx::Any` hands `url` straight to the concrete driver, which reads
+/// `?sslmode=`/`?ssl-mode=` (and `?sslrootcert=<path>` for a private CA)
+/// on its own — no `Any`-level TLS configuration is needed or possible
+/// here. The `rustls`/`ring` stack that backs it is pulled in by this
+/// crate's `sqlx` `tls-rustls-ring` feature.
+pub async fn pool(url: &str, options: PoolOptions) -> Result<DbPool, DbError> {
     sqlx::any::install_default_drivers();
-    connect_and_migrate(url).await
+    connect_and_migrate(url, options)
+        .await
+        .map_err(DbError::from)
+}
+
+/// A cheap `SELECT 1` against the pool — the `/healthz` liveness probe.
+/// Replaces `edda-http` reaching into the pool to issue that query
+/// itself (which needed a direct `sqlx` dependency there).
+pub async fn health(pool: &DbPool) -> Result<(), DbError> {
+    sqlx::query("SELECT 1")
+        .execute(&pool.any)
+        .await
+        .map(|_| ())
+        .map_err(DbError::from)
+}
+
+/// `PRAGMA optimize` on SQLite — cheap, recommended to run periodically
+/// so the query planner keeps up-to-date statistics. A no-op on
+/// PostgreSQL/MySQL (they maintain statistics automatically). Wired to a
+/// scheduled job in Phase 12; exposed now so that job has something to
+/// call.
+pub async fn optimize(pool: &DbPool) -> Result<(), DbError> {
+    if pool.backend == Backend::Sqlite {
+        sqlx::query("PRAGMA optimize")
+            .execute(&pool.any)
+            .await
+            .map_err(DbError::from)?;
+    }
+    Ok(())
 }
 
 /// Shared by `pool()` and `test_pool()` — connects, applies this
@@ -209,20 +283,22 @@ pub async fn pool(url: &str) -> Result<DbPool, sqlx::Error> {
 /// generic `Any`-level equivalent, so they're applied as plain `PRAGMA`
 /// statements after connecting rather than through a typed
 /// `SqliteConnectOptions` builder), then runs migrations.
-async fn connect_and_migrate(url: &str) -> Result<DbPool, sqlx::Error> {
+async fn connect_and_migrate(url: &str, options: PoolOptions) -> Result<DbPool, sqlx::Error> {
     let backend = Backend::from_url(url)?;
 
+    let mut pool_options = AnyPoolOptions::new()
+        .max_connections(options.max_connections)
+        .acquire_timeout(options.acquire_timeout);
     // An in-memory SQLite database is per-connection, not shared, unless
     // every query goes through the exact same connection — a pool with
     // more than one connection would silently hand later queries an
     // empty database (found running this crate's own tests through
     // `AnyPool`, which doesn't special-case `:memory:` the way sqlx's
     // typed `SqlitePool` used to).
-    let mut options = AnyPoolOptions::new();
     if backend == Backend::Sqlite && url.contains(":memory:") {
-        options = options.max_connections(1);
+        pool_options = pool_options.max_connections(1);
     }
-    let any = options.connect(url).await?;
+    let any = pool_options.connect(url).await?;
 
     if backend == Backend::Sqlite {
         // Default (rollback-journal) mode lets one writer starve every
@@ -263,7 +339,7 @@ pub async fn test_pool() -> DbPool {
         Ok(url) => {
             let backend = Backend::from_url(&url).expect("EDDA_TEST_DATABASE_URL is valid");
             match backend {
-                Backend::Sqlite => connect_and_migrate(&url)
+                Backend::Sqlite => connect_and_migrate(&url, PoolOptions::default())
                     .await
                     .expect("connect and migrate the configured sqlite test database"),
                 Backend::Postgres | Backend::MySql => fresh_server_test_database(&url, backend)
@@ -271,7 +347,7 @@ pub async fn test_pool() -> DbPool {
                     .expect("create and migrate a fresh per-test database"),
             }
         }
-        Err(_) => connect_and_migrate("sqlite::memory:")
+        Err(_) => connect_and_migrate("sqlite::memory:", PoolOptions::default())
             .await
             .expect("in-memory sqlite pool"),
     }
@@ -321,7 +397,7 @@ async fn fresh_server_test_database(
         .map(|(base, _)| base)
         .unwrap_or(admin_url);
     let test_url = format!("{base}/{db_name}");
-    connect_and_migrate(&test_url).await
+    connect_and_migrate(&test_url, PoolOptions::default()).await
 }
 
 /// Path is relative to this crate's own `Cargo.toml` (`CARGO_MANIFEST_DIR`,

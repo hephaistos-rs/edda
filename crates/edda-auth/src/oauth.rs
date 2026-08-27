@@ -50,7 +50,7 @@ pub enum OAuthError {
     #[error("that provider did not return an email address")]
     NoEmail,
     #[error(transparent)]
-    Db(#[from] sqlx::Error),
+    Db(#[from] edda_db::DbError),
 }
 
 /// Everything the HTTP layer needs to stash (in the pre-login session)
@@ -190,7 +190,7 @@ pub async fn complete(
         .await
         .map_err(|err| match err {
             edda_db::user_repo::InsertUserError::Db(err) => OAuthError::Db(err),
-            _ => OAuthError::Db(sqlx::Error::RowNotFound),
+            _ => OAuthError::Db(edda_db::DbError::RowNotFound),
         })?;
     OAuthIdentityRepo::insert(
         pool,

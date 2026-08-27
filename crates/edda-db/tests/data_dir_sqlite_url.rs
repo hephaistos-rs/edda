@@ -42,12 +42,13 @@ async fn assert_pool_works_with_data_dir(data_dir: &str) {
         "expected a sqlite: URL, got {url:?}"
     );
 
-    let pool = edda_db::pool(&url).await.unwrap_or_else(|err| {
-        panic!("pool() failed for data_dir={data_dir:?} (url {url:?}): {err}")
-    });
+    let pool = edda_db::pool(&url, edda_db::PoolOptions::default())
+        .await
+        .unwrap_or_else(|err| {
+            panic!("pool() failed for data_dir={data_dir:?} (url {url:?}): {err}")
+        });
 
-    sqlx::query("SELECT 1")
-        .execute(&pool.any)
+    edda_db::health(&pool)
         .await
         .expect("run a trivial query against the opened pool");
 

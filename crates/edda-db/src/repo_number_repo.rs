@@ -11,7 +11,7 @@
 
 use edda_domain::RepositoryId;
 
-use crate::{Backend, DbPool};
+use crate::{Backend, DbConn, DbError};
 
 const MAX_ATTEMPTS: u32 = 10;
 
@@ -20,7 +20,7 @@ pub enum NextNumberError {
     #[error("could not allocate a pull-request/issue number after {0} attempts — high contention on this repository")]
     Contended(u32),
     #[error(transparent)]
-    Db(#[from] sqlx::Error),
+    Db(#[from] DbError),
 }
 
 pub struct RepoNumberRepo;
@@ -31,16 +31,17 @@ impl RepoNumberRepo {
     /// creates the counter row (starting at 1) the first time a given
     /// repository needs one, so repository creation itself doesn't need
     /// to know about this table.
-    pub async fn next_number(
-        pool: &DbPool,
+    pub async fn next_number<'c>(
+        db: impl DbConn<'c>,
         repository_id: RepositoryId,
     ) -> Result<i64, NextNumberError> {
+        let mut h = crate::conn::open(db).await?;
         let repository_id_text = repository_id.to_string();
-        Self::ensure_counter_row(pool, &repository_id_text).await?;
+        Self::ensure_counter_row(&mut h, &repository_id_text).await?;
 
         for _ in 0..MAX_ATTEMPTS {
-            let current = Self::read_current(pool, &repository_id_text).await?;
-            if Self::try_advance(pool, &repository_id_text, current).await? {
+            let current = Self::read_current(&mut h, &repository_id_text).await?;
+            if Self::try_advance(&mut h, &repository_id_text, current).await? {
                 return Ok(current);
             }
             // Someone else's allocation won the race — retry with a fresh read.
@@ -48,8 +49,12 @@ impl RepoNumberRepo {
         Err(NextNumberError::Contended(MAX_ATTEMPTS))
     }
 
-    async fn ensure_counter_row(pool: &DbPool, repository_id: &str) -> Result<(), sqlx::Error> {
-        let sql = match pool.backend {
+    async fn ensure_counter_row<'c>(
+        db: impl DbConn<'c>,
+        repository_id: &str,
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Sqlite => {
                 "INSERT INTO repo_number_counters (repository_id, next_number) VALUES (?, 1) ON CONFLICT (repository_id) DO NOTHING"
             }
@@ -62,13 +67,14 @@ impl RepoNumberRepo {
         };
         sqlx::query(sql)
             .bind(repository_id)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
 
-    async fn read_current(pool: &DbPool, repository_id: &str) -> Result<i64, sqlx::Error> {
-        let sql = match pool.backend {
+    async fn read_current<'c>(db: impl DbConn<'c>, repository_id: &str) -> Result<i64, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT next_number FROM repo_number_counters WHERE repository_id = $1"
             }
@@ -78,19 +84,20 @@ impl RepoNumberRepo {
         };
         let row = sqlx::query(sql)
             .bind(repository_id)
-            .fetch_one(&pool.any)
+            .fetch_one(&mut *h.conn())
             .await?;
-        crate::get_i64(&row, "next_number")
+        crate::get_i64(&row, "next_number").map_err(DbError::from)
     }
 
     /// `true` if this call won the compare-and-swap (no concurrent
     /// allocation advanced the counter first).
-    async fn try_advance(
-        pool: &DbPool,
+    async fn try_advance<'c>(
+        db: impl DbConn<'c>,
         repository_id: &str,
         expected_current: i64,
-    ) -> Result<bool, sqlx::Error> {
-        let sql = match pool.backend {
+    ) -> Result<bool, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "UPDATE repo_number_counters SET next_number = $1 WHERE repository_id = $2 AND next_number = $3"
             }
@@ -102,7 +109,7 @@ impl RepoNumberRepo {
             .bind(expected_current + 1)
             .bind(repository_id)
             .bind(expected_current)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(result.rows_affected() > 0)
     }
@@ -111,6 +118,7 @@ impl RepoNumberRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DbPool;
     use edda_domain::UserId;
 
     async fn insert_repo(pool: &DbPool, username: &str) -> RepositoryId {

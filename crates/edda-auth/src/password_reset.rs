@@ -47,7 +47,10 @@ fn hash_token(raw: &str) -> String {
 /// applies to private-repo existence (`AuthzError::NotFound`); this
 /// function itself doesn't decide the HTTP response, only whether there's
 /// a real account to email.
-pub async fn request(pool: &DbPool, email: &str) -> Result<Option<(User, String)>, sqlx::Error> {
+pub async fn request(
+    pool: &DbPool,
+    email: &str,
+) -> Result<Option<(User, String)>, edda_db::DbError> {
     let Some(row) = UserRepo::find_by_email(pool, email).await? else {
         return Ok(None);
     };
@@ -82,7 +85,7 @@ pub enum ConsumeError {
     #[error("{0}")]
     Hash(argon2::password_hash::Error),
     #[error(transparent)]
-    Db(#[from] sqlx::Error),
+    Db(#[from] edda_db::DbError),
 }
 
 impl From<argon2::password_hash::Error> for ConsumeError {

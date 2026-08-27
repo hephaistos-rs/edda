@@ -5,7 +5,7 @@ use edda_domain::{
     UserId,
 };
 
-use crate::{get_i64, get_opt_i64, get_string, Backend, DbPool};
+use crate::{get_i64, get_opt_i64, get_string, Backend, DbConn, DbError};
 
 fn subject_to_columns(subject: NotificationSubject) -> (&'static str, String) {
     (
@@ -67,15 +67,16 @@ impl NotificationRepo {
     /// triggering events landing at almost the same instant) is an
     /// accepted trade-off rather than something worth a MySQL generated-
     /// column uniqueness workaround for.
-    pub async fn insert_if_new(
-        pool: &DbPool,
+    pub async fn insert_if_new<'c>(
+        db: impl DbConn<'c>,
         id: NotificationId,
         user_id: UserId,
         kind: NotificationKind,
         subject: NotificationSubject,
-    ) -> Result<bool, sqlx::Error> {
+    ) -> Result<bool, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let (subject_type, subject_id) = subject_to_columns(subject);
-        let existing_sql = match pool.backend {
+        let existing_sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT 1 FROM notifications WHERE user_id = $1 AND kind = $2 AND subject_type = $3 AND subject_id = $4 AND read_at IS NULL"
             }
@@ -88,14 +89,14 @@ impl NotificationRepo {
             .bind(kind.as_db_str())
             .bind(subject_type)
             .bind(&subject_id)
-            .fetch_optional(&pool.any)
+            .fetch_optional(&mut *h.conn())
             .await?;
         if existing.is_some() {
             return Ok(false);
         }
 
         let created_at = crate::now_unix();
-        let insert_sql = match pool.backend {
+        let insert_sql = match h.backend() {
             Backend::Postgres => {
                 "INSERT INTO notifications (id, user_id, kind, subject_type, subject_id, created_at) VALUES ($1, $2, $3, $4, $5, $6)"
             }
@@ -110,17 +111,18 @@ impl NotificationRepo {
             .bind(subject_type)
             .bind(&subject_id)
             .bind(created_at)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(true)
     }
 
     /// Newest first — the notification list/badge view.
-    pub async fn list_for_user(
-        pool: &DbPool,
+    pub async fn list_for_user<'c>(
+        db: impl DbConn<'c>,
         user_id: UserId,
-    ) -> Result<Vec<Notification>, sqlx::Error> {
-        let sql = match pool.backend {
+    ) -> Result<Vec<Notification>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Postgres => format!(
                 "SELECT {NOTIFICATION_COLUMNS} FROM notifications WHERE user_id = $1 ORDER BY created_at DESC"
             ),
@@ -130,7 +132,7 @@ impl NotificationRepo {
         };
         let rows = sqlx::query(&sql)
             .bind(user_id.to_string())
-            .fetch_all(&pool.any)
+            .fetch_all(&mut *h.conn())
             .await?;
         rows.into_iter()
             .map(|row| {
@@ -147,8 +149,9 @@ impl NotificationRepo {
             .collect()
     }
 
-    pub async fn unread_count(pool: &DbPool, user_id: UserId) -> Result<i64, sqlx::Error> {
-        let sql = match pool.backend {
+    pub async fn unread_count<'c>(db: impl DbConn<'c>, user_id: UserId) -> Result<i64, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT COUNT(*) AS n FROM notifications WHERE user_id = $1 AND read_at IS NULL"
             }
@@ -158,18 +161,19 @@ impl NotificationRepo {
         };
         let row = sqlx::query(sql)
             .bind(user_id.to_string())
-            .fetch_one(&pool.any)
+            .fetch_one(&mut *h.conn())
             .await?;
-        get_i64(&row, "n")
+        Ok(get_i64(&row, "n")?)
     }
 
-    pub async fn mark_read(
-        pool: &DbPool,
+    pub async fn mark_read<'c>(
+        db: impl DbConn<'c>,
         user_id: UserId,
         id: NotificationId,
-    ) -> Result<bool, sqlx::Error> {
+    ) -> Result<bool, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let read_at = crate::now_unix();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "UPDATE notifications SET read_at = $1 WHERE id = $2 AND user_id = $3 AND read_at IS NULL"
             }
@@ -181,7 +185,7 @@ impl NotificationRepo {
             .bind(read_at)
             .bind(id.to_string())
             .bind(user_id.to_string())
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(result.rows_affected() > 0)
     }
@@ -190,6 +194,7 @@ impl NotificationRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DbPool;
 
     async fn insert_user(pool: &DbPool, username: &str) -> UserId {
         let user_id = UserId::new();

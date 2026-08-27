@@ -1,13 +1,13 @@
 use edda_domain::{Organization, OrganizationId, TeamId, TeamPermission, UserId};
 
-use crate::{get_opt_string, get_string, Backend, DbPool};
+use crate::{get_opt_string, get_string, Backend, DbConn, DbError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum InsertOrganizationError {
     #[error("that name is already taken")]
     NameTaken,
     #[error(transparent)]
-    Db(#[from] sqlx::Error),
+    Db(#[from] DbError),
 }
 
 fn row_to_organization(id: String, name: String, display_name: Option<String>) -> Organization {
@@ -18,7 +18,7 @@ fn row_to_organization(id: String, name: String, display_name: Option<String>) -
     }
 }
 
-fn row_to_organization_row(row: sqlx::any::AnyRow) -> Result<Organization, sqlx::Error> {
+fn row_to_organization_row(row: sqlx::any::AnyRow) -> Result<Organization, DbError> {
     Ok(row_to_organization(
         get_string(&row, "id")?,
         get_string(&row, "name")?,
@@ -43,19 +43,21 @@ impl OrganizationRepo {
     /// against `users.username` (`edda-auth`'s organization-creation path
     /// does this before calling here — see that module's own doc comment
     /// for why this check can't live in a single database constraint).
-    pub async fn insert(
-        pool: &DbPool,
+    pub async fn insert<'c>(
+        db: impl DbConn<'c>,
         id: OrganizationId,
         name: &str,
         display_name: Option<&str>,
         creating_user_id: UserId,
     ) -> Result<TeamId, InsertOrganizationError> {
+        let mut h = crate::conn::open(db).await?;
+        let backend = h.backend();
         let id_text = id.to_string();
         let created_at = crate::now_unix();
 
-        let mut tx = pool.any.begin().await?;
+        let mut tx = h.begin().await?;
 
-        let insert_org_sql = match pool.backend {
+        let insert_org_sql = match backend {
             Backend::Postgres => {
                 "INSERT INTO organizations (id, name, display_name, created_at) VALUES ($1, $2, $3, $4)"
             }
@@ -63,24 +65,23 @@ impl OrganizationRepo {
                 "INSERT INTO organizations (id, name, display_name, created_at) VALUES (?, ?, ?, ?)"
             }
         };
-        let result = sqlx::query(insert_org_sql)
+        match sqlx::query(insert_org_sql)
             .bind(&id_text)
             .bind(name)
             .bind(display_name)
             .bind(created_at)
             .execute(&mut *tx)
-            .await;
-        match result {
+            .await
+            .map_err(DbError::from)
+        {
             Ok(_) => {}
-            Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
-                return Err(InsertOrganizationError::NameTaken);
-            }
+            Err(DbError::UniqueViolation) => return Err(InsertOrganizationError::NameTaken),
             Err(err) => return Err(err.into()),
         }
 
         let owners_team_id = TeamId::new();
         let owners_team_id_text = owners_team_id.to_string();
-        let insert_team_sql = match pool.backend {
+        let insert_team_sql = match backend {
             Backend::Postgres => {
                 "INSERT INTO teams (id, organization_id, name, permission, created_at) VALUES ($1, $2, $3, $4, $5)"
             }
@@ -95,10 +96,11 @@ impl OrganizationRepo {
             .bind(TeamPermission::Admin.as_db_str())
             .bind(created_at)
             .execute(&mut *tx)
-            .await?;
+            .await
+            .map_err(DbError::from)?;
 
         let creating_user_id_text = creating_user_id.to_string();
-        let insert_member_sql = match pool.backend {
+        let insert_member_sql = match backend {
             Backend::Postgres => {
                 "INSERT INTO team_members (team_id, user_id, added_at) VALUES ($1, $2, $3)"
             }
@@ -111,9 +113,10 @@ impl OrganizationRepo {
             .bind(&creating_user_id_text)
             .bind(created_at)
             .execute(&mut *tx)
-            .await?;
+            .await
+            .map_err(DbError::from)?;
 
-        tx.commit().await?;
+        tx.commit().await.map_err(DbError::from)?;
         Ok(owners_team_id)
     }
 
@@ -121,11 +124,12 @@ impl OrganizationRepo {
     /// identifier namespace, so this uses the exact same collation
     /// approach per backend (`COLLATE NOCASE` on SQLite, `LOWER(...)` on
     /// PostgreSQL, the `name_lower` shadow column on MySQL/MariaDB).
-    pub async fn find_by_name(
-        pool: &DbPool,
+    pub async fn find_by_name<'c>(
+        db: impl DbConn<'c>,
         name: &str,
-    ) -> Result<Option<Organization>, sqlx::Error> {
-        let sql = match pool.backend {
+    ) -> Result<Option<Organization>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Sqlite => "SELECT id, name, display_name FROM organizations WHERE name = ?",
             Backend::Postgres => {
                 "SELECT id, name, display_name FROM organizations WHERE LOWER(name) = LOWER($1)"
@@ -136,17 +140,18 @@ impl OrganizationRepo {
         };
         let row = sqlx::query(sql)
             .bind(name)
-            .fetch_optional(&pool.any)
+            .fetch_optional(&mut *h.conn())
             .await?;
         row.map(row_to_organization_row).transpose()
     }
 
-    pub async fn find_by_id(
-        pool: &DbPool,
+    pub async fn find_by_id<'c>(
+        db: impl DbConn<'c>,
         id: OrganizationId,
-    ) -> Result<Option<Organization>, sqlx::Error> {
+    ) -> Result<Option<Organization>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let id_text = id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => "SELECT id, name, display_name FROM organizations WHERE id = $1",
             Backend::Sqlite | Backend::MySql => {
                 "SELECT id, name, display_name FROM organizations WHERE id = ?"
@@ -154,7 +159,7 @@ impl OrganizationRepo {
         };
         let row = sqlx::query(sql)
             .bind(&id_text)
-            .fetch_optional(&pool.any)
+            .fetch_optional(&mut *h.conn())
             .await?;
         row.map(row_to_organization_row).transpose()
     }
@@ -163,12 +168,13 @@ impl OrganizationRepo {
     /// used to render "your organizations" without a separate
     /// org-membership concept of its own (an organization's members *are*
     /// its teams' members).
-    pub async fn list_for_user(
-        pool: &DbPool,
+    pub async fn list_for_user<'c>(
+        db: impl DbConn<'c>,
         user_id: UserId,
-    ) -> Result<Vec<Organization>, sqlx::Error> {
+    ) -> Result<Vec<Organization>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let user_id_text = user_id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 r#"SELECT DISTINCT o.id, o.name, o.display_name
                    FROM organizations o
@@ -188,7 +194,7 @@ impl OrganizationRepo {
         };
         let rows = sqlx::query(sql)
             .bind(&user_id_text)
-            .fetch_all(&pool.any)
+            .fetch_all(&mut *h.conn())
             .await?;
         rows.into_iter().map(row_to_organization_row).collect()
     }

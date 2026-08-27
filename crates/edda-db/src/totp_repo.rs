@@ -6,7 +6,7 @@
 
 use edda_domain::{TotpRecoveryCodeId, UserId};
 
-use crate::{get_bytes, get_opt_i64, Backend, DbPool};
+use crate::{get_bytes, get_opt_i64, Backend, DbConn, DbError};
 
 pub struct TotpRepo;
 
@@ -15,14 +15,15 @@ impl TotpRepo {
     /// enrollment: stores the encrypted secret with `activated_at` unset.
     /// Does not affect login until `activate` is called — see
     /// `edda_auth::totp`'s enrollment flow.
-    pub async fn upsert_secret(
-        pool: &DbPool,
+    pub async fn upsert_secret<'c>(
+        db: impl DbConn<'c>,
         user_id: UserId,
         secret_ciphertext: &[u8],
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let user_id_text = user_id.to_string();
         let created_at = crate::now_unix();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "INSERT INTO totp_secrets (user_id, secret_ciphertext, created_at, activated_at)
                  VALUES ($1, $2, $3, NULL)
@@ -43,7 +44,7 @@ impl TotpRepo {
             .bind(&user_id_text)
             .bind(secret_ciphertext)
             .bind(created_at)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
@@ -51,12 +52,13 @@ impl TotpRepo {
     /// The raw ciphertext plus whether enrollment has been activated —
     /// `edda_auth::totp` decrypts and interprets this; this repo never
     /// does.
-    pub async fn find_by_user(
-        pool: &DbPool,
+    pub async fn find_by_user<'c>(
+        db: impl DbConn<'c>,
         user_id: UserId,
-    ) -> Result<Option<(Vec<u8>, Option<i64>)>, sqlx::Error> {
+    ) -> Result<Option<(Vec<u8>, Option<i64>)>, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let user_id_text = user_id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT secret_ciphertext, activated_at FROM totp_secrets WHERE user_id = $1"
             }
@@ -66,7 +68,7 @@ impl TotpRepo {
         };
         let row = sqlx::query(sql)
             .bind(&user_id_text)
-            .fetch_optional(&pool.any)
+            .fetch_optional(&mut *h.conn())
             .await?;
         row.map(|row| {
             Ok((
@@ -80,17 +82,19 @@ impl TotpRepo {
     /// Whether `user_id` has an *activated* TOTP credential — the one
     /// question the login flow actually needs answered before deciding
     /// whether to challenge for a second factor.
-    pub async fn is_activated(pool: &DbPool, user_id: UserId) -> Result<bool, sqlx::Error> {
+    pub async fn is_activated<'c>(db: impl DbConn<'c>, user_id: UserId) -> Result<bool, DbError> {
+        let mut h = crate::conn::open(db).await?;
         Ok(matches!(
-            Self::find_by_user(pool, user_id).await?,
+            Self::find_by_user(&mut h, user_id).await?,
             Some((_, Some(_)))
         ))
     }
 
-    pub async fn activate(pool: &DbPool, user_id: UserId) -> Result<(), sqlx::Error> {
+    pub async fn activate<'c>(db: impl DbConn<'c>, user_id: UserId) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let user_id_text = user_id.to_string();
         let activated_at = crate::now_unix();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => "UPDATE totp_secrets SET activated_at = $1 WHERE user_id = $2",
             Backend::Sqlite | Backend::MySql => {
                 "UPDATE totp_secrets SET activated_at = ? WHERE user_id = ?"
@@ -99,29 +103,30 @@ impl TotpRepo {
         sqlx::query(sql)
             .bind(activated_at)
             .bind(&user_id_text)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
 
     /// Disables 2FA entirely: drops the secret and every recovery code.
-    pub async fn delete(pool: &DbPool, user_id: UserId) -> Result<(), sqlx::Error> {
+    pub async fn delete<'c>(db: impl DbConn<'c>, user_id: UserId) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let user_id_text = user_id.to_string();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => "DELETE FROM totp_secrets WHERE user_id = $1",
             Backend::Sqlite | Backend::MySql => "DELETE FROM totp_secrets WHERE user_id = ?",
         };
         sqlx::query(sql)
             .bind(&user_id_text)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => "DELETE FROM totp_recovery_codes WHERE user_id = $1",
             Backend::Sqlite | Backend::MySql => "DELETE FROM totp_recovery_codes WHERE user_id = ?",
         };
         sqlx::query(sql)
             .bind(&user_id_text)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
@@ -129,22 +134,23 @@ impl TotpRepo {
     /// Replaces every existing recovery code with a fresh batch — called
     /// once, right after activation, and again if the user regenerates
     /// codes. Old codes are invalidated by deletion, not left dangling.
-    pub async fn replace_recovery_codes(
-        pool: &DbPool,
+    pub async fn replace_recovery_codes<'c>(
+        db: impl DbConn<'c>,
         user_id: UserId,
         code_hashes: &[String],
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let user_id_text = user_id.to_string();
-        let delete_sql = match pool.backend {
+        let delete_sql = match h.backend() {
             Backend::Postgres => "DELETE FROM totp_recovery_codes WHERE user_id = $1",
             Backend::Sqlite | Backend::MySql => "DELETE FROM totp_recovery_codes WHERE user_id = ?",
         };
         sqlx::query(delete_sql)
             .bind(&user_id_text)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
 
-        let insert_sql = match pool.backend {
+        let insert_sql = match h.backend() {
             Backend::Postgres => {
                 "INSERT INTO totp_recovery_codes (id, user_id, code_hash, created_at) VALUES ($1, $2, $3, $4)"
             }
@@ -160,7 +166,7 @@ impl TotpRepo {
                 .bind(&user_id_text)
                 .bind(code_hash)
                 .bind(created_at)
-                .execute(&pool.any)
+                .execute(&mut *h.conn())
                 .await?;
         }
         Ok(())
@@ -169,14 +175,15 @@ impl TotpRepo {
     /// Consumes a recovery code if it exists, belongs to `user_id`, and
     /// hasn't been used before — `Ok(true)` means the code was valid and
     /// is now spent; a code is never accepted twice.
-    pub async fn consume_recovery_code(
-        pool: &DbPool,
+    pub async fn consume_recovery_code<'c>(
+        db: impl DbConn<'c>,
         user_id: UserId,
         code_hash: &str,
-    ) -> Result<bool, sqlx::Error> {
+    ) -> Result<bool, DbError> {
+        let mut h = crate::conn::open(db).await?;
         let user_id_text = user_id.to_string();
         let used_at = crate::now_unix();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "UPDATE totp_recovery_codes SET used_at = $1 WHERE user_id = $2 AND code_hash = $3 AND used_at IS NULL"
             }
@@ -188,7 +195,7 @@ impl TotpRepo {
             .bind(used_at)
             .bind(&user_id_text)
             .bind(code_hash)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(result.rows_affected() > 0)
     }

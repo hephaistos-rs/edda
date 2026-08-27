@@ -16,7 +16,7 @@ pub enum SignupError {
     #[error("username, email and password can't be empty")]
     Empty,
     #[error(transparent)]
-    Db(#[from] sqlx::Error),
+    Db(#[from] edda_db::DbError),
     #[error("{0}")]
     Hash(argon2::password_hash::Error),
 }

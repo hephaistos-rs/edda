@@ -7,7 +7,7 @@ use edda_domain::{
     RepositoryId, Webhook, WebhookDelivery, WebhookDeliveryId, WebhookEvent, WebhookId,
 };
 
-use crate::{get_bool, get_bytes, get_i64, get_opt_i64, get_string, Backend, DbPool};
+use crate::{get_bool, get_bytes, get_i64, get_opt_i64, get_string, Backend, DbConn, DbError};
 
 fn events_to_json(events: &[WebhookEvent]) -> String {
     serde_json::to_string(events).expect("WebhookEvent list always serializes")
@@ -40,17 +40,18 @@ fn row_to_webhook(
 pub struct WebhookRepo;
 
 impl WebhookRepo {
-    pub async fn insert(
-        pool: &DbPool,
+    pub async fn insert<'c>(
+        db: impl DbConn<'c>,
         id: WebhookId,
         repository_id: RepositoryId,
         target_url: &str,
         secret_ciphertext: &[u8],
         events: &[WebhookEvent],
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let events_json = events_to_json(events);
         let created_at = crate::now_unix();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "INSERT INTO webhooks (id, repository_id, target_url, secret_ciphertext, events, active, created_at)
                  VALUES ($1, $2, $3, $4, $5, 1, $6)"
@@ -67,16 +68,17 @@ impl WebhookRepo {
             .bind(secret_ciphertext)
             .bind(&events_json)
             .bind(created_at)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
 
-    pub async fn list_for_repository(
-        pool: &DbPool,
+    pub async fn list_for_repository<'c>(
+        db: impl DbConn<'c>,
         repository_id: RepositoryId,
-    ) -> Result<Vec<Webhook>, sqlx::Error> {
-        let sql = match pool.backend {
+    ) -> Result<Vec<Webhook>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT id, repository_id, target_url, events, active, created_at FROM webhooks WHERE repository_id = $1 ORDER BY created_at DESC"
             }
@@ -86,7 +88,7 @@ impl WebhookRepo {
         };
         let rows = sqlx::query(sql)
             .bind(repository_id.to_string())
-            .fetch_all(&pool.any)
+            .fetch_all(&mut *h.conn())
             .await?;
         rows.into_iter()
             .map(|row| {
@@ -111,20 +113,25 @@ impl WebhookRepo {
     /// `"push"` inside `"pull_request.opened"` — sorry, doesn't actually
     /// collide, but the general class of JSON-as-string matching bugs is
     /// exactly why this filters in application code instead).
-    pub async fn find_subscribed(
-        pool: &DbPool,
+    pub async fn find_subscribed<'c>(
+        db: impl DbConn<'c>,
         repository_id: RepositoryId,
         event: WebhookEvent,
-    ) -> Result<Vec<Webhook>, sqlx::Error> {
-        let all = Self::list_for_repository(pool, repository_id).await?;
+    ) -> Result<Vec<Webhook>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let all = Self::list_for_repository(&mut h, repository_id).await?;
         Ok(all
             .into_iter()
             .filter(|webhook| webhook.is_subscribed_to(event))
             .collect())
     }
 
-    pub async fn find_by_id(pool: &DbPool, id: WebhookId) -> Result<Option<Webhook>, sqlx::Error> {
-        let sql = match pool.backend {
+    pub async fn find_by_id<'c>(
+        db: impl DbConn<'c>,
+        id: WebhookId,
+    ) -> Result<Option<Webhook>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT id, repository_id, target_url, events, active, created_at FROM webhooks WHERE id = $1"
             }
@@ -134,7 +141,7 @@ impl WebhookRepo {
         };
         let row = sqlx::query(sql)
             .bind(id.to_string())
-            .fetch_optional(&pool.any)
+            .fetch_optional(&mut *h.conn())
             .await?;
         row.map(|row| {
             Ok(row_to_webhook(
@@ -154,11 +161,12 @@ impl WebhookRepo {
     /// it calls `edda_auth::secret_box::decrypt` and signs an outgoing
     /// payload. Never joined into any other query in this file, so a
     /// listing/display read has no path that accidentally pulls it along.
-    pub async fn find_secret_ciphertext(
-        pool: &DbPool,
+    pub async fn find_secret_ciphertext<'c>(
+        db: impl DbConn<'c>,
         id: WebhookId,
-    ) -> Result<Option<Vec<u8>>, sqlx::Error> {
-        let sql = match pool.backend {
+    ) -> Result<Option<Vec<u8>>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Postgres => "SELECT secret_ciphertext FROM webhooks WHERE id = $1",
             Backend::Sqlite | Backend::MySql => {
                 "SELECT secret_ciphertext FROM webhooks WHERE id = ?"
@@ -166,18 +174,19 @@ impl WebhookRepo {
         };
         let row = sqlx::query(sql)
             .bind(id.to_string())
-            .fetch_optional(&pool.any)
+            .fetch_optional(&mut *h.conn())
             .await?;
-        row.map(|row| get_bytes(&row, "secret_ciphertext"))
+        row.map(|row| get_bytes(&row, "secret_ciphertext").map_err(DbError::from))
             .transpose()
     }
 
-    pub async fn delete(
-        pool: &DbPool,
+    pub async fn delete<'c>(
+        db: impl DbConn<'c>,
         repository_id: RepositoryId,
         id: WebhookId,
-    ) -> Result<bool, sqlx::Error> {
-        let sql = match pool.backend {
+    ) -> Result<bool, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Postgres => "DELETE FROM webhooks WHERE id = $1 AND repository_id = $2",
             Backend::Sqlite | Backend::MySql => {
                 "DELETE FROM webhooks WHERE id = ? AND repository_id = ?"
@@ -186,7 +195,7 @@ impl WebhookRepo {
         let result = sqlx::query(sql)
             .bind(id.to_string())
             .bind(repository_id.to_string())
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(result.rows_affected() > 0)
     }
@@ -220,15 +229,16 @@ fn row_to_delivery(
 pub struct WebhookDeliveryRepo;
 
 impl WebhookDeliveryRepo {
-    pub async fn insert(
-        pool: &DbPool,
+    pub async fn insert<'c>(
+        db: impl DbConn<'c>,
         id: WebhookDeliveryId,
         webhook_id: WebhookId,
         event: WebhookEvent,
         payload: &str,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let created_at = crate::now_unix();
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "INSERT INTO webhook_deliveries (id, webhook_id, event, payload, attempt_count, created_at)
                  VALUES ($1, $2, $3, $4, 0, $5)"
@@ -244,7 +254,7 @@ impl WebhookDeliveryRepo {
             .bind(event.as_wire_str())
             .bind(payload)
             .bind(created_at)
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
@@ -252,19 +262,20 @@ impl WebhookDeliveryRepo {
     /// Records one delivery attempt's outcome — `response_status: None`
     /// means the request itself failed (network error, blocked by the
     /// SSRF check) rather than the target responding with an error status.
-    pub async fn record_attempt(
-        pool: &DbPool,
+    pub async fn record_attempt<'c>(
+        db: impl DbConn<'c>,
         id: WebhookDeliveryId,
         attempt_count: i32,
         response_status: Option<i32>,
         delivered: bool,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
         let delivered_at = if delivered {
             Some(crate::now_unix())
         } else {
             None
         };
-        let sql = match pool.backend {
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "UPDATE webhook_deliveries SET attempt_count = $1, response_status = $2, delivered_at = $3 WHERE id = $4"
             }
@@ -277,16 +288,17 @@ impl WebhookDeliveryRepo {
             .bind(response_status.map(|status| status as i64))
             .bind(delivered_at)
             .bind(id.to_string())
-            .execute(&pool.any)
+            .execute(&mut *h.conn())
             .await?;
         Ok(())
     }
 
-    pub async fn list_for_webhook(
-        pool: &DbPool,
+    pub async fn list_for_webhook<'c>(
+        db: impl DbConn<'c>,
         webhook_id: WebhookId,
-    ) -> Result<Vec<WebhookDelivery>, sqlx::Error> {
-        let sql = match pool.backend {
+    ) -> Result<Vec<WebhookDelivery>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT id, webhook_id, event, payload, response_status, attempt_count, delivered_at, created_at
                  FROM webhook_deliveries WHERE webhook_id = $1 ORDER BY created_at DESC"
@@ -298,7 +310,7 @@ impl WebhookDeliveryRepo {
         };
         let rows = sqlx::query(sql)
             .bind(webhook_id.to_string())
-            .fetch_all(&pool.any)
+            .fetch_all(&mut *h.conn())
             .await?;
         rows.into_iter()
             .map(|row| {
@@ -316,11 +328,12 @@ impl WebhookDeliveryRepo {
             .collect()
     }
 
-    pub async fn find_by_id(
-        pool: &DbPool,
+    pub async fn find_by_id<'c>(
+        db: impl DbConn<'c>,
         id: WebhookDeliveryId,
-    ) -> Result<Option<WebhookDelivery>, sqlx::Error> {
-        let sql = match pool.backend {
+    ) -> Result<Option<WebhookDelivery>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
             Backend::Postgres => {
                 "SELECT id, webhook_id, event, payload, response_status, attempt_count, delivered_at, created_at
                  FROM webhook_deliveries WHERE id = $1"
@@ -332,7 +345,7 @@ impl WebhookDeliveryRepo {
         };
         let row = sqlx::query(sql)
             .bind(id.to_string())
-            .fetch_optional(&pool.any)
+            .fetch_optional(&mut *h.conn())
             .await?;
         row.map(|row| {
             Ok(row_to_delivery(

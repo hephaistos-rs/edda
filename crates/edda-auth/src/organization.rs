@@ -22,7 +22,7 @@ pub enum CreateOrganizationError {
     #[error("organization names follow the same rules as usernames: 1-39 characters, start and end with a letter or digit, and contain only letters, digits, '-' or '_'")]
     InvalidName,
     #[error(transparent)]
-    Db(#[from] sqlx::Error),
+    Db(#[from] edda_db::DbError),
 }
 
 impl From<InsertOrganizationError> for CreateOrganizationError {

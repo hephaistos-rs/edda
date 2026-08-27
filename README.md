@@ -91,6 +91,8 @@ EDDA_DATABASE_URL=mysql://user:pass@host/dbname cargo run --features server
 
 `EDDA_DATABASE_URL` unset falls back to a local SQLite file under `EDDA_DATA_DIR` — the same zero-config path as always. For PostgreSQL/MySQL there's no local default; the variable is required.
 
+**TLS**: a networked PostgreSQL/MySQL connection uses TLS when the URL asks for it — `?sslmode=require` / `?sslmode=verify-full&sslrootcert=<path>` for PostgreSQL, `?ssl-mode=REQUIRED` for MySQL/MariaDB. Edda passes the URL to the driver verbatim; the `rustls`/`ring` stack is built in. `EDDA_DB_MAX_CONNECTIONS` (default 10) and `EDDA_DB_ACQUIRE_TIMEOUT_SECONDS` (default 30) tune the connection pool.
+
 **MySQL/MariaDB-specific note**: `tower-sessions-sqlx-store`'s MySQL session store creates its own `tower_sessions` schema (unlike its SQLite/PostgreSQL stores, which use a table in the connected database) — the configured database user needs `CREATE` privilege, or an operator pre-creates that schema and grants access to it specifically. Confirmed against a real MariaDB instance.
 
 One disclosed trade-off of a single binary supporting all three backends at runtime: `sqlx`'s compile-time query checking (`query!`) can't work with the `sqlx::Any` driver that makes runtime backend selection possible, so `edda-db`'s queries are runtime-checked instead — a query/column mismatch is now a test failure, not a compile error. Mitigated by running the same test suite against all three backends.

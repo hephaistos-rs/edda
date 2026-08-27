@@ -3,10 +3,13 @@
 //! module must never decide an outcome itself, only assemble the inputs
 //! a decision in `edda_domain::access` needs.
 
-use edda_db::{BranchProtectionRepo, DbPool, RepoAccessRepo, RepositoryRepo};
+use edda_db::{
+    BranchProtectionRepo, DbPool, OrganizationRepo, RepoAccessRepo, RepositoryRepo, TeamMemberRepo,
+};
 use edda_domain::{
     can_administer_repository, can_manage_repository_danger_zone, can_merge_pull_request,
-    can_read_repository, can_write_repository, ActorContext, AuthzError, PrReview, Repository,
+    can_read_repository, can_write_repository, effective_repo_role, ActorContext, AuthzError,
+    OrganizationId, PrReview, Repository,
 };
 
 #[derive(Clone)]
@@ -35,17 +38,78 @@ impl AuthorizationService {
             .ok_or(AuthzError::NotFound)
     }
 
+    /// The actor's *effective* access on `repository`: the maximum of any
+    /// direct grant and any grant reachable through team membership
+    /// (`edda_domain::effective_repo_role`, Phase 8's extension of the
+    /// "fetch, then decide" split — see that function's own doc comment).
+    /// Wrapped back into a `RepoAccess` so every pure decision function in
+    /// `edda_domain::access` stays unchanged: this is the "assembled
+    /// input," not a raw database row, so its `subject` doesn't
+    /// necessarily name the specific grant that produced the winning role
+    /// (a team grant can win over no direct grant at all).
     async fn access_for(
         &self,
         actor: &ActorContext,
         repository: &Repository,
     ) -> Result<Option<edda_domain::RepoAccess>, AuthzError> {
-        match actor.user_id() {
-            Some(user_id) => RepoAccessRepo::find(&self.pool, repository.id, user_id)
+        let Some(user_id) = actor.user_id() else {
+            return Ok(None);
+        };
+        let direct = RepoAccessRepo::find(
+            &self.pool,
+            repository.id,
+            edda_domain::AccessSubject::User(user_id),
+        )
+        .await
+        .map_err(|_| AuthzError::NotFound)?
+        .map(|access| access.role);
+        let team_roles = RepoAccessRepo::team_roles_for_user(&self.pool, repository.id, user_id)
+            .await
+            .map_err(|_| AuthzError::NotFound)?;
+        let effective = effective_repo_role(direct, &team_roles);
+        Ok(effective.map(|role| edda_domain::RepoAccess {
+            repository_id: repository.id,
+            subject: edda_domain::AccessSubject::User(user_id),
+            role,
+        }))
+    }
+
+    /// Whether `actor` administers `organization_id` — currently exactly
+    /// "is a member of its Owners team" (`OrganizationRepo::insert`
+    /// creates that team alongside the organization itself; there is no
+    /// separate, more general org-admin concept in this phase). Used to
+    /// gate organization-level actions: creating a team, creating a
+    /// repository under the organization, managing team membership.
+    pub async fn check_administer_organization(
+        &self,
+        actor: &ActorContext,
+        organization_id: OrganizationId,
+    ) -> Result<(), AuthzError> {
+        let Some(user_id) = actor.user_id() else {
+            return Err(AuthzError::NotFound);
+        };
+        let teams =
+            TeamMemberRepo::teams_for_user_in_organization(&self.pool, organization_id, user_id)
                 .await
-                .map_err(|_| AuthzError::NotFound),
-            None => Ok(None),
+                .map_err(|_| AuthzError::NotFound)?;
+        if teams.iter().any(|team| team.name == "Owners") {
+            Ok(())
+        } else {
+            Err(AuthzError::Forbidden)
         }
+    }
+
+    /// Resolves an `{owner}` URL segment to an `Organization`, the same
+    /// "either kind of not-found is the same NotFound" contract
+    /// `repository_by_name` follows.
+    pub async fn organization_by_name(
+        &self,
+        name: &str,
+    ) -> Result<edda_domain::Organization, AuthzError> {
+        OrganizationRepo::find_by_name(&self.pool, name)
+            .await
+            .map_err(|_| AuthzError::NotFound)?
+            .ok_or(AuthzError::NotFound)
     }
 
     pub async fn check_read(

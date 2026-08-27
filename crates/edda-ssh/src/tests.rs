@@ -318,9 +318,13 @@ async fn upload_pack_over_ssh_streams_a_real_pack_for_an_authorized_read() {
     )
     .await
     .expect("insert repository");
-    RepoAccessRepo::grant_owner(&state.pool, repo_id, owner)
-        .await
-        .expect("grant owner");
+    RepoAccessRepo::grant_owner(
+        &state.pool,
+        repo_id,
+        edda_domain::AccessSubject::User(owner),
+    )
+    .await
+    .expect("grant owner");
 
     let server = TestServer::start(state).await;
     let mut session = connect(server.addr).await;
@@ -407,9 +411,13 @@ async fn upload_pack_over_ssh_hides_a_private_repo_the_actor_cannot_read() {
     )
     .await
     .expect("insert repository");
-    RepoAccessRepo::grant_owner(&state.pool, repo_id, other_owner)
-        .await
-        .expect("grant owner");
+    RepoAccessRepo::grant_owner(
+        &state.pool,
+        repo_id,
+        edda_domain::AccessSubject::User(other_owner),
+    )
+    .await
+    .expect("grant owner");
     let _ = owner;
 
     let server = TestServer::start(state).await;
@@ -468,9 +476,14 @@ async fn receive_pack_over_ssh_rejects_a_write_without_permission() {
     .await
     .expect("insert repository");
     // Read-only grant, not owner/write — a push must still be rejected.
-    RepoAccessRepo::grant(&state.pool, repo_id, owner, RepoRole::Read)
-        .await
-        .expect("grant read");
+    RepoAccessRepo::grant(
+        &state.pool,
+        repo_id,
+        edda_domain::AccessSubject::User(owner),
+        RepoRole::Read,
+    )
+    .await
+    .expect("grant read");
 
     let server = TestServer::start(state).await;
     let mut session = connect(server.addr).await;

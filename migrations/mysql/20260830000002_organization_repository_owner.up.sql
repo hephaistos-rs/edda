@@ -1,0 +1,13 @@
+-- MySQL/MariaDB counterpart of sqlite/20260830000002_organization_repository_owner.up.sql.
+-- No table rebuild needed — but `ALTER TABLE ... DROP CONSTRAINT
+-- <name>`, which works for an explicitly-named table-level `CONSTRAINT`,
+-- does *not* find a column-level inline `CHECK` by its own
+-- `information_schema`-reported name on a real `mariadb:12.3.3` instance
+-- (confirmed directly: `information_schema.CHECK_CONSTRAINTS` reports it
+-- as `owner_type`, but `DROP CONSTRAINT owner_type` then fails with
+-- "check that it exists" — apparently a real MariaDB quirk, not a typo).
+-- `MODIFY COLUMN` redeclaring the column with its widened inline `CHECK`
+-- sidesteps the issue entirely (verified against the same instance) and
+-- is the portable choice, since every `CHECK` in this schema (`role`,
+-- `visibility`, ...) is declared the same inline, column-level way.
+ALTER TABLE repositories MODIFY COLUMN owner_type VARCHAR(16) NOT NULL CHECK (owner_type IN ('user', 'organization'));

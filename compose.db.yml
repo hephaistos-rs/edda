@@ -12,7 +12,7 @@ services:
       MYSQL_PASSWORD: edda
     ports:
       - "3306:3306"
-  
+
   postgres:
     image: postgres:18.6
     container_name: postgres
@@ -24,3 +24,28 @@ services:
       POSTGRES_DB: eddadb
     ports:
       - "5432:5432"
+
+  garage:
+    image: dxflrs/garage:v2.3.0
+    container_name: garage
+    restart: unless-stopped
+    command:
+      - /garage
+      - server
+      - --single-node
+      - --default-bucket
+    ports:
+      - "3900:3900"
+      - "3901:3901"
+      - "3902:3902"
+      - "3903:3903"
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
+      - garage-data:/var/lib/garage
+    environment:
+      GARAGE_DEFAULT_ACCESS_KEY: GKtestaccesskey1234567890
+      GARAGE_DEFAULT_SECRET_KEY: test-secret-key-1234567890
+      GARAGE_DEFAULT_BUCKET: edda-test
+
+volumes:
+  garage-data:

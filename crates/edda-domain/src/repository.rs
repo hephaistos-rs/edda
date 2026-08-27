@@ -1,13 +1,12 @@
-use crate::ids::{RepositoryId, UserId};
+use crate::ids::{OrganizationId, RepositoryId, UserId};
 
-/// Who owns a repository. `User` is the only reachable variant until
-/// organizations exist — kept as an enum now, not a plain `UserId`
-/// column, so that a future `Organization` variant is
-/// an additive change to this type rather than a breaking one everywhere
-/// `RepositoryOwner` is matched.
+/// Who owns a repository — an individual account, or (Phase 8) an
+/// `Organization`. Kept as an enum, not a plain id column, so an owner
+/// that's neither or ambiguously both is unrepresentable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepositoryOwner {
     User(UserId),
+    Organization(OrganizationId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,17 +33,18 @@ impl Visibility {
 }
 
 impl RepositoryOwner {
-    /// `repositories.owner_type`'s stored value — only `"user"` is
-    /// reachable until organizations exist.
+    /// `repositories.owner_type`'s stored value.
     pub const fn owner_type_db_str(self) -> &'static str {
         match self {
             RepositoryOwner::User(_) => "user",
+            RepositoryOwner::Organization(_) => "organization",
         }
     }
 
     pub fn owner_id(self) -> uuid::Uuid {
         match self {
             RepositoryOwner::User(id) => id.as_uuid(),
+            RepositoryOwner::Organization(id) => id.as_uuid(),
         }
     }
 }

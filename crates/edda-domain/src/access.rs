@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::branch_protection::BranchProtectionRule;
-use crate::ids::{RepositoryId, UserId};
+use crate::ids::{RepositoryId, TeamId, UserId};
 use crate::pull_request::{latest_reviews, PrReview, ReviewState};
 use crate::repository::Repository;
 
@@ -50,10 +50,19 @@ impl RepoRole {
     }
 }
 
+/// Who a `repo_access` grant is made to — an individual account, or
+/// (Phase 8) a `Team`, so an organization can grant its repositories to a
+/// group of people at once instead of one `RepoAccess` row per member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessSubject {
+    User(UserId),
+    Team(TeamId),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RepoAccess {
     pub repository_id: RepositoryId,
-    pub user_id: UserId,
+    pub subject: AccessSubject,
     pub role: RepoRole,
 }
 
@@ -273,7 +282,7 @@ mod tests {
     fn access(repository_id: RepositoryId, user_id: UserId, role: RepoRole) -> RepoAccess {
         RepoAccess {
             repository_id,
-            user_id,
+            subject: AccessSubject::User(user_id),
             role,
         }
     }

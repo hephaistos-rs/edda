@@ -124,16 +124,19 @@ pub async fn get_repo(owner: String, name: String) -> Result<RepoDto, ServerFnEr
     Ok(repo_dto(&repository, &owner, summary, is_owner))
 }
 
-/// `name` is just the repo-name segment — the owner half of the
-/// `{owner}/{repo}` identity is never taken from the caller, only derived
-/// from whoever is authenticated, so there's no way to create a repo under
-/// someone else's namespace.
+/// `name` is just the repo-name segment. `owner` is the `{owner}` half of
+/// the `{owner}/{repo}` identity — when `None`, the caller's own username
+/// (unchanged behavior); when `Some`, an organization name the caller
+/// must administer (member of its Owners team), so there's still no way
+/// to create a repo under a namespace the caller doesn't control either
+/// way.
 #[post("/api/repos", auth: axum_login::AuthSession<edda_auth::Backend>)]
 #[tracing::instrument(name = "repository.create", skip_all, err, fields(repo.name = %name))]
 pub async fn create_repo(
     name: String,
     description: Option<String>,
     private: bool,
+    owner: Option<String>,
 ) -> Result<(), ServerFnError> {
     let shared = crate::shared::get();
 
@@ -141,11 +144,42 @@ pub async fn create_repo(
         return Err(ServerFnError::new("login required"));
     };
     let user = session_user.user;
-    let identity = git_identity(&user.username, &name);
+
+    let (owner_username, repo_owner, owner_team_id) = match owner {
+        Some(org_name) => {
+            let organization = shared
+                .authz
+                .organization_by_name(&org_name)
+                .await
+                .map_err(|err| ServerFnError::new(err.to_string()))?;
+            let actor = edda_domain::ActorContext::User(user.id);
+            shared
+                .authz
+                .check_administer_organization(&actor, organization.id)
+                .await
+                .map_err(|err| ServerFnError::new(err.to_string()))?;
+            let owners_team =
+                edda_db::TeamRepo::find_by_org_and_name(&shared.pool, organization.id, "Owners")
+                    .await
+                    .map_err(|err| ServerFnError::new(err.to_string()))?
+                    .ok_or_else(|| ServerFnError::new("organization has no Owners team"))?;
+            (
+                organization.name,
+                edda_domain::RepositoryOwner::Organization(organization.id),
+                Some(owners_team.id),
+            )
+        }
+        None => (
+            user.username.clone(),
+            edda_domain::RepositoryOwner::User(user.id),
+            None,
+        ),
+    };
+    let identity = git_identity(&owner_username, &name);
 
     let repository = edda_domain::Repository {
         id: edda_domain::RepositoryId::new(),
-        owner: edda_domain::RepositoryOwner::User(user.id),
+        owner: repo_owner,
         name: name.clone(),
         description: description.filter(|d| !d.trim().is_empty()),
         visibility: if private {
@@ -164,14 +198,21 @@ pub async fn create_repo(
         .await
         .map_err(|err| ServerFnError::new(err.to_string()))?;
 
-    // Inserting the row and granting its creator ownership happen inside
-    // one transaction (`insert_with_owner`) rather than two separate
-    // statements, which would mask an atomicity gap SQLite's
-    // single-writer serialization happens to hide but PostgreSQL's real
-    // concurrency would not.
-    edda_db::RepositoryRepo::insert_with_owner(&shared.pool, &repository, user.id)
-        .await
-        .map_err(|err| ServerFnError::new(err.to_string()))?;
+    // Inserting the row and granting its creator (or, for an
+    // organization-owned repo, its Owners team) ownership happen inside
+    // one transaction rather than two separate statements, which would
+    // mask an atomicity gap SQLite's single-writer serialization happens
+    // to hide but PostgreSQL's real concurrency would not.
+    match owner_team_id {
+        Some(team_id) => {
+            edda_db::RepositoryRepo::insert_with_owner_team(&shared.pool, &repository, team_id)
+                .await
+        }
+        None => {
+            edda_db::RepositoryRepo::insert_with_owner(&shared.pool, &repository, user.id).await
+        }
+    }
+    .map_err(|err| ServerFnError::new(err.to_string()))?;
     Ok(())
 }
 

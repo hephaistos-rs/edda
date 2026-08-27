@@ -1,5 +1,5 @@
 use edda_db::user_repo::InsertUserError;
-use edda_db::{DbPool, UserRepo};
+use edda_db::{DbPool, OrganizationRepo, UserRepo};
 use edda_domain::validation::is_valid_username;
 use edda_domain::{User, UserId};
 
@@ -59,6 +59,16 @@ pub async fn signup(
     }
     if !is_valid_username(username) {
         return Err(SignupError::InvalidUsername);
+    }
+    // Usernames and organization names (Phase 8) share one global
+    // identifier namespace — `edda-auth::organization::create_organization`
+    // performs the same check in the other direction. See that module's
+    // own doc comment for why this can't be a single database constraint.
+    if OrganizationRepo::find_by_name(pool, username)
+        .await?
+        .is_some()
+    {
+        return Err(SignupError::UsernameTaken);
     }
 
     let password_hash = hash_password(password)?;

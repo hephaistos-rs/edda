@@ -8,6 +8,7 @@
 pub mod authz;
 pub mod backend;
 pub mod oauth;
+pub mod organization;
 pub mod password;
 pub mod password_reset;
 pub mod pending_login;
@@ -21,6 +22,7 @@ pub mod webhook_signing;
 
 pub use authz::AuthorizationService;
 pub use backend::{AuthError, Backend, Credentials, SessionUser};
+pub use organization::{create_organization, CreateOrganizationError};
 pub use signup::{signup, SignupError};
 
 use edda_domain::User;

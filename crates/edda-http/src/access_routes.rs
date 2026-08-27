@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use edda_auth::Backend;
 use edda_db::{RepoAccessRepo, UserRepo};
-use edda_domain::AuthzError;
+use edda_domain::{AccessSubject, AuthzError};
 
 use crate::state::AppState;
 
@@ -82,7 +82,7 @@ async fn add_collaborator(
             if let Err(err) = RepoAccessRepo::grant(
                 &state.pool,
                 repository.id,
-                row.user.id,
+                AccessSubject::User(row.user.id),
                 edda_domain::RepoRole::Write,
             )
             .await
@@ -146,7 +146,13 @@ async fn remove_collaborator(
     let Ok(target_user_id) = target_user_id.parse() else {
         return (StatusCode::NOT_FOUND, "no such collaborator").into_response();
     };
-    match RepoAccessRepo::remove_collaborator(&state.pool, repository.id, target_user_id).await {
+    match RepoAccessRepo::remove_grant(
+        &state.pool,
+        repository.id,
+        AccessSubject::User(target_user_id),
+    )
+    .await
+    {
         Ok(true) => StatusCode::OK.into_response(),
         Ok(false) => (StatusCode::NOT_FOUND, "no such collaborator").into_response(),
         Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),

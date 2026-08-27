@@ -53,7 +53,7 @@ compatibility layers for.
   branch on which backend is connected.
   - **Documented exception**: `tower-sessions-sqlx-store` does not
     support `AnyPool`. `edda-web`'s `session_store` module opens a
-    second, small, *concrete* typed connection specifically to satisfy
+    second, small, _concrete_ typed connection specifically to satisfy
     that one dependency. This is an explicit, narrow infrastructure
     exception — do not generalize it to any other persistence code.
 - **`sqlx::Any` cannot use the `query!`/`query_as!` compile-time-checked

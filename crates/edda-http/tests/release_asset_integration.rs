@@ -13,7 +13,8 @@ use std::sync::Arc;
 use edda_auth::{tokens, AuthorizationService, Backend};
 use edda_db::{NewRelease, ReleaseRepo, RepoAccessRepo, RepositoryRepo};
 use edda_domain::{
-    ReleaseId, RepoRole, Repository, RepositoryId, RepositoryOwner, UserId, Visibility,
+    AccessSubject, ReleaseId, RepoRole, Repository, RepositoryId, RepositoryOwner, UserId,
+    Visibility,
 };
 use edda_git::store::{LocalFsStore, RepoStore};
 use edda_git::LockRegistry;
@@ -94,7 +95,13 @@ async fn an_uploaded_release_asset_downloads_back_with_matching_content() {
         .expect("insert repository row");
     // Bob has read access only (repo is public, so this is implicit —
     // recorded here anyway for clarity) and must not be able to upload.
-    let _ = RepoAccessRepo::grant(&pool, repository.id, bob_id, RepoRole::Read).await;
+    let _ = RepoAccessRepo::grant(
+        &pool,
+        repository.id,
+        AccessSubject::User(bob_id),
+        RepoRole::Read,
+    )
+    .await;
 
     let release_id = ReleaseId::new();
     ReleaseRepo::insert(

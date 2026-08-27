@@ -6,15 +6,16 @@
 //! tests persistence and schema behavior, not authorization policy).
 
 use edda_domain::{
-    CloseReason, DiffAnchor, IssueState, LfsLockId, MergeStrategy, MilestoneState, PrRef, PrState,
-    RepoRole, Repository, RepositoryId, RepositoryOwner, ReviewState, SshKeyId, User, UserId,
-    Visibility,
+    effective_repo_role, AccessSubject, CloseReason, DiffAnchor, IssueState, LfsLockId,
+    MergeStrategy, MilestoneState, PrRef, PrState, RepoRole, Repository, RepositoryId,
+    RepositoryOwner, ReviewState, SshKeyId, TeamPermission, TeamUnit, User, UserId, Visibility,
 };
 
 use crate::{
     AccessTokenRepo, AuditEventRepo, BranchProtectionRepo, IssueCommentRepo, IssueRepo, LabelRepo,
-    LfsRepo, MilestoneRepo, OAuthIdentityRepo, PrCommentRepo, PrReviewRepo, PullRequestRepo,
-    RepoAccessRepo, RepositoryRepo, SshKeyRepo, TotpRepo, UserRepo, WebauthnRepo,
+    LfsRepo, MilestoneRepo, OAuthIdentityRepo, OrganizationRepo, PrCommentRepo, PrReviewRepo,
+    PullRequestRepo, RepoAccessRepo, RepositoryRepo, SshKeyRepo, TeamMemberRepo, TeamRepo,
+    TotpRepo, UserRepo, WebauthnRepo,
 };
 
 async fn insert_user(pool: &crate::DbPool, username: &str) -> UserId {
@@ -101,25 +102,27 @@ async fn access_grants_are_keyed_by_the_specific_repository_not_just_its_name() 
     RepositoryRepo::insert(&pool, &alice_repo).await.unwrap();
     RepositoryRepo::insert(&pool, &bob_repo).await.unwrap();
 
-    RepoAccessRepo::grant_owner(&pool, alice_repo.id, alice)
+    RepoAccessRepo::grant_owner(&pool, alice_repo.id, AccessSubject::User(alice))
         .await
         .unwrap();
-    RepoAccessRepo::grant_owner(&pool, bob_repo.id, bob)
+    RepoAccessRepo::grant_owner(&pool, bob_repo.id, AccessSubject::User(bob))
         .await
         .unwrap();
 
     assert_eq!(
-        RepoAccessRepo::find(&pool, alice_repo.id, alice)
+        RepoAccessRepo::find(&pool, alice_repo.id, AccessSubject::User(alice))
             .await
             .unwrap()
             .unwrap()
             .role,
         RepoRole::Owner
     );
-    assert!(RepoAccessRepo::find(&pool, bob_repo.id, alice)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        RepoAccessRepo::find(&pool, bob_repo.id, AccessSubject::User(alice))
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -130,15 +133,20 @@ async fn a_collaborator_grant_can_be_added_and_removed_but_the_owner_grant_canno
 
     let alice_repo = repo(alice, "shared", Visibility::Private);
     RepositoryRepo::insert(&pool, &alice_repo).await.unwrap();
-    RepoAccessRepo::grant_owner(&pool, alice_repo.id, alice)
+    RepoAccessRepo::grant_owner(&pool, alice_repo.id, AccessSubject::User(alice))
         .await
         .unwrap();
-    RepoAccessRepo::grant(&pool, alice_repo.id, carol, RepoRole::Write)
-        .await
-        .unwrap();
+    RepoAccessRepo::grant(
+        &pool,
+        alice_repo.id,
+        AccessSubject::User(carol),
+        RepoRole::Write,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(
-        RepoAccessRepo::find(&pool, alice_repo.id, carol)
+        RepoAccessRepo::find(&pool, alice_repo.id, AccessSubject::User(carol))
             .await
             .unwrap()
             .unwrap()
@@ -146,24 +154,27 @@ async fn a_collaborator_grant_can_be_added_and_removed_but_the_owner_grant_canno
         RepoRole::Write
     );
 
-    let removed = RepoAccessRepo::remove_collaborator(&pool, alice_repo.id, carol)
+    let removed = RepoAccessRepo::remove_grant(&pool, alice_repo.id, AccessSubject::User(carol))
         .await
         .unwrap();
     assert!(removed);
-    assert!(RepoAccessRepo::find(&pool, alice_repo.id, carol)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        RepoAccessRepo::find(&pool, alice_repo.id, AccessSubject::User(carol))
+            .await
+            .unwrap()
+            .is_none()
+    );
 
-    // The owner grant is structurally protected — `remove_collaborator`'s
-    // own `role != 'owner'` clause is what's under test here, independent
-    // of any authorization-layer check.
-    let removed_owner = RepoAccessRepo::remove_collaborator(&pool, alice_repo.id, alice)
-        .await
-        .unwrap();
+    // The owner grant is structurally protected — `remove_grant`'s own
+    // `role != 'owner'` clause is what's under test here, independent of
+    // any authorization-layer check.
+    let removed_owner =
+        RepoAccessRepo::remove_grant(&pool, alice_repo.id, AccessSubject::User(alice))
+            .await
+            .unwrap();
     assert!(!removed_owner);
     assert_eq!(
-        RepoAccessRepo::find(&pool, alice_repo.id, alice)
+        RepoAccessRepo::find(&pool, alice_repo.id, AccessSubject::User(alice))
             .await
             .unwrap()
             .unwrap()
@@ -180,12 +191,17 @@ async fn deleting_a_repository_cascades_its_access_grants() {
 
     let alice_repo = repo(alice, "shared", Visibility::Private);
     RepositoryRepo::insert(&pool, &alice_repo).await.unwrap();
-    RepoAccessRepo::grant_owner(&pool, alice_repo.id, alice)
+    RepoAccessRepo::grant_owner(&pool, alice_repo.id, AccessSubject::User(alice))
         .await
         .unwrap();
-    RepoAccessRepo::grant(&pool, alice_repo.id, bob, RepoRole::Write)
-        .await
-        .unwrap();
+    RepoAccessRepo::grant(
+        &pool,
+        alice_repo.id,
+        AccessSubject::User(bob),
+        RepoRole::Write,
+    )
+    .await
+    .unwrap();
 
     RepositoryRepo::delete(&pool, alice_repo.id).await.unwrap();
 
@@ -194,14 +210,18 @@ async fn deleting_a_repository_cascades_its_access_grants() {
     // structurally guaranteed by `repo_access`'s `ON DELETE CASCADE`
     // foreign key — nothing in this test calls anything access-specific
     // after `delete`.
-    assert!(RepoAccessRepo::find(&pool, alice_repo.id, alice)
-        .await
-        .unwrap()
-        .is_none());
-    assert!(RepoAccessRepo::find(&pool, alice_repo.id, bob)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        RepoAccessRepo::find(&pool, alice_repo.id, AccessSubject::User(alice))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        RepoAccessRepo::find(&pool, alice_repo.id, AccessSubject::User(bob))
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1142,4 +1162,261 @@ async fn a_branch_protection_rule_round_trips_and_can_be_deleted() {
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn a_team_grant_and_a_direct_grant_both_contribute_to_the_effective_role() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let bob = insert_user(&pool, "bob").await;
+
+    let owners_team_id = OrganizationRepo::insert(
+        &pool,
+        edda_domain::OrganizationId::new(),
+        "acme",
+        None,
+        alice,
+    )
+    .await
+    .unwrap();
+
+    let repository = repo(alice, "widgets", Visibility::Private);
+    RepositoryRepo::insert(&pool, &repository).await.unwrap();
+    RepoAccessRepo::grant_owner(&pool, repository.id, AccessSubject::User(alice))
+        .await
+        .unwrap();
+
+    // Bob has no direct grant on this repository at all.
+    assert!(
+        RepoAccessRepo::find(&pool, repository.id, AccessSubject::User(bob))
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Bob is a member of the org's Owners team, but that team has no
+    // grant on this particular repository — no effective access yet.
+    assert!(TeamMemberRepo::is_member(&pool, owners_team_id, alice)
+        .await
+        .unwrap());
+    TeamMemberRepo::add(&pool, owners_team_id, bob)
+        .await
+        .unwrap();
+    let team_roles = RepoAccessRepo::team_roles_for_user(&pool, repository.id, bob)
+        .await
+        .unwrap();
+    assert!(team_roles.is_empty());
+
+    // Attaching the Owners team to the repository with Write grants every
+    // member — including bob, who has no direct grant — effective write
+    // access.
+    RepoAccessRepo::grant(
+        &pool,
+        repository.id,
+        AccessSubject::Team(owners_team_id),
+        RepoRole::Write,
+    )
+    .await
+    .unwrap();
+    let team_roles = RepoAccessRepo::team_roles_for_user(&pool, repository.id, bob)
+        .await
+        .unwrap();
+    assert_eq!(team_roles, vec![RepoRole::Write]);
+    let direct = RepoAccessRepo::find(&pool, repository.id, AccessSubject::User(bob))
+        .await
+        .unwrap()
+        .map(|access| access.role);
+    assert_eq!(
+        effective_repo_role(direct, &team_roles),
+        Some(RepoRole::Write)
+    );
+
+    // A subsequent direct Admin grant to bob wins over the team's Write.
+    RepoAccessRepo::grant(
+        &pool,
+        repository.id,
+        AccessSubject::User(bob),
+        RepoRole::Admin,
+    )
+    .await
+    .unwrap();
+    let direct = RepoAccessRepo::find(&pool, repository.id, AccessSubject::User(bob))
+        .await
+        .unwrap()
+        .map(|access| access.role);
+    assert_eq!(
+        effective_repo_role(direct, &team_roles),
+        Some(RepoRole::Admin)
+    );
+}
+
+#[tokio::test]
+async fn an_organizations_owners_team_is_named_and_permissioned_as_expected() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let owners_team_id = OrganizationRepo::insert(
+        &pool,
+        edda_domain::OrganizationId::new(),
+        "acme",
+        Some("Acme Corp"),
+        alice,
+    )
+    .await
+    .unwrap();
+
+    let team = TeamRepo::find_by_id(&pool, owners_team_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(team.name, "Owners");
+    assert_eq!(team.permission, TeamPermission::Admin);
+}
+
+#[tokio::test]
+async fn a_repository_created_under_an_organization_grants_its_owners_team_ownership() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let org = edda_domain::OrganizationId::new();
+    let owners_team_id = OrganizationRepo::insert(&pool, org, "acme", None, alice)
+        .await
+        .unwrap();
+
+    let repository = Repository {
+        id: RepositoryId::new(),
+        owner: RepositoryOwner::Organization(org),
+        name: "widgets".to_string(),
+        description: None,
+        visibility: Visibility::Public,
+        forked_from: None,
+    };
+    RepositoryRepo::insert_with_owner_team(&pool, &repository, owners_team_id)
+        .await
+        .unwrap();
+
+    let access = RepoAccessRepo::find(&pool, repository.id, AccessSubject::Team(owners_team_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(access.role, RepoRole::Owner);
+}
+
+#[tokio::test]
+async fn a_team_unit_permission_override_replaces_the_teams_default_for_that_unit_only() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let org = edda_domain::OrganizationId::new();
+    OrganizationRepo::insert(&pool, org, "acme", None, alice)
+        .await
+        .unwrap();
+
+    TeamRepo::insert(
+        &pool,
+        edda_domain::TeamId::new(),
+        org,
+        "developers",
+        TeamPermission::Read,
+    )
+    .await
+    .unwrap();
+    let team = TeamRepo::find_by_org_and_name(&pool, org, "developers")
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        TeamRepo::find_unit_permission(&pool, team.id, TeamUnit::Code)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(team.code_role(None), Some(RepoRole::Read));
+
+    TeamRepo::set_unit_permission(&pool, team.id, TeamUnit::Code, TeamPermission::Write)
+        .await
+        .unwrap();
+    let overridden = TeamRepo::find_unit_permission(&pool, team.id, TeamUnit::Code)
+        .await
+        .unwrap();
+    assert_eq!(overridden, Some(TeamPermission::Write));
+    assert_eq!(team.code_role(overridden), Some(RepoRole::Write));
+
+    // Setting it again (not inserting a second row) replaces, not adds.
+    TeamRepo::set_unit_permission(&pool, team.id, TeamUnit::Code, TeamPermission::Admin)
+        .await
+        .unwrap();
+    assert_eq!(
+        TeamRepo::find_unit_permission(&pool, team.id, TeamUnit::Code)
+            .await
+            .unwrap(),
+        Some(TeamPermission::Admin)
+    );
+}
+
+#[tokio::test]
+async fn team_membership_can_be_added_and_removed() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let bob = insert_user(&pool, "bob").await;
+    let org = edda_domain::OrganizationId::new();
+    OrganizationRepo::insert(&pool, org, "acme", None, alice)
+        .await
+        .unwrap();
+    TeamRepo::insert(
+        &pool,
+        edda_domain::TeamId::new(),
+        org,
+        "developers",
+        TeamPermission::Write,
+    )
+    .await
+    .unwrap();
+    let team = TeamRepo::find_by_org_and_name(&pool, org, "developers")
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(!TeamMemberRepo::is_member(&pool, team.id, bob)
+        .await
+        .unwrap());
+    TeamMemberRepo::add(&pool, team.id, bob).await.unwrap();
+    assert!(TeamMemberRepo::is_member(&pool, team.id, bob)
+        .await
+        .unwrap());
+    let members = TeamMemberRepo::list_members(&pool, team.id).await.unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].id, bob);
+
+    let removed = TeamMemberRepo::remove(&pool, team.id, bob).await.unwrap();
+    assert!(removed);
+    assert!(!TeamMemberRepo::is_member(&pool, team.id, bob)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn organization_names_are_unique_case_insensitively() {
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    OrganizationRepo::insert(
+        &pool,
+        edda_domain::OrganizationId::new(),
+        "acme",
+        None,
+        alice,
+    )
+    .await
+    .unwrap();
+    let err = OrganizationRepo::insert(
+        &pool,
+        edda_domain::OrganizationId::new(),
+        "ACME",
+        None,
+        alice,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        crate::organization_repo::InsertOrganizationError::NameTaken
+    ));
 }

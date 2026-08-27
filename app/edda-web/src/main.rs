@@ -6,6 +6,7 @@ mod job_handlers;
 #[cfg(feature = "server")]
 mod mentions;
 mod notification_server;
+mod org_server;
 mod pr_server;
 mod release_server;
 mod server;
@@ -15,13 +16,15 @@ mod session_store;
 mod shared;
 #[cfg(feature = "server")]
 mod ssrf;
+mod team_server;
 mod ui;
 mod webhook_server;
 
 use ui::layouts::Navbar;
 use ui::pages::{
-    Admin, Home, IssueDetail, IssuesList, Login, Notifications, PullDetail, PullsList,
-    ReleaseDetail, ReleasesList, Repo, ResetPassword, Settings, Signup, WebhooksSettings,
+    Admin, Home, IssueDetail, IssuesList, Login, Notifications, OrganizationDetail,
+    OrganizationsList, PullDetail, PullsList, ReleaseDetail, ReleasesList, Repo, ResetPassword,
+    Settings, Signup, TeamDetail, WebhooksSettings,
 };
 
 #[derive(Debug, Clone, Routable, PartialEq)]
@@ -36,6 +39,12 @@ enum Route {
     Notifications {},
     #[route("/admin")]
     Admin {},
+    #[route("/orgs")]
+    OrganizationsList {},
+    #[route("/orgs/:name")]
+    OrganizationDetail { name: String },
+    #[route("/orgs/:org_name/teams/:team_name")]
+    TeamDetail { org_name: String, team_name: String },
     #[route("/:owner/:name/pulls")]
     PullsList { owner: String, name: String },
     #[route("/:owner/:name/pulls/:number")]

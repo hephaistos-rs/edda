@@ -32,8 +32,8 @@ use std::sync::Arc;
 use edda_auth::{tokens, AuthorizationService, Backend};
 use edda_db::{PrCommentRepo, PrReviewRepo, PullRequestRepo, RepoAccessRepo, RepositoryRepo};
 use edda_domain::{
-    ActorContext, DiffAnchor, MergeStrategy, PrRef, PrState, PullRequestId, RepoRole, Repository,
-    RepositoryId, RepositoryOwner, ReviewState, UserId, Visibility,
+    AccessSubject, ActorContext, DiffAnchor, MergeStrategy, PrRef, PrState, PullRequestId,
+    RepoRole, Repository, RepositoryId, RepositoryOwner, ReviewState, UserId, Visibility,
 };
 use edda_git::store::{LocalFsStore, RepoStore};
 use edda_git::LockRegistry;
@@ -144,9 +144,14 @@ async fn a_pull_request_opens_is_reviewed_and_merges_against_a_real_repository()
     // Bob reviews and alice merges — a reviewer needn't have write access
     // to leave a review, but does need it to be a meaningful
     // collaborator here.
-    RepoAccessRepo::grant(&pool, repository.id, bob_id, RepoRole::Write)
-        .await
-        .expect("grant bob write access");
+    RepoAccessRepo::grant(
+        &pool,
+        repository.id,
+        AccessSubject::User(bob_id),
+        RepoRole::Write,
+    )
+    .await
+    .expect("grant bob write access");
 
     let state = AppState {
         pool: pool.clone(),

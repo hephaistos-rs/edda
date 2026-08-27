@@ -18,7 +18,8 @@ use std::sync::Arc;
 use edda_auth::{tokens, AuthorizationService, Backend};
 use edda_db::{BranchProtectionRepo, RepoAccessRepo, RepositoryRepo};
 use edda_domain::{
-    BranchProtectionRuleId, RepoRole, Repository, RepositoryId, RepositoryOwner, UserId, Visibility,
+    AccessSubject, BranchProtectionRuleId, RepoRole, Repository, RepositoryId, RepositoryOwner,
+    UserId, Visibility,
 };
 use edda_git::store::{LocalFsStore, RepoStore};
 use edda_git::LockRegistry;
@@ -134,9 +135,14 @@ async fn a_protected_branch_rejects_a_direct_push_from_a_non_admin_collaborator(
     RepositoryRepo::insert_with_owner(&pool, &repository, alice_id)
         .await
         .expect("insert repository row");
-    RepoAccessRepo::grant(&pool, repository.id, bob_id, RepoRole::Write)
-        .await
-        .expect("grant bob write access");
+    RepoAccessRepo::grant(
+        &pool,
+        repository.id,
+        AccessSubject::User(bob_id),
+        RepoRole::Write,
+    )
+    .await
+    .expect("grant bob write access");
 
     // Protect `main`, requiring 1 approval — its mere existence is what
     // blocks a direct push (see `edda_domain::branch_protection`'s

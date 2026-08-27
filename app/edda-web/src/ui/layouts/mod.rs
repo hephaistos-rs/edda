@@ -116,6 +116,7 @@ pub fn Navbar() -> Element {
                     AuthState::Checking => rsx! { span { class: "opacity-0", "…" } },
                     AuthState::LoggedIn(user) => rsx! {
                         span { class: "font-mono text-ink", "{user.username}" }
+                        Link { to: Route::OrganizationsList {}, class: "no-underline hover:text-ink", "orgs" }
                         NotificationsLink {}
                         if user.is_admin {
                             Link { to: Route::Admin {}, class: "no-underline hover:text-ink", "admin" }

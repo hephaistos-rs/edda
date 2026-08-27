@@ -25,6 +25,7 @@ pub mod lfs_repo;
 pub mod milestone_repo;
 pub mod notification_repo;
 pub mod oauth_identity_repo;
+pub mod organization_repo;
 pub mod password_reset_token_repo;
 pub mod pr_comment_repo;
 pub mod pr_review_repo;
@@ -34,6 +35,7 @@ pub mod repo_access_repo;
 pub mod repo_number_repo;
 pub mod repository_repo;
 pub mod ssh_key_repo;
+pub mod team_repo;
 pub mod totp_repo;
 pub mod user_repo;
 pub mod webauthn_repo;
@@ -53,15 +55,17 @@ pub use lfs_repo::{CreateLockError, LfsRepo};
 pub use milestone_repo::MilestoneRepo;
 pub use notification_repo::NotificationRepo;
 pub use oauth_identity_repo::OAuthIdentityRepo;
+pub use organization_repo::{InsertOrganizationError, OrganizationRepo};
 pub use password_reset_token_repo::PasswordResetTokenRepo;
 pub use pr_comment_repo::PrCommentRepo;
 pub use pr_review_repo::PrReviewRepo;
 pub use pull_request_repo::{NewPullRequest, PullRequestRepo};
 pub use release_repo::{InsertReleaseError, NewRelease, ReleaseAssetRepo, ReleaseRepo};
-pub use repo_access_repo::RepoAccessRepo;
+pub use repo_access_repo::{CollaboratorRow, RepoAccessRepo, TeamGrantRow};
 pub use repo_number_repo::RepoNumberRepo;
 pub use repository_repo::RepositoryRepo;
 pub use ssh_key_repo::SshKeyRepo;
+pub use team_repo::{InsertTeamError, TeamMemberRepo, TeamRepo};
 pub use totp_repo::TotpRepo;
 pub use user_repo::UserRepo;
 pub use webauthn_repo::WebauthnRepo;
@@ -332,13 +336,42 @@ async fn run_migrations(pool: &DbPool) -> Result<(), sqlx::Error> {
     static POSTGRES: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations/postgres");
     static MYSQL: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations/mysql");
 
-    let migrator = match pool.backend {
-        Backend::Sqlite => &SQLITE,
-        Backend::Postgres => &POSTGRES,
-        Backend::MySql => &MYSQL,
-    };
-    migrator
-        .run(&pool.any)
-        .await
-        .map_err(|err| sqlx::Error::Migrate(Box::new(err)))
+    match pool.backend {
+        // A couple of Phase 8 SQLite migrations rebuild a table other
+        // tables reference via foreign key (SQLite has no `ALTER TABLE`
+        // support for widening a `CHECK` constraint in place — see the
+        // `organization_repository_owner`/`team_repo_access` migrations'
+        // own comments for the documented table-rebuild procedure this
+        // requires). `PRAGMA foreign_keys` is a no-op once a transaction
+        // is already open, so it can't be toggled from inside a
+        // migration's own `.sql` file — this dedicates one connection to
+        // the whole migration run, disables enforcement on it *before*
+        // `sqlx::migrate`'s own per-file transactions begin, and restores
+        // it before the connection goes back to the pool. Safe to do
+        // unconditionally on every startup, not just when a rebuild
+        // migration is pending: a run with nothing new to apply is a
+        // no-op either way, and no other connection in the pool is
+        // affected (each SQLite connection tracks this setting
+        // independently).
+        Backend::Sqlite => {
+            let mut conn = pool.any.acquire().await?;
+            sqlx::query("PRAGMA foreign_keys = OFF")
+                .execute(&mut *conn)
+                .await?;
+            let result = SQLITE.run(&mut *conn).await;
+            sqlx::query("PRAGMA foreign_keys = ON")
+                .execute(&mut *conn)
+                .await?;
+            result.map_err(|err| sqlx::Error::Migrate(Box::new(err)))?;
+        }
+        Backend::Postgres => POSTGRES
+            .run(&pool.any)
+            .await
+            .map_err(|err| sqlx::Error::Migrate(Box::new(err)))?,
+        Backend::MySql => MYSQL
+            .run(&pool.any)
+            .await
+            .map_err(|err| sqlx::Error::Migrate(Box::new(err)))?,
+    }
+    Ok(())
 }

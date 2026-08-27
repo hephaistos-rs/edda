@@ -2,7 +2,7 @@
 
 Self-hosted git platform with a terminal-native, developer-console interface. Host and browse your own repositories — clone and push with a normal `git` client — without depending on GitHub, GitLab, or any other third-party hosting.
 
-Built for solo developers and small teams who want full control and privacy over their code. Deployment is deliberately low-friction: a single self-contained binary, SQLite for storage by default, and nothing external *required* to get running. PostgreSQL and MySQL/MariaDB are both fully supported, first-class alternatives for larger or longer-lived deployments — chosen through configuration, not a rebuild — see [Database backend](#database-backend).
+Built for solo developers and small teams who want full control and privacy over their code. Deployment is deliberately low-friction: a single self-contained binary, SQLite for storage by default, and nothing external _required_ to get running. PostgreSQL and MySQL/MariaDB are both fully supported, first-class alternatives for larger or longer-lived deployments — chosen through configuration, not a rebuild — see [Database backend](#database-backend).
 
 ## Features
 
@@ -46,7 +46,7 @@ See `.env.example` for the full list, including the observability variables docu
 
 ### Database backend
 
-SQLite, PostgreSQL, and MySQL/MariaDB are all first-class, fully-tested backends — one compiled binary connects to whichever `EDDA_DATABASE_URL` names, at **runtime**, no rebuild required (matching how Forgejo's own `DB_TYPE=` config works). SQLite is only the zero-config *default*, not a "primary" database the other two are lesser fallbacks from:
+SQLite, PostgreSQL, and MySQL/MariaDB are all first-class, fully-tested backends — one compiled binary connects to whichever `EDDA_DATABASE_URL` names, at **runtime**, no rebuild required (matching how Forgejo's own `DB_TYPE=` config works). SQLite is only the zero-config _default_, not a "primary" database the other two are lesser fallbacks from:
 
 ```bash
 # Default — SQLite, zero config:

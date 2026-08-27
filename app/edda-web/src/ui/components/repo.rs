@@ -183,7 +183,7 @@ pub fn NewRepoRow(on_created: EventHandler<()>) -> Element {
                         }
                         let is_private = private();
                         spawn(async move {
-                            match create_repo(repo_name, None, is_private).await {
+                            match create_repo(repo_name, None, is_private, None).await {
                                 Ok(()) => {
                                     creating.set(false);
                                     name.set(String::new());

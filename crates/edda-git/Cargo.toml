@@ -3,6 +3,7 @@ name = "edda-git"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+publish.workspace = true
 
 # Git repository storage and gix-backed operations — server-only,
 # transport-agnostic. Both `edda-http`'s
@@ -12,6 +13,9 @@ authors.workspace = true
 # `russh`) — `bytes::Bytes` is a generic, transport-agnostic buffer type,
 # not an HTTP- or SSH-specific one, so depending on it directly here (the
 # same type both transports already hand around) doesn't violate that.
+[lints]
+workspace = true
+
 [dependencies]
 bytes = { workspace = true }
 edda-domain = { workspace = true }

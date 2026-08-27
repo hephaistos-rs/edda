@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # The toolchain, its rustfmt/clippy components, and the wasm target all
+  # come from `rust-toolchain.toml`, installed transparently on the first
+  # cargo call. The lint/wasm jobs additionally set `RUSTFLAGS: -D warnings`
+  # — Cargo caps lints to `allow` for non-path dependencies, so that only
+  # bites Edda's own crates: the "warnings denied in CI" half of the
+  # `[workspace.lints]` policy (plan.local.md §16 Phase 0).
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      # Two passes: the `edda` binary only ever builds as the wasm client
+      # (`--features web`) or the native server (`--features server`), never
+      # with host default features, so it is excluded from the first pass
+      # and linted on its own in the second.
+      - name: clippy (workspace minus the app binary)
+        run: cargo clippy --workspace --exclude edda --all-targets -- -D warnings
+      - name: clippy (the app binary, server configuration)
+        run: cargo clippy -p edda --features server --all-targets -- -D warnings
+
+  wasm:
+    name: wasm client build
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check (wasm32, web feature)
+        run: cargo check -p edda --target wasm32-unknown-unknown --features web
+
+  test:
+    name: test (${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    # No `-D warnings` here: the clippy job already lints every target with
+    # it. This job's purpose is behaviour on all three DB engines.
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [sqlite, postgres, mysql]
+    # Both DB servers run on every leg — conditionally-defined services are
+    # a GitHub Actions footgun, and an idle container is cheap. The
+    # `EDDA_TEST_DATABASE_URL` below is what actually selects the backend
+    # under test; the `sqlite` leg leaves it unset and uses in-memory
+    # SQLite, ignoring both containers.
+    services:
+      postgres:
+        image: postgres:18.6
+        env:
+          POSTGRES_USER: edda
+          POSTGRES_PASSWORD: edda
+          POSTGRES_DB: eddadb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U edda"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+      mysql:
+        image: mariadb:12.3.3
+        env:
+          MARIADB_ROOT_PASSWORD: rootpassword
+          MARIADB_DATABASE: eddadb
+          MARIADB_USER: edda
+          MARIADB_PASSWORD: edda
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.backend }}
+      # `git` is preinstalled on the runner; `git-lfs` is the real client
+      # the LFS integration test drives. `mariadb-client` is only for the
+      # one-off grant below.
+      - name: Install test clients
+        run: sudo apt-get update && sudo apt-get install -y git-lfs mariadb-client
+      # The fresh MariaDB service only grants `edda` rights on `eddadb`;
+      # the test harness creates a database per test (see the script).
+      # Postgres' `edda` is a superuser already, so this is mysql-only.
+      - name: Grant the test user database-creation rights (mysql)
+        if: matrix.backend == 'mysql'
+        run: mariadb -h 127.0.0.1 -uroot -prootpassword < scripts/ci/mariadb-grant.sql
+      - name: cargo test
+        env:
+          # A GitHub expression that resolves to '' would still export the
+          # var as an empty string, which `test_pool()` treats as a bad URL
+          # (not "unset") — so the sqlite leg names the in-memory DB
+          # explicitly rather than relying on the var being absent.
+          EDDA_TEST_DATABASE_URL: ${{ matrix.backend == 'postgres' && 'postgres://edda:edda@localhost:5432/eddadb' || matrix.backend == 'mysql' && 'mysql://edda:edda@localhost:3306/eddadb' || 'sqlite::memory:' }}
+        run: cargo test --workspace --exclude edda
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
+
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
+
+  boundaries:
+    name: architectural boundaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/boundary-check.sh
+
+  webauthn-conformance:
+    name: webauthn conformance vectors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Stub — Phase 8 hardens the WebAuthn RP verifier and adds the
+      # external conformance-vector suite this job will run
+      # (`cargo test -p edda-auth --test webauthn_conformance`).
+      - run: echo "webauthn conformance vectors land in Phase 8 (plan.local.md §11)"

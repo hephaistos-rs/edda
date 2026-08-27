@@ -3,6 +3,7 @@ name = "edda-cli"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+publish.workspace = true
 
 # A thin binary that talks to `edda-db`/`edda-auth` directly, bypassing
 # HTTP entirely — instance administration (`edda-cli user create/list/
@@ -11,6 +12,9 @@ authors.workspace = true
 [[bin]]
 name = "edda-cli"
 path = "src/main.rs"
+
+[lints]
+workspace = true
 
 [dependencies]
 # Only for `argon2::password_hash::rand_core` — generating the

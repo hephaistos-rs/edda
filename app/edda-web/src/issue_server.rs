@@ -35,6 +35,10 @@ pub struct LabelDto {
     pub description: Option<String>,
 }
 
+// Constructed only in this module's `#[get]` handler bodies, which the
+// server-fn macro strips from the client build — where the type then
+// survives solely in the endpoint's return signature.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MilestoneDto {
     pub id: String,

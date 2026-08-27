@@ -12,6 +12,10 @@ services:
       MYSQL_PASSWORD: edda
     ports:
       - "3306:3306"
+    volumes:
+      # Lets `edda` create the per-test `edda_test_*` databases the suite
+      # needs — see the script's own comment. Runs once, on first init.
+      - ./scripts/ci/mariadb-grant.sql:/docker-entrypoint-initdb.d/10-edda-grant.sql:ro
 
   postgres:
     image: postgres:18.6

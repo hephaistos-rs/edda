@@ -3,6 +3,7 @@ name = "edda-auth"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+publish.workspace = true
 
 # Authentication (proving identity: passwords, sessions, tokens) and
 # authorization (deciding what an identity may do) — two modules in one
@@ -12,6 +13,9 @@ authors.workspace = true
 # a real architectural seam. `authz`'s job is strictly "fetch what edda-domain's pure
 # functions need, then call them" — it must never contain a permission
 # *decision* itself.
+[lints]
+workspace = true
+
 [dependencies]
 aes-gcm = { workspace = true }
 argon2 = { workspace = true }

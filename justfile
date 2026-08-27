@@ -5,9 +5,13 @@
 # or `just verify` before pushing.
 #
 # Prerequisites:
-#   - Rust toolchain (see CI for the pinned version).
-#   - The wasm target, for `just wasm` / `just verify`:
+#   - Rust toolchain: pinned by `rust-toolchain.toml` at the repo root —
+#     rustup installs it automatically on the first cargo invocation.
+#   - The wasm target ships with that toolchain file too; if you use a
+#     detached toolchain, add it with:
 #       rustup target add wasm32-unknown-unknown
+#   - `cargo-deny` + `cargo-audit`, for `just deny` / `just audit`:
+#       cargo install cargo-deny cargo-audit
 #   - Docker + compose, for `just test-postgres` / `just test-mariadb`
 #     (they drive `compose.db.yml`).
 #   - The Dioxus CLI, for `just run` (the browser UI): `cargo install dioxus-cli`.
@@ -62,6 +66,20 @@ clippy-server:
 # Formatting check plus both clippy passes — the full lint gate.
 lint: fmt-check clippy clippy-server
 
+# Architectural boundary checks (plan.local.md §5.1) — enforced invariants
+# plus a report of the ones later phases still have to establish.
+boundary:
+    bash scripts/boundary-check.sh
+
+# Supply-chain gate: advisories, license policy, and the crypto-stack bans
+# (no openssl/native-tls/aws-lc-rs/oniguruma). Needs `cargo install cargo-deny`.
+deny:
+    cargo deny check advisories bans licenses sources
+
+# RUSTSEC advisory scan of the lockfile. Needs `cargo install cargo-audit`.
+audit:
+    cargo audit --deny warnings
+
 # Full test suite against the default in-memory SQLite backend.
 test:
     cargo test {{no_app}}
@@ -82,8 +100,8 @@ test-mariadb: db-up
 wasm:
     cargo check -p edda --target wasm32-unknown-unknown --features web
 
-# The pre-push gate: fmt check, both clippy passes, tests, the wasm build, whitespace check. Stops at the first failure. Does not touch external databases — run `just test-postgres` / `just test-mariadb` too when persistence changes.
-verify: fmt-check clippy clippy-server test wasm
+# The pre-push gate: fmt check, both clippy passes, tests, the wasm build, boundary checks, whitespace check. Stops at the first failure. Does not touch external databases — run `just test-postgres` / `just test-mariadb` too when persistence changes; run `just deny` / `just audit` when dependencies change.
+verify: fmt-check clippy clippy-server test wasm boundary
     git diff --check
 
 # Run the full app (browser UI + server) with hot reload via `dx`.

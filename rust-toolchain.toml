@@ -1,0 +1,12 @@
+# Pinned toolchain for the whole workspace. CI and every contributor build
+# on the exact same compiler so a lint or codegen difference never shows up
+# only in one place. Bump this deliberately (its own PR), not incidentally.
+#
+# `wasm32-unknown-unknown` is listed because the `edda` binary's client half
+# (`--features web`) is a first-class build target — `just wasm` / the CI
+# `wasm` job need it present.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

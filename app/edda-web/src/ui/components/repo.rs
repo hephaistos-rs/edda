@@ -9,7 +9,13 @@ use crate::server::{create_repo, RepoDto};
 #[derive(Clone, Copy, PartialEq)]
 pub enum RepoStatus {
     Clean,
+    // Rendering (label, color, icon) is wired, but `From<RepoDto>` cannot
+    // produce these yet: "ahead" needs upstream mirroring and "conflict"
+    // needs a merge-state signal, neither of which exists (see the
+    // ahead/behind note in `From<RepoDto>` below).
+    #[allow(dead_code)]
     Ahead,
+    #[allow(dead_code)]
     Conflict,
     Empty,
 }

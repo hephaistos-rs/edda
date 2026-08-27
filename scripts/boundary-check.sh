@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+#
+# Architectural boundary checks — the enforceable half of plan.local.md §5.1.
+#
+# Two tiers:
+#
+#   ENFORCED  — invariants that hold on the tree *today*. A violation fails
+#               CI. Introducing an `axum` dependency in `edda-domain`, or an
+#               `edda-auth` dependency in `edda-jobs`, trips these.
+#
+#   PENDING   — target invariants a later implementation phase establishes
+#               (the API/Dioxus decoupling, the config consolidation, the
+#               git-subsystem rewrite). Reported for visibility with the
+#               owning phase, but not fatal yet. Each becomes ENFORCED in
+#               its phase and this script is the place that flips it.
+#
+# Run from the workspace root: `bash scripts/boundary-check.sh`
+# (or `just boundary`).
+
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+fail=0
+red()   { printf '\033[31m%s\033[0m\n' "$1"; }
+green() { printf '\033[32m%s\033[0m\n' "$1"; }
+dim()   { printf '\033[2m%s\033[0m\n'  "$1"; }
+
+# enforce <description> <grep-hits>
+# Fails the run if the final argument (a command substitution) is non-empty.
+enforce() {
+    local desc=$1 hits=$2
+    if [[ -n "$hits" ]]; then
+        red "FAIL  $desc"
+        printf '%s\n' "$hits" | sed 's/^/        /'
+        fail=1
+    else
+        green "ok    $desc"
+    fi
+}
+
+# pending <phase> <description> <grep-hits>
+pending() {
+    local phase=$1 desc=$2 hits=$3
+    if [[ -n "$hits" ]]; then
+        local n
+        n=$(printf '%s\n' "$hits" | grep -c .)
+        dim "pend  [$phase] $desc — $n file(s)"
+    else
+        dim "pend  [$phase] $desc — already clean (promote to ENFORCED)"
+    fi
+}
+
+# A grep that treats "no match" as success (empty output), never an error.
+g() { grep -rnE "$@" 2>/dev/null || true; }
+
+echo "── ENFORCED ─────────────────────────────────────────────"
+
+# edda-domain is the pure functional core: no I/O crate, no framework, ever.
+enforce "edda-domain manifest carries no I/O / framework dependency" \
+    "$(g '^\s*(sqlx|axum|tower|gix|gix-[a-z]+|dioxus|reqwest|hyper|russh|tokio|lettre|comrak)\s*[=.]' crates/edda-domain/Cargo.toml)"
+
+enforce "edda-domain source names no I/O / framework crate" \
+    "$(g '\b(sqlx|axum|gix|gix_[a-z]+|dioxus|reqwest|hyper|russh|tokio)::' crates/edda-domain/src \
+        | grep -vE ':[0-9]+:\s*(//|//!|\*)')"
+
+# edda-jobs owns the queue *mechanism* only — handler logic (which needs
+# auth + a HTTP client) is injected from the composition root.
+enforce "edda-jobs manifest does not depend on the HTTP app or edda-auth" \
+    "$(g '^\s*(edda-http|edda-app|edda-auth)\s*[=.]' crates/edda-jobs/Cargo.toml)"
+
+# edda-git is transport- and storage-decision-agnostic: protected-ref names
+# and hook decisions are passed in by the caller.
+enforce "edda-git manifest does not depend on edda-db or edda-auth" \
+    "$(g '^\s*(edda-db|edda-auth)\s*[=.]' crates/edda-git/Cargo.toml)"
+
+# edda-render is a leaf: heavy markdown/highlight deps, no Edda deps.
+enforce "edda-render manifest depends on no other Edda crate" \
+    "$(g '^\s*edda-[a-z]+\s*[=.]' crates/edda-render/Cargo.toml)"
+
+echo
+echo "── PENDING (target invariants, not yet enforced) ────────"
+
+pending "Phase 2" "sqlx:: outside crates/edda-db/" \
+    "$(g '\bsqlx::' --include=*.rs crates app | grep -v 'crates/edda-db/' || true)"
+
+pending "Phase 4" "axum:: / http:: outside the HTTP app crate" \
+    "$(g '\b(axum|http)::' --include=*.rs crates app | grep -vE 'crates/edda-http/|:[0-9]+:\s*(//|//!)' || true)"
+
+pending "Phase 4" "dioxus outside the web UI crate" \
+    "$(g '\bdioxus\b' --include=*.rs crates app | grep -vE 'app/edda-web/|:[0-9]+:\s*(//|//!)' || true)"
+
+pending "Phase 6/7" "gix:: / gix_*:: outside crates/edda-git/" \
+    "$(g '\bgix(_[a-z]+)?::' --include=*.rs crates app | grep -v 'crates/edda-git/' || true)"
+
+pending "Phase 1" "env::var / env::set_var outside edda-app::config + the binary" \
+    "$(g 'env::(var|set_var|remove_var)\b' --include=*.rs crates app \
+        | grep -vE 'app/edda-web/src/main\.rs|:[0-9]+:\s*(//|//!)' || true)"
+
+echo
+if [[ $fail -ne 0 ]]; then
+    red "boundary-check: FAILED"
+    exit 1
+fi
+green "boundary-check: passed"

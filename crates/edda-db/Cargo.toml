@@ -3,6 +3,7 @@ name = "edda-db"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+publish.workspace = true
 
 # The only crate in the workspace allowed to issue SQL. Exposes narrow,
 # intention-revealing repository structs; never exposes a raw query or a
@@ -17,6 +18,9 @@ authors.workspace = true
 # every query goes through the runtime-checked `sqlx::query`/`query_as`
 # instead, so the `macros` feature isn't needed and there is no `.sqlx/`
 # offline cache to maintain.
+[lints]
+workspace = true
+
 [dependencies]
 edda-domain = { workspace = true }
 serde_json = { workspace = true }

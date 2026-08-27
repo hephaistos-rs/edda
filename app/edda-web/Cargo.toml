@@ -3,12 +3,16 @@ name = "edda"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+publish.workspace = true
 
 # The workspace's composition root. This is the only package that needs
 # to compile for both the wasm32 client and the native server (Dioxus
 # fullstack's own constraint), so it's also the only package where every
 # server-only dependency below must stay behind `dep:`/the `server`
 # feature.
+[lints]
+workspace = true
+
 [dependencies]
 # Only for `session_store::AnySessionStore`'s `SessionStore` impl, which
 # must match that trait's own `#[async_trait]` shape.

@@ -493,6 +493,10 @@ pub async fn close_pull_request(
     Ok(())
 }
 
+// Constructed only in this module's `#[get]` handler body, which the
+// server-fn macro strips from the client build — where the type then
+// survives solely in the endpoint's return signature.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BranchProtectionDto {
     pub id: String,

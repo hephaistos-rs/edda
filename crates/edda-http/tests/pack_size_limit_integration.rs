@@ -1,12 +1,19 @@
-//! Sustained-request-rate test against the public API: limits engage
-//! correctly without false-positiving on legitimate git-over-HTTP clone
-//! traffic. Two things proven together, against one real server:
-//! rapid-fire requests against a rate-limited
-//! `/api/v1/` endpoint eventually get a real `429 Too Many Requests`, and
-//! a real `git clone` over HTTP — several of them, well past the request
-//! count that tripped the limiter above — keeps succeeding throughout,
-//! because the git smart-HTTP bridge is deliberately exempt
-//! (`edda_http::rate_limit`'s own doc comment explains why).
+//! H1 baseline (plan.local.md §2 / Phase 0 exit criteria).
+//!
+//! The git smart-HTTP handlers currently take the whole request body as
+//! `axum::body::Bytes`, so axum's default `DefaultBodyLimit` (~2 MiB) caps
+//! every push. A pack larger than that is rejected before `edda-git` ever
+//! sees it — the `Bytes` extractor fails the request (the `git` client
+//! surfaces it as `RPC failed; HTTP 400`).
+//!
+//! This test pushes a deliberately-incompressible ~4 MiB blob and asserts
+//! the push **succeeds** and the object is retrievable server-side — the
+//! behaviour Phase 6 delivers by switching the receive path to a streaming
+//! body with an explicit, mid-stream `EDDA_GIT_MAX_PACK_BYTES` cap and
+//! `DefaultBodyLimit::disable()` on the git/LFS routes.
+//!
+//! It fails today, so it is `#[ignore]`d. Phase 6 removes the `#[ignore]`
+//! line (and nothing else) once the streaming receive path lands.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -72,7 +79,7 @@ async fn spawn_server(state: AppState) -> SocketAddr {
 
 fn temp_dir(label: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "edda-http-rate-limit-it-{label}-{}-{}",
+        "edda-http-pack-size-it-{label}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -83,25 +90,29 @@ fn temp_dir(label: &str) -> std::path::PathBuf {
     dir
 }
 
+/// ~`len` bytes a deflate pass cannot meaningfully shrink, so the pack
+/// stays over axum's 2 MiB default body limit. A plain xorshift keeps this
+/// dependency-free and deterministic.
+fn incompressible_bytes(len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len);
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    while out.len() < len {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        out.extend_from_slice(&state.to_le_bytes());
+    }
+    out.truncate(len);
+    out
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sustained_requests_trip_the_limiter_but_never_a_real_git_clone() {
+#[ignore = "H1 baseline: >2 MiB push is rejected by axum's default body limit until Phase 6 streams the receive body. Un-ignore in Phase 6."]
+async fn a_push_larger_than_the_default_body_limit_succeeds() {
     if !tool_available("git") {
         eprintln!("skipping: git not found on PATH");
         return;
     }
-
-    // A deliberately tiny budget — this test only needs to *observe* the
-    // limiter engaging, not exercise its production-sized default. Read
-    // once, inside `edda_http::rate_limit::layer()`, at the `router(...)`
-    // call a few lines below — no other test in this process reads these,
-    // so there's no cross-test race.
-    // Single-threaded at this point in the test (no other task has been
-    // spawned yet), and no other test in this binary reads these vars.
-    // `set_var` is infallible and safe on this workspace's 2021 edition;
-    // it only becomes `unsafe` under edition 2024, and by the time that
-    // migration lands the rate-limit budget comes from `Settings`, not env.
-    std::env::set_var("EDDA_RATE_LIMIT_PER_SECOND", "1");
-    std::env::set_var("EDDA_RATE_LIMIT_BURST", "3");
 
     let pool = edda_db::test_pool().await;
     let store_root = temp_dir("store");
@@ -139,68 +150,46 @@ async fn sustained_requests_trip_the_limiter_but_never_a_real_git_clone() {
         backend: Backend::new(pool.clone()),
     };
     let addr = spawn_server(state).await;
-    let base = format!("http://{addr}");
+
     let work_dir = temp_dir("work");
     std::fs::create_dir_all(&work_dir).expect("create work dir");
+    let remote = format!("http://ci:{alice_token}@{addr}/alice/demo.git");
 
-    // Give the repo real content — an empty repo's clone never issues the
-    // upload-pack POST at all (nothing to want), which would leave half of
-    // the git-over-HTTP protocol untested below.
-    let alice_remote = format!("http://ci:{alice_token}@{addr}/alice/demo.git");
-    run(&work_dir, "git", &["clone", &alice_remote, "seed-repo"]);
-    let seed_repo_dir = work_dir.join("seed-repo");
-    std::fs::write(seed_repo_dir.join("README.md"), b"# Demo\n").expect("write file");
-    run(&seed_repo_dir, "git", &["add", "README.md"]);
-    run(&seed_repo_dir, "git", &["commit", "-m", "seed commit"]);
+    run(&work_dir, "git", &["clone", &remote, "repo"]);
+    let repo_dir = work_dir.join("repo");
+    std::fs::write(
+        repo_dir.join("big.bin"),
+        incompressible_bytes(4 * 1024 * 1024),
+    )
+    .expect("write the large blob");
+    run(&repo_dir, "git", &["add", "big.bin"]);
     run(
-        &seed_repo_dir,
+        &repo_dir,
         "git",
-        &["push", "origin", "HEAD:refs/heads/main"],
+        &["commit", "-m", "add a 4 MiB incompressible blob"],
     );
 
-    // Sustained rapid-fire requests against a rate-limited `/api/v1/`
-    // endpoint (public, no credentials needed — the limiter runs ahead of
-    // any authorization check, keyed on the request itself). With a burst
-    // of 3, replenishing one per second, the 4th request within the same
-    // second must be rejected.
-    let client = reqwest::Client::new();
-    let mut saw_429 = false;
-    for _ in 0..20 {
-        let response = client
-            .get(format!("{base}/api/v1/repos/alice/demo"))
-            .send()
-            .await
-            .expect("send request");
-        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            saw_429 = true;
-            break;
-        }
-    }
+    let push = Command::new("git")
+        .args(["push", "origin", "HEAD:refs/heads/main"])
+        .current_dir(&repo_dir)
+        .env("GIT_AUTHOR_NAME", "ci")
+        .env("GIT_AUTHOR_EMAIL", "ci@example.com")
+        .env("GIT_COMMITTER_NAME", "ci")
+        .env("GIT_COMMITTER_EMAIL", "ci@example.com")
+        .output()
+        .expect("run git push");
     assert!(
-        saw_429,
-        "expected the rate limiter to reject at least one of 20 rapid-fire \
-         /api/v1/ requests given a burst size of 3"
+        push.status.success(),
+        "a >2 MiB push should be accepted once the receive body streams:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&push.stdout),
+        String::from_utf8_lossy(&push.stderr),
     );
 
-    // A real `git clone`, repeated well past that same burst size (each
-    // clone issues at least two HTTP requests: `GET .../info/refs` and
-    // `POST .../git-upload-pack`, so 6 clones is at least 12 requests,
-    // four times the budget that just rejected `/api/v1/` traffic) must
-    // still succeed every time — the git smart-HTTP bridge is exempt.
-    for i in 0..6 {
-        let dest = format!("clone-{i}");
-        run(&work_dir, "git", &["clone", &alice_remote, &dest]);
-        let log_output = Command::new("git")
-            .args(["log", "-1", "--format=%s", "HEAD"])
-            .current_dir(work_dir.join(&dest))
-            .output()
-            .expect("read cloned log");
-        let summary = String::from_utf8_lossy(&log_output.stdout);
-        assert!(
-            summary.contains("seed commit"),
-            "clone {i} did not land the seeded commit, got: {summary}"
-        );
-    }
+    // Server-side confirmation: a fresh clone gets the blob back intact.
+    run(&work_dir, "git", &["clone", &remote, "verify"]);
+    let round_tripped = std::fs::read(work_dir.join("verify").join("big.bin"))
+        .expect("the pushed blob is retrievable after a re-clone");
+    assert_eq!(round_tripped.len(), 4 * 1024 * 1024);
 
     let _ = std::fs::remove_dir_all(&work_dir);
     let _ = std::fs::remove_dir_all(&store_root);

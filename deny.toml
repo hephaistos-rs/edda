@@ -1,0 +1,96 @@
+# cargo-deny configuration — the supply-chain gate the CI `deny` job runs
+# (`cargo deny check`). Four independent checks: advisories, bans, licenses,
+# sources.
+#
+# The bans list is the load-bearing part for this workspace: it makes the
+# "one crypto stack: `ring` only, no C crypto libraries" rule from
+# `plan.local.md` §3.10 / the `AGENTS.md` dependency principle a mechanical
+# check instead of a review-time judgement call. Adding `webauthn-rs`,
+# switching a TLS backend to `native-tls`, or pulling `syntect`'s Oniguruma
+# backend would all trip this and fail CI.
+
+[graph]
+# Default resolution only. `all-features` would drag in Dioxus's
+# `desktop`/`mobile` stacks (webkit/gtk/tao → openssl, native-tls, gtk-rs)
+# — feature sets Edda never builds in CI or in production, whose advisories
+# and banned crates are noise here. The `server` and `web` graphs are
+# ring-only by construction (see the `russh`/`reqwest`/`lettre` entries in
+# the workspace `Cargo.toml`).
+
+[advisories]
+version = 2
+# Unmaintained: only fail when a *direct* workspace dependency is
+# unmaintained — something we could actually act on. Transitive ones we
+# can't fix (`yaml-rust` under `syntect`, `paste`/`proc-macro-error` under
+# various proc-macro crates) are out of our hands.
+unmaintained = "workspace"
+yanked = "warn"
+ignore = [
+    # Marvin Attack (timing side-channel in the `rsa` crate). No fixed
+    # release exists upstream. `rsa` is a transitive, non-optional
+    # dependency of `russh` (SSH RSA host/client keys) and is also wanted
+    # for WebAuthn RS256 (plan §4.5). Not remotely exploitable in Edda's
+    # usage (local key operations, not an oracle); revisit when `rsa`
+    # publishes a constant-time fix.
+    "RUSTSEC-2023-0071",
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+# Permissive licenses only. A copyleft dependency is a deliberate decision
+# that goes through review and gets added here explicitly.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MITNFA",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",           # quoted_printable (via lettre)
+    "BSL-1.0",        # xxhash-rust
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",  # webpki-roots
+    "MPL-2.0",
+    "Unlicense",
+]
+exceptions = []
+
+# Edda's own crates carry no `license` field (no license chosen yet) and
+# are `publish = false`; don't hold them to the third-party license policy.
+[licenses.private]
+ignore = true
+
+[bans]
+# Edda's own crates share one workspace version, so a duplicated `edda-*`
+# can't happen; third-party duplicates are noise to watch, not a hard gate.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+# One crypto stack: `ring` (via `rustls` / `russh`). No OpenSSL, no
+# `aws-lc-rs`, no `native-tls`, no Oniguruma. See the workspace `Cargo.toml`
+# comments on `russh`, `reqwest`, `lettre`, `syntect`, and `passkey-types`
+# for the per-dependency reasoning this list enforces globally.
+deny = [
+    { name = "openssl", reason = "C crypto library — this workspace is ring-only (plan §3.10)." },
+    { name = "openssl-sys", reason = "pulls libssl/OpenSSL; the reason webauthn-rs is rejected (plan V1)." },
+    { name = "native-tls", reason = "delegates to a platform C TLS stack — use rustls (ring)." },
+    { name = "schannel", reason = "native-tls's Windows backend; banned with native-tls." },
+    { name = "security-framework", reason = "native-tls's macOS backend; banned with native-tls." },
+    { name = "aws-lc-rs", reason = "second native crypto backend; rustls must use the ring provider." },
+    { name = "aws-lc-sys", reason = "aws-lc-rs's -sys crate." },
+    { name = "onig", reason = "Oniguruma (C regex) — syntect must use the fancy-regex backend." },
+    { name = "onig_sys", reason = "Oniguruma -sys crate." },
+]
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

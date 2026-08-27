@@ -3,12 +3,16 @@ name = "edda-http"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+publish.workspace = true
 
 # The axum application: the git smart-HTTP bridge, account/token routes,
 # collaborator-management routes, and cross-cutting middleware
 # (observability, health check). Handlers call into `edda-auth`'s
 # `AuthorizationService` and `edda-domain`'s pure functions for every
 # permission decision — they never re-derive access themselves.
+[lints]
+workspace = true
+
 [dependencies]
 # `multipart`: release-asset upload (`release_assets::upload_asset`) —
 # not a default `axum` feature.

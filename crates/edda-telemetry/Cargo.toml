@@ -3,12 +3,16 @@ name = "edda-telemetry"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+publish.workspace = true
 
 # Structured logging, tracing, and OpenTelemetry export setup. Owns no
 # domain-specific span/metric definitions of its own — every other crate
 # instruments itself with plain `tracing` (a normal external dependency,
 # not this crate) and calls this crate's `metrics::record_*` helpers; this
 # crate owns only the *mechanism*.
+[lints]
+workspace = true
+
 [dependencies]
 opentelemetry = { workspace = true }
 opentelemetry-appender-tracing = { workspace = true }

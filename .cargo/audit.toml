@@ -1,0 +1,12 @@
+# `cargo audit` configuration (CI `audit` job). Keep the ignore list in
+# sync with `deny.toml`'s `[advisories].ignore`.
+
+[advisories]
+ignore = [
+    # Marvin Attack (timing side-channel in the `rsa` crate). No fixed
+    # release exists upstream. `rsa` is a transitive, non-optional
+    # dependency of `russh` (SSH RSA keys) and is also wanted for WebAuthn
+    # RS256 (plan.local.md §4.5). Not remotely exploitable in Edda's usage;
+    # revisit when `rsa` ships a constant-time fix.
+    "RUSTSEC-2023-0071",
+]

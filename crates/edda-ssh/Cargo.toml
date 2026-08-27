@@ -3,6 +3,7 @@ name = "edda-ssh"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+publish.workspace = true
 
 # Git-over-SSH transport — owns SSH-specific concerns only (server/session
 # lifecycle, public-key authentication, exec-command parsing, channel I/O
@@ -10,6 +11,9 @@ authors.workspace = true
 # (shared verbatim with `edda-http`'s bridge) and every access decision to
 # `edda-auth::AuthorizationService` — this crate must never reimplement
 # either.
+[lints]
+workspace = true
+
 [dependencies]
 bytes = { workspace = true }
 edda-auth = { workspace = true }

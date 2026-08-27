@@ -3,6 +3,7 @@ name = "edda-render"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+publish.workspace = true
 
 # Markdown-to-HTML and syntax-highlighting rendering — presentation logic,
 # not domain/business-rule logic, so it lives in its own crate rather than
@@ -11,6 +12,9 @@ authors.workspace = true
 # any kind: `syntect`'s bundled default syntax/theme sets and `comrak`/
 # `ammonia`'s parsers are all in-memory, so this crate needs no `tokio`, no
 # `sqlx`, nothing beyond the three rendering dependencies themselves.
+[lints]
+workspace = true
+
 [dependencies]
 # GFM-to-HTML. Every render this crate produces from it is piped through
 # `ammonia` before being returned — see `markdown::render`'s doc comment.

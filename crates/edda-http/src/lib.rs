@@ -9,6 +9,7 @@ mod auth_routes;
 mod git_http;
 mod lfs;
 mod oauth_routes;
+mod rate_limit;
 mod release_assets;
 mod ssh_key_routes;
 mod state;
@@ -28,10 +29,18 @@ use tower_http::trace::TraceLayer;
 /// The complete `edda-http` surface, merged and instrumented, ready to be
 /// `.merge()`d with Dioxus's own router and wrapped in the session/auth
 /// layer by the composition root (`edda-web`).
+///
+/// Rate limiting (`rate_limit`, §10.3) applies to every route here
+/// *except* the git smart-HTTP bridge and LFS — real `git`/`git-lfs`
+/// clients routinely issue several requests in quick succession as
+/// ordinary protocol behavior, not abuse, and throttling that traffic is
+/// explicitly the compatibility risk the plan calls out for this
+/// middleware. `.route_layer(...)`, not `.layer(...)`, for the same
+/// reason `with_http_observability` below already uses it: applied before
+/// merging the exempt routes in, so it only ever wraps a route that
+/// actually matched inside this half of the router.
 pub fn router(state: AppState) -> Router {
-    let routes = Router::new()
-        .merge(git_http::routes())
-        .merge(lfs::routes())
+    let rate_limited = Router::new()
         .merge(auth_routes::routes())
         .merge(oauth_routes::routes())
         .merge(webauthn_routes::routes())
@@ -40,6 +49,12 @@ pub fn router(state: AppState) -> Router {
         .merge(admin_routes::routes())
         .merge(release_assets::routes())
         .merge(api_v1::routes())
+        .route_layer(rate_limit::layer());
+
+    let routes = Router::new()
+        .merge(git_http::routes())
+        .merge(lfs::routes())
+        .merge(rate_limited)
         .route("/healthz", get(healthz));
 
     with_http_observability(routes).with_state(state)

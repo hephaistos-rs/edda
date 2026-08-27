@@ -83,6 +83,15 @@ gix-actor = "0.41.2"
 gix-hash = "0.26.0"
 gix-object = "0.63.0"
 gloo-net = "0.7.0"
+# The core rate-limiting algorithm `tower_governor` (Phase 9, `edda_http::
+# rate_limit`) is built on — already a transitive dependency of that crate;
+# named directly here only so `edda-http` can spell out its middleware's
+# concrete generic type (`governor::middleware::NoOpMiddleware<governor::
+# clock::QuantaInstant>`) instead of an opaque `impl Trait` return, not to
+# add any new capability or supply-chain surface beyond what `tower_governor`
+# already pulls in. Left unpinned to whatever patch version `tower_governor`
+# 0.8's own `^0.10.0` requirement resolves to.
+governor = "0.10"
 # HTML sanitizer run on every `comrak` output — see that dependency's own
 # comment.
 ammonia = "4.1.4"
@@ -169,6 +178,22 @@ tokio = "1.53.1"
 # for server-side secret generation + `otpauth` for the `otpauth://` URI
 # manual-entry/QR string.
 totp-rs = { version = "6.0.0", features = ["gen_secret", "otpauth"] }
+# General API rate limiting (Phase 9, `edda_http::rate_limit`) — a
+# key-based token-bucket middleware over the pure-Rust `governor` crate
+# (no native/C dependency, matching this workspace's existing preference).
+# `default-features = false` drops the default `tonic` feature (this
+# workspace has no gRPC surface to rate-limit) while keeping `axum` (this
+# crate's own `IntoResponse`/`Response<axum::body::Body>` glue for a
+# rejected request) and `tracing` (a "rate limit exceeded" log line
+# through this workspace's existing subscriber, matching the observability
+# level everything else in `edda-http` already has). Verified live on
+# crates.io before adoption (0.8.0, 2025-08-14) — compatible with this
+# workspace's `axum` 0.8/`tower` 0.5 already in the graph, confirmed via
+# its own published `Cargo.toml`.
+tower_governor = { version = "0.8", default-features = false, features = [
+    "axum",
+    "tracing",
+] }
 tower-http = "0.6.11"
 tower-sessions = "0.14.0"
 tower-sessions-sqlx-store = "0.15.0"

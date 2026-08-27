@@ -11,6 +11,7 @@ Built for solo developers and small teams who want full control and privacy over
 - **Accounts and access** — email/password signup and login, plus revocable personal access tokens for authenticating `git push`/`git clone` over HTTP.
 - **Single-binary deploy** — SQLite-backed by default, no required external services (no mandatory Postgres, Redis, etc.); PostgreSQL and MySQL/MariaDB are available as opt-in backends, selected at runtime through configuration, not a rebuild.
 - **Built-in observability** — structured logs, distributed traces, and metrics out of the box, exportable via OpenTelemetry (see [Observability](#observability)).
+- **Rate limiting** — a per-client token-bucket limit on the API surface, on by default and tuned via configuration; real `git`/`git-lfs` traffic is never throttled.
 
 ## Status
 

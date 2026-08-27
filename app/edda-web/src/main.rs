@@ -131,7 +131,24 @@ fn main() {
             // `tower-sessions-sqlx-store` can't share the `AnyPool`
             // directly.
             let session_store = session_store::connect(&pool).await?;
-            let session_layer = tower_sessions::SessionManagerLayer::new(session_store);
+            // `SameSite=Lax`, not `tower-sessions`' own `Strict` default
+            // (§23's own flagged "verify, don't assume" item — verified
+            // directly against a real instance, and found to matter): the
+            // OAuth login/link flow (`edda-http`'s `oauth_routes::begin`)
+            // stashes its CSRF token/nonce/PKCE verifier in this exact
+            // session before redirecting to the external provider, then
+            // reads it back in `callback` once the provider redirects the
+            // browser back — a genuine cross-site *top-level* navigation
+            // the provider initiates. `SameSite=Strict` never attaches the
+            // cookie to that request at all, so `callback` would always see
+            // "no OAuth login is pending" and every real external-provider
+            // login would fail outright. `Lax` still withholds the cookie
+            // from the cross-site POST/subresource requests CSRF actually
+            // relies on, so this doesn't weaken that protection — it only
+            // permits the top-level-GET-navigation case `Strict` was
+            // blocking unnecessarily.
+            let session_layer = tower_sessions::SessionManagerLayer::new(session_store)
+                .with_same_site(tower_sessions::cookie::SameSite::Lax);
 
             let backend = edda_auth::Backend::new(pool.clone());
             let auth_layer =

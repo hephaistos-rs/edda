@@ -20,6 +20,9 @@ edda-auth = { workspace = true }
 edda-db = { workspace = true }
 edda-domain = { workspace = true }
 edda-git = { workspace = true }
+# Only for `rate_limit`'s concrete `GovernorLayer` type — see the workspace
+# `Cargo.toml` entry's comment.
+governor = { workspace = true }
 # The narrow `enqueue`/`dispatch` primitives only (password-reset email,
 # webhook/notification fan-out from `pull_request`/`issue` mutations
 # routed through this crate's git-protected-branch check) — never the
@@ -52,6 +55,9 @@ sqlx = { workspace = true, features = ["any"] }
 # I/O off the request-handling task.
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tower-http = { workspace = true, features = ["trace"] }
+# General API rate limiting (`rate_limit`) — see the workspace `Cargo.toml`
+# entry's comment for the dependency choice.
+tower_governor = { workspace = true }
 # The `Session` extractor for `oauth_routes` — stashing the CSRF
 # token/nonce/PKCE verifier across the redirect round-trip to the external
 # identity provider. The session *store* and *layer* are still wired up

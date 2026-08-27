@@ -6,44 +6,58 @@ Built for solo developers and small teams who want full control and privacy over
 
 ## Features
 
-- **Real git hosting** — a git smart-HTTP implementation (built directly on [`gix`](https://github.com/GitoxideLabs/gitoxide), no `git` subprocess) serves clone and push over plain HTTP.
-- **Web UI** — repository listing with search, file/tree browsing, file viewing, and commit history, in a dense, keyboard-first interface (see `DESIGN.md`).
-- **Accounts and access** — email/password signup and login, plus revocable personal access tokens for authenticating `git push`/`git clone` over HTTP.
+- **Real git hosting** — a git implementation built directly on [`gix`](https://github.com/GitoxideLabs/gitoxide) (no `git` subprocess), serving clone/fetch/push over both a smart-HTTP bridge and a native SSH transport (default port `2222`), sharing one protocol core.
+- **Web UI** — repository listing with search, file/tree browsing, file viewing, commit history, diffs, pull requests, and an issue tracker, in a dense, keyboard-first interface (see `DESIGN.md`).
+- **Accounts and access** — email/password signup and login, optional TOTP and WebAuthn/passkey second factors, optional OAuth2/OIDC login, revocable personal access tokens, SSH keys, and organizations/teams with per-repository roles.
+- **Collaboration** — pull request review and merge, issues with labels and milestones, protected branches, tagged releases with assets, signed outbound webhooks, and in-app/email notifications.
 - **Single-binary deploy** — SQLite-backed by default, no required external services (no mandatory Postgres, Redis, etc.); PostgreSQL and MySQL/MariaDB are available as opt-in backends, selected at runtime through configuration, not a rebuild.
 - **Built-in observability** — structured logs, distributed traces, and metrics out of the box, exportable via OpenTelemetry (see [Observability](#observability)).
 - **Rate limiting** — a per-client token-bucket limit on the API surface, on by default and tuned via configuration; real `git`/`git-lfs` traffic is never throttled.
 
 ## Status
 
-Early and actively developed. Core git hosting, repository browsing, and authentication work end to end; feature scope beyond that (pull requests, issues, CI, etc.) isn't decided yet.
+Early and actively developed, but broad: git hosting over HTTP and SSH, repository browsing, authentication (password + TOTP/WebAuthn/OAuth), pull requests, issues, organizations/teams, releases, webhooks, and notifications all work end to end and are covered by integration tests. CI/CD (a Forgejo-Actions equivalent) and package registries are deliberately out of scope for now.
 
 ## Quick start
 
 ```bash
 cp .env.example .env
-cargo run --features server
+cargo install dioxus-cli          # provides `dx`
+cd app/edda-web && dx serve --platform web
 ```
 
-Edda listens on `127.0.0.1:8080` by default and serves the web UI there. Repository data and the SQLite database live under `./data` by default.
+`dx serve` builds the client and server together, links the web UI's
+assets, and hot-reloads on change. Edda listens on `127.0.0.1:8080` by
+default; repository data and the SQLite database live under `./data`.
+
+`cargo run --features server` (from the workspace root) also starts the
+server and is enough for the git endpoints and the REST API, but it does
+**not** run the Dioxus asset pipeline, so the served HTML references
+unresolved asset paths and the browser UI renders unstyled — use `dx` for
+the web UI.
 
 Clone a repository hosted on this instance the normal way:
 
 ```bash
-git clone http://127.0.0.1:8080/<repo-name>.git
+git clone http://127.0.0.1:8080/<owner>/<repo>.git      # smart-HTTP
+git clone ssh://git@127.0.0.1:2222/<owner>/<repo>.git   # SSH (add an SSH key in settings first)
 ```
 
-Pushing over HTTP requires being logged in (a browser session cookie) or a personal access token (created from the UI, sent as the HTTP Basic password).
+Pushing over HTTP requires being logged in (a browser session cookie) or a personal access token (created from the UI, sent as the HTTP Basic password). Pushing over SSH uses a registered SSH key.
 
 ### Configuration
 
 Runtime behavior is controlled by environment variables — none of them are read from `.env` by the running binary itself (see `.env.example`'s top comment for why). At minimum:
 
-| Variable        | Default              | Purpose                                             |
-| --------------- | -------------------- | --------------------------------------------------- |
-| `EDDA_DATA_DIR` | `./data`             | Where repository data and the SQLite database live. |
-| `IP` / `PORT`   | `127.0.0.1` / `8080` | Address the server binds to.                        |
+| Variable         | Default              | Purpose                                                     |
+| ---------------- | -------------------- | ---------------------------------------------------------- |
+| `EDDA_DATA_DIR`  | `./data`             | Where repository data and the SQLite database live.        |
+| `IP` / `PORT`    | `127.0.0.1` / `8080` | Address the HTTP server binds to.                          |
+| `EDDA_SSH_PORT`  | `2222`               | Port the git-over-SSH listener binds to (on `IP`).         |
 
-See `.env.example` for the full list, including the observability variables documented below.
+See `.env.example` for the full list — database URL, `EDDA_SECRET_KEY`
+(required before TOTP enrollment), OAuth/WebAuthn/SMTP settings, rate-limit
+tuning, and the observability variables documented below.
 
 ### Database backend
 
@@ -81,6 +95,25 @@ runs the client/server dev loop with hot reload — `dx` locates `Dioxus.toml` i
 npx @tailwindcss/cli -i ./input.css -o ./assets/tailwind.css --watch
 ```
 
+### Common tasks
+
+A [`justfile`](justfile) wraps the usual lifecycle — `just` (or `just --list`)
+shows every recipe. The important ones:
+
+| Recipe                                | What it does                                                        |
+| ------------------------------------- | ------------------------------------------------------------------ |
+| `just verify`                         | fmt check, both clippy passes, `cargo test`, the wasm build, `git diff --check` — the pre-push gate |
+| `just test`                           | full test suite against the default in-memory SQLite               |
+| `just test-postgres` / `just test-mariadb` | same suite against a real backend (starts `compose.db.yml` first) |
+| `just run`                            | `dx serve` — the browser UI with hot reload                        |
+| `just run-server`                     | the server binary alone (no `dx`; see the Quick start caveat)      |
+
+The database-backed tests default to in-memory SQLite; point
+`EDDA_TEST_DATABASE_URL` at a PostgreSQL or MySQL/MariaDB server (a fresh
+database is created per test) to run them against another backend, exactly
+as `just test-postgres` / `just test-mariadb` do. Per `AGENTS.md`, a schema
+or query change must pass on all three.
+
 ### Project layout
 
 Edda is a Cargo workspace: a functional core of pure domain logic, thin
@@ -92,9 +125,13 @@ I/O-performing "shell" crates around it, and a composition root
 crates/
 ├─ edda-domain/     # entities, invariants, pure authorization/business-rule functions — no I/O
 ├─ edda-db/         # sqlx AnyPool (SQLite/PostgreSQL/MySQL-MariaDB, selected at runtime), embedded migrations, one repository struct per aggregate
-├─ edda-git/        # repository storage and gix-backed operations — transport-agnostic
-├─ edda-auth/       # authentication (passwords/sessions/tokens) and the authorization service
-├─ edda-http/       # axum app: git smart-HTTP bridge, account/token/collaborator routes
+├─ edda-git/        # repository storage and gix-backed operations (protocol core, diff, merge, LFS) — transport-agnostic
+├─ edda-render/     # markdown rendering (sanitized) and syntax highlighting
+├─ edda-auth/       # authentication (passwords/sessions/tokens/TOTP/WebAuthn/OAuth/SSH keys) and the authorization service
+├─ edda-http/       # axum app: git smart-HTTP bridge, LFS, auth/token/collaborator/admin/webhook routes, REST /api/v1, rate limiting
+├─ edda-ssh/        # git-over-SSH transport (russh), reusing edda-git's protocol core
+├─ edda-jobs/       # the background-job poller and handler registry (handler logic is wired in app/edda-web)
+├─ edda-cli/        # `edda-cli` — offline instance administration (user create/list/disable/enable/delete)
 └─ edda-telemetry/  # tracing/OpenTelemetry setup, see below
 app/
 └─ edda-web/        # the composition root: main.rs, Dioxus server functions, UI (components/layouts/pages)

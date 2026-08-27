@@ -195,7 +195,17 @@ pub async fn pool() -> Result<DbPool, sqlx::Error> {
                 .unwrap_or_else(|_| "./data".into());
             std::fs::create_dir_all(&data_dir).map_err(sqlx::Error::Io)?;
             let path = data_dir.join("edda.db");
-            format!("sqlite://{}?mode=rwc", path.display())
+            // `sqlite:` (opaque form), not `sqlite://` (authority form): the
+            // latter parses the first path segment as a URL host, so an
+            // absolute path (`C:\...` -> host `C`, "unable to open database
+            // file") or any Windows path separator (`\` -> "invalid domain
+            // character") makes it malformed. Only a forward-slash relative
+            // path happens to survive `sqlite://`. The opaque form takes the
+            // remainder verbatim as a filename, so absolute/relative and
+            // either separator all work. (The `sqlite:///` three-slash form
+            // also works, but only for absolute paths — it turns a relative
+            // path into a bogus absolute one.)
+            format!("sqlite:{}?mode=rwc", path.display())
         }
     };
 

@@ -5,24 +5,42 @@
 use std::sync::Arc;
 
 use edda_auth::AuthorizationService;
-use edda_db::{DbPool, EventRepo, NewPullRequest, PrCommentRepo, PrReviewRepo, PullRequestRepo};
+use edda_db::{
+    DbPool, EventRepo, NewPullRequest, PrCommentRepo, PrReviewRepo, PullRequestRepo, RepositoryRepo,
+};
 use edda_domain::{
-    ActorContext, CloseReason, DiffAnchor, DomainEvent, EventId, MentionSource, MergeStrategy,
-    PrCommentId, PrRef, PrReviewId, PrState, PullRequest, PullRequestId, Repository, ReviewState,
+    parse_head_ref, ActorContext, CloseReason, DiffAnchor, DomainEvent, EventId, MentionSource,
+    MergeStrategy, PrCommentId, PrRef, PrReviewId, PrState, PullRequest, PullRequestId, Repository,
+    ReviewState,
 };
 use edda_git::store::RepoStore;
-use edda_git::{merge_branches, LockRegistry, MergeOutcome};
+use edda_git::{merge_branches, merge_ref_into_branch, LockRegistry, MergeOutcome};
 
-use super::{mentions, now_unix, ServiceError};
+use super::{git_identity, mentions, now_unix, ServiceError};
 use crate::AppState;
 
 /// What a caller supplies to open a pull request.
 pub struct NewPullRequestInput {
     pub title: String,
     pub body: Option<String>,
+    /// The account owning the fork the source branch lives in, for a
+    /// cross-repository (fork-sourced) pull request. `None` — or equal to
+    /// the target owner — is a same-repository PR. When `None`,
+    /// `source_branch` is additionally checked for the `owner:branch`
+    /// form.
+    pub source_owner: Option<String>,
     pub source_branch: String,
     pub target_branch: String,
     pub draft: bool,
+}
+
+/// The Edda-internal ref, in the *target* repository, that a
+/// cross-repository pull request's imported source tip lives at. Keyed by
+/// the PR's id (stable, known before the number is allocated) so opening
+/// the PR needs no ordering dance between the DB insert and the git
+/// import. Also read by `api::pulls`'s diff endpoint.
+pub(crate) fn pull_head_ref(id: PullRequestId) -> String {
+    format!("refs/edda/pull-heads/{id}")
 }
 
 /// Constructed per request from `AppState`'s shared handles. Cloning is
@@ -60,9 +78,13 @@ impl PullRequestService {
         )
     }
 
-    /// Open a pull request. Write access on the target repository;
-    /// same-repository source only (cross-repo PRs are Phase 5). Returns
-    /// the new PR's number.
+    /// Open a pull request. For a same-repository PR: write access on the
+    /// repository. For a cross-repository (fork-sourced) PR: write on the
+    /// fork + read on the target (`can_open_cross_repo_pull_request`), and
+    /// the fork's source tip is copied into the target's object store now
+    /// (interim — Phase 14 replaces the copy with object-store alternates)
+    /// so the later merge/diff never has to know a second store exists.
+    /// Returns the new PR's number.
     pub async fn open(
         &self,
         actor: &ActorContext,
@@ -70,23 +92,68 @@ impl PullRequestService {
         name: &str,
         input: NewPullRequestInput,
     ) -> Result<i64, ServiceError> {
-        let (repository, author_id) = self.write_checked(actor, owner, name).await?;
+        let author_id = actor.user_id().ok_or(ServiceError::Unauthorized)?;
         if input.title.trim().is_empty() {
             return Err(ServiceError::Validation(
                 "a pull request needs a title".to_string(),
             ));
         }
+
+        let target = self.authz.repository_by_name(owner, name).await?;
+
+        // Resolve the source side: an explicit `source_owner`, else an
+        // `owner:branch` prefix on `source_branch`, else this same repo.
+        let (source_owner, source_branch): (Option<&str>, &str) = match &input.source_owner {
+            Some(o) => (Some(o.as_str()), input.source_branch.as_str()),
+            None => parse_head_ref(&input.source_branch),
+        };
+        let source_branch = source_branch.to_string();
+
+        let source = match source_owner {
+            Some(o) if !o.eq_ignore_ascii_case(owner) => {
+                self.authz.repository_by_name(o, name).await?
+            }
+            _ => target.clone(),
+        };
+
+        let pr_id = PullRequestId::new();
+
+        if source.id == target.id {
+            self.authz.check_write(actor, &target).await?;
+        } else {
+            self.authz
+                .check_open_cross_repo_pull_request(actor, &source, &target)
+                .await?;
+
+            let source_identity = self.repo_identity(&source).await?;
+            let target_identity = git_identity(owner, name);
+            let head_ref = pull_head_ref(pr_id);
+
+            // Git side first (an orphan pull-head ref is cheap to gc; a PR
+            // row whose head won't resolve is not), under the target
+            // repo's lock so nothing else writes it mid-import.
+            let lock = self.locks.lock_for(&target_identity);
+            let _guard = lock.lock().await;
+            edda_git::import_branch_tip(
+                self.store.as_ref(),
+                &source_identity,
+                &source_branch,
+                &target_identity,
+                &head_ref,
+            )?;
+        }
+
         let number = PullRequestRepo::insert(
             &self.pool,
-            PullRequestId::new(),
-            repository.id,
+            pr_id,
+            target.id,
             NewPullRequest {
                 title: input.title.trim(),
                 body: input.body.as_deref().filter(|b| !b.trim().is_empty()),
                 author_id,
                 source: &PrRef {
-                    repository_id: repository.id,
-                    branch: input.source_branch,
+                    repository_id: source.id,
+                    branch: source_branch,
                 },
                 target: &input.target_branch,
                 draft: input.draft,
@@ -94,6 +161,18 @@ impl PullRequestService {
         )
         .await?;
         Ok(number)
+    }
+
+    /// The `{owner}/{name}` on-disk identity of an arbitrary repository row
+    /// (its owner may be a user or an organization) — used to turn a
+    /// cross-repo PR's stored `source.repository_id` back into something
+    /// `edda-git` can open.
+    async fn repo_identity(&self, repository: &Repository) -> Result<String, ServiceError> {
+        let (_, owner_username) =
+            RepositoryRepo::find_by_id_with_owner_username(&self.pool, repository.id)
+                .await?
+                .ok_or(ServiceError::NotFound)?;
+        Ok(git_identity(&owner_username, &repository.name))
     }
 
     /// Submit a review (approve / request changes / comment). Write access
@@ -225,19 +304,52 @@ impl PullRequestService {
             .check_merge_pull_request(actor, &repository, &pr.target, &reviews)
             .await?;
 
-        let identity = format!("{owner}/{name}");
+        let identity = git_identity(owner, name);
         let lock = self.locks.lock_for(&identity);
         let _guard = lock.lock().await;
 
-        let outcome = merge_branches(
-            self.store.as_ref(),
-            &identity,
-            &pr.source.branch,
-            &pr.target,
-            &committer.username,
-            &committer.email,
-            &format!("Merge pull request #{number} from {}", pr.source.branch),
-        )?;
+        let outcome = if pr.source.repository_id == repository.id {
+            merge_branches(
+                self.store.as_ref(),
+                &identity,
+                &pr.source.branch,
+                &pr.target,
+                &committer.username,
+                &committer.email,
+                &format!("Merge pull request #{number} from {}", pr.source.branch),
+            )?
+        } else {
+            // Cross-repository: refresh the imported source tip (the fork
+            // may have moved since the PR opened), then merge from that
+            // internal pull-head ref. The merge writes only into the
+            // target — the fork is never touched.
+            let (source_repo, source_owner) =
+                RepositoryRepo::find_by_id_with_owner_username(&self.pool, pr.source.repository_id)
+                    .await?
+                    .ok_or(ServiceError::NotFound)?;
+            let source_identity = git_identity(&source_owner, &source_repo.name);
+            let head_ref = pull_head_ref(pr.id);
+            edda_git::import_branch_tip(
+                self.store.as_ref(),
+                &source_identity,
+                &pr.source.branch,
+                &identity,
+                &head_ref,
+            )?;
+            merge_ref_into_branch(
+                self.store.as_ref(),
+                &identity,
+                &head_ref,
+                &format!("{source_owner}:{}", pr.source.branch),
+                &pr.target,
+                &committer.username,
+                &committer.email,
+                &format!(
+                    "Merge pull request #{number} from {source_owner}:{}",
+                    pr.source.branch
+                ),
+            )?
+        };
 
         let merged_state = PrState::Merged {
             merged_at: now_unix(),

@@ -200,7 +200,7 @@ fn highlighted_line_html(text: &str, filename_hint: &str) -> String {
         .to_string()
 }
 
-fn file_diff_dto(diff: edda_git::FileDiff) -> FileDiffDto {
+pub(crate) fn file_diff_dto(diff: edda_git::FileDiff) -> FileDiffDto {
     let filename_hint = diff
         .new_path
         .clone()

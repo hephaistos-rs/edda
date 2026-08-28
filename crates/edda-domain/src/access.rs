@@ -228,6 +228,35 @@ pub fn can_merge_pull_request(
     Ok(())
 }
 
+/// Whether `actor` may open a pull request that proposes changes *from*
+/// `source` (a branch in a fork they pushed to) *into* `target` (the
+/// upstream they want their work merged into). The contributor model:
+/// **write on the source** — it's their fork, and they must be able to
+/// point a proposal at its branches — plus only **read on the target** —
+/// they must be able to see what they're proposing to change, but need no
+/// write there, since the maintainer is the one who merges.
+/// `source_access`/`target_access` are `actor`'s already-fetched grants on
+/// each repository, exactly as every other function in this module takes
+/// its `access`.
+///
+/// Same-repository pull requests are the `source.id == target.id` case and
+/// are authorized by `can_write_repository` on that one repository
+/// instead; this function is only for the cross-repository (fork) path.
+/// Read-on-target is checked first so an actor who can't even see `target`
+/// gets the same `NotFound` a direct read would give, never a hint that a
+/// private upstream exists.
+pub fn can_open_cross_repo_pull_request(
+    actor: &ActorContext,
+    source: &Repository,
+    source_access: Option<&RepoAccess>,
+    target: &Repository,
+    target_access: Option<&RepoAccess>,
+) -> Result<(), AuthzError> {
+    can_read_repository(actor, target, target_access)?;
+    can_write_repository(actor, source, source_access)?;
+    Ok(())
+}
+
 fn token_scope_permits(actor: &ActorContext, repository: &Repository) -> bool {
     match actor {
         ActorContext::Token { scope, .. } => scope.permits(repository),
@@ -460,6 +489,50 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, AuthzError::Forbidden);
+    }
+
+    #[test]
+    fn a_cross_repo_pull_request_needs_write_on_the_fork_and_read_on_upstream() {
+        let upstream = repo(Visibility::Public);
+        let fork = repo(Visibility::Public);
+        let contributor = UserId::new();
+        let actor = ActorContext::User(contributor);
+        let fork_write = access(fork.id, contributor, RepoRole::Write);
+
+        // Write on the fork + (implicit) read on the public upstream → ok,
+        // even with no grant at all on upstream.
+        assert!(can_open_cross_repo_pull_request(
+            &actor,
+            &fork,
+            Some(&fork_write),
+            &upstream,
+            None,
+        )
+        .is_ok());
+
+        // Only read on the "source" (e.g. they can see the fork but it
+        // isn't theirs) → refused.
+        let fork_read = access(fork.id, contributor, RepoRole::Read);
+        assert_eq!(
+            can_open_cross_repo_pull_request(&actor, &fork, Some(&fork_read), &upstream, None)
+                .unwrap_err(),
+            AuthzError::Forbidden
+        );
+
+        // Cannot see a private upstream at all → NotFound, and the check
+        // never gets as far as looking at the fork.
+        let private_upstream = repo(Visibility::Private);
+        assert_eq!(
+            can_open_cross_repo_pull_request(
+                &actor,
+                &fork,
+                Some(&fork_write),
+                &private_upstream,
+                None,
+            )
+            .unwrap_err(),
+            AuthzError::NotFound
+        );
     }
 
     #[test]

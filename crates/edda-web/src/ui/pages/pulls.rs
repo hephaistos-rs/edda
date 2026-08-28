@@ -35,6 +35,17 @@ fn state_label(state: &PrStateDto) -> (&'static str, &'static str) {
     }
 }
 
+/// The head-side label a PR shows: `owner:branch` for a fork-sourced pull
+/// request (so it reads like a real git host's compare view), plain
+/// `branch` for a same-repository one.
+fn head_label(pr: &PullRequestDto) -> String {
+    if pr.is_cross_repo {
+        format!("{}:{}", pr.source_owner, pr.source_branch)
+    } else {
+        pr.source_branch.clone()
+    }
+}
+
 #[component]
 pub fn PullsList(owner: String, name: String) -> Element {
     let owner_c = owner.clone();
@@ -47,6 +58,7 @@ pub fn PullsList(owner: String, name: String) -> Element {
     let mut show_form = use_signal(|| false);
     let mut title = use_signal(String::new);
     let mut body = use_signal(String::new);
+    let mut source_owner = use_signal(String::new);
     let mut source_branch = use_signal(String::new);
     let mut target_branch = use_signal(|| "main".to_string());
     let mut error = use_signal(|| Option::<String>::None);
@@ -62,6 +74,7 @@ pub fn PullsList(owner: String, name: String) -> Element {
         let path = pulls_path(&owner_for_submit, &name_for_submit);
         let title_value = title.read().clone();
         let body_value = body.read().clone();
+        let source_owner_value = source_owner.read().clone();
         let source_value = source_branch.read().clone();
         let target_value = target_branch.read().clone();
         submitting.set(true);
@@ -70,6 +83,7 @@ pub fn PullsList(owner: String, name: String) -> Element {
             let request = CreatePullRequest {
                 title: title_value,
                 body: (!body_value.trim().is_empty()).then_some(body_value),
+                source_owner: (!source_owner_value.trim().is_empty()).then_some(source_owner_value),
                 source_branch: source_value,
                 target_branch: target_value,
                 draft: false,
@@ -80,6 +94,7 @@ pub fn PullsList(owner: String, name: String) -> Element {
                 Ok(()) => {
                     title.set(String::new());
                     body.set(String::new());
+                    source_owner.set(String::new());
                     source_branch.set(String::new());
                     show_form.set(false);
                     pulls.restart();
@@ -104,6 +119,15 @@ pub fn PullsList(owner: String, name: String) -> Element {
             if show_form() {
                 form { class: "mt-4 flex flex-col gap-3 border border-line p-4", onsubmit: on_submit,
                     div { class: "flex gap-3",
+                        label { class: "flex flex-1 flex-col gap-1 text-sm text-ink-muted",
+                            "source fork owner"
+                            input {
+                                r#type: "text", placeholder: "(this repo) — or a fork's owner",
+                                class: "border border-line bg-surface px-2.5 py-1.5 font-mono text-sm text-ink focus:border-accent focus:outline-none",
+                                value: "{source_owner}",
+                                oninput: move |event| source_owner.set(event.value()),
+                            }
+                        }
                         label { class: "flex flex-1 flex-col gap-1 text-sm text-ink-muted",
                             "source branch"
                             input {
@@ -171,7 +195,7 @@ pub fn PullsList(owner: String, name: String) -> Element {
                                             div { class: "min-w-0",
                                                 div { class: "font-mono text-sm text-ink", "#{pr.number} {pr.title}" }
                                                 div { class: "truncate font-mono text-xs text-ink-muted",
-                                                    "{pr.source_branch} → {pr.target_branch} · opened {relative_time(pr.created_at)} by {pr.author_username}"
+                                                    "{head_label(&pr)} → {pr.target_branch} · opened {relative_time(pr.created_at)} by {pr.author_username}"
                                                 }
                                             }
                                             span { class: "shrink-0 font-mono text-xs {color}", "{label}" }
@@ -292,7 +316,7 @@ pub fn PullDetail(owner: String, name: String, number: i64) -> Element {
                         h1 { class: "font-mono text-xl font-semibold text-ink", "{pr.title} " span { class: "text-ink-muted", "#{pr.number}" } }
                         div { class: "mt-1 font-mono text-xs {color}", "{label}" }
                         p { class: "mt-1 font-mono text-xs text-ink-muted",
-                            "{pr.source_branch} → {pr.target_branch} · opened by {pr.author_username}"
+                            "{head_label(&pr)} → {pr.target_branch} · opened by {pr.author_username}"
                         }
                         if let Some(html) = &pr.body_html {
                             div { class: "mt-4 border border-line p-4 text-sm text-ink", dangerous_inner_html: "{html}" }

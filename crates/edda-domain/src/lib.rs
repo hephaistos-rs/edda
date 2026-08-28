@@ -26,8 +26,9 @@ pub mod webhook;
 
 pub use access::{
     can_administer_repository, can_manage_repository_danger_zone, can_merge_pull_request,
-    can_read_repository, can_write_repository, require_instance_admin, AccessSubject, ActorContext,
-    AuthzError, RepoAccess, RepoRole, RepositoryScope,
+    can_open_cross_repo_pull_request, can_read_repository, can_write_repository,
+    require_instance_admin, AccessSubject, ActorContext, AuthzError, RepoAccess, RepoRole,
+    RepositoryScope,
 };
 pub use branch_protection::BranchProtectionRule;
 pub use event::{DomainEvent, DomainEventKind, MentionSource};
@@ -49,8 +50,8 @@ pub use notification::{Notification, NotificationKind, NotificationSubject};
 pub use oauth_identity::OAuthIdentity;
 pub use organization::Organization;
 pub use pull_request::{
-    latest_reviews, CloseReason, DiffAnchor, MergeStrategy, PrComment, PrRef, PrReview, PrState,
-    PullRequest, ReviewState,
+    latest_reviews, parse_head_ref, CloseReason, DiffAnchor, MergeStrategy, PrComment, PrRef,
+    PrReview, PrState, PullRequest, ReviewState,
 };
 pub use release::{Release, ReleaseAsset};
 pub use repository::{Repository, RepositoryOwner, Visibility};

@@ -126,11 +126,13 @@ pub struct PullRequestRepo;
 
 impl PullRequestRepo {
     /// Allocates the next number for `repository_id` and inserts a new,
-    /// `Open` pull request. `new.source.repository_id` must equal
-    /// `repository_id` — only same-repository pull requests are supported
-    /// (see `edda_domain::pull_request`'s module doc comment);
-    /// callers construct `source` from the same repository they're
-    /// opening the PR in.
+    /// `Open` pull request. `new.source.repository_id` may be a *different*
+    /// repository than `repository_id` (the target) — a cross-repository
+    /// (fork-sourced) pull request — in which case
+    /// `access::can_open_cross_repo_pull_request` is what the service layer
+    /// authorizes it with, and `source_repository_id` is stored verbatim so
+    /// the merge/diff paths know which repository the source branch lives
+    /// in. For a same-repository PR the two ids simply coincide.
     pub async fn insert<'c>(
         db: impl DbConn<'c>,
         id: PullRequestId,

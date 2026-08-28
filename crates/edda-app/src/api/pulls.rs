@@ -7,21 +7,27 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use edda_api_types::{
-    AddCommentRequest, CreatePullRequest, CreatedNumberDto, MergedPullDto, PrCommentDto,
-    PrReviewDto, PrStateDto, PullRequestDetailDto, PullRequestDto, SubmitReviewRequest,
+    AddCommentRequest, CreatePullRequest, CreatedNumberDto, FileDiffDto, MergedPullDto,
+    PrCommentDto, PrReviewDto, PrStateDto, PullRequestDetailDto, PullRequestDto,
+    SubmitReviewRequest,
 };
 use edda_db::DbPool;
-use edda_domain::{ActorContext, DiffAnchor, PrState, PullRequest, UserId};
+use edda_domain::{ActorContext, DiffAnchor, PrState, PullRequest, RepositoryId, UserId};
 
+use super::repo_browse::file_diff_dto;
 use super::{read_repo, Actor};
-use crate::services::pull_request::NewPullRequestInput;
-use crate::services::{PullRequestService, ServiceError};
+use crate::services::pull_request::{pull_head_ref, NewPullRequestInput};
+use crate::services::{git_identity, PullRequestService, ServiceError};
 use crate::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/repos/{owner}/{repo}/pulls", get(list).post(create))
         .route("/api/v1/repos/{owner}/{repo}/pulls/{number}", get(get_one))
+        .route(
+            "/api/v1/repos/{owner}/{repo}/pulls/{number}/diff",
+            get(diff),
+        )
         .route(
             "/api/v1/repos/{owner}/{repo}/pulls/{number}/merge",
             post(merge),
@@ -70,14 +76,26 @@ async fn username_for(pool: &DbPool, user_id: UserId) -> Result<String, ServiceE
         .unwrap_or_else(|| "(unknown)".to_string()))
 }
 
-async fn pr_dto(pool: &DbPool, pr: &PullRequest) -> Result<PullRequestDto, ServiceError> {
+async fn pr_dto(
+    pool: &DbPool,
+    target_repository_id: RepositoryId,
+    pr: &PullRequest,
+) -> Result<PullRequestDto, ServiceError> {
+    let is_cross_repo = pr.source.repository_id != target_repository_id;
+    let source_owner =
+        edda_db::RepositoryRepo::find_by_id_with_owner_username(pool, pr.source.repository_id)
+            .await?
+            .map(|(_, owner)| owner)
+            .unwrap_or_else(|| "(unknown)".to_string());
     Ok(PullRequestDto {
         number: pr.number,
         title: pr.title.clone(),
         body_html: pr.body.as_deref().map(edda_render::markdown::render),
         author_username: username_for(pool, pr.author_id).await?,
+        source_owner,
         source_branch: pr.source.branch.clone(),
         target_branch: pr.target.clone(),
+        is_cross_repo,
         state: pr_state_dto(&pr.state),
         created_at: pr.created_at,
     })
@@ -92,7 +110,7 @@ async fn list(
     let prs = edda_db::PullRequestRepo::list_for_repository(&state.pool, repository.id).await?;
     let mut out = Vec::with_capacity(prs.len());
     for pr in &prs {
-        out.push(pr_dto(&state.pool, pr).await?);
+        out.push(pr_dto(&state.pool, repository.id, pr).await?);
     }
     Ok(Json(out))
 }
@@ -143,11 +161,38 @@ async fn get_one(
         };
 
     Ok(Json(PullRequestDetailDto {
-        pull_request: pr_dto(&state.pool, &pr).await?,
+        pull_request: pr_dto(&state.pool, repository.id, &pr).await?,
         comments,
         reviews,
         can_merge,
     }))
+}
+
+/// The changes this pull request proposes: a three-dot `target...head`
+/// diff, rendered server-side like every other diff in `/api/v1`. For a
+/// fork-sourced PR the head side is the internal pull-head ref the open
+/// path imported into this repository, so browsing a cross-repo PR's diff
+/// needs no second object store.
+async fn diff(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path((owner, repo, number)): Path<(String, String, i64)>,
+) -> Result<Json<Vec<FileDiffDto>>, ServiceError> {
+    let repository = read_repo(&state, actor.context(), &owner, &repo).await?;
+    let pr =
+        edda_db::PullRequestRepo::find_by_repository_and_number(&state.pool, repository.id, number)
+            .await?
+            .ok_or(ServiceError::NotFound)?;
+
+    let identity = git_identity(&owner, &repo);
+    let base_ref = format!("refs/heads/{}", pr.target);
+    let head_ref = if pr.source.repository_id == repository.id {
+        format!("refs/heads/{}", pr.source.branch)
+    } else {
+        pull_head_ref(pr.id)
+    };
+    let diffs = edda_git::diff_refs(state.store.as_ref(), &identity, &base_ref, &head_ref)?;
+    Ok(Json(diffs.into_iter().map(file_diff_dto).collect()))
 }
 
 async fn create(
@@ -165,6 +210,7 @@ async fn create(
             NewPullRequestInput {
                 title: body.title,
                 body: body.body,
+                source_owner: body.source_owner,
                 source_branch: body.source_branch,
                 target_branch: body.target_branch,
                 draft: body.draft,

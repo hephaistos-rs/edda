@@ -97,66 +97,135 @@ pub fn commit_diff(
             None => None,
         };
 
-        let mut options = gix::diff::Options::default();
-        options.track_rewrites(None);
-
-        let changes = repo
-            .diff_tree_to_tree(parent_tree.as_ref(), Some(&new_tree), Some(options))
-            .map_err(|err| GitError::Git(err.to_string()))?;
-
-        let mut diffs = Vec::new();
-        for change in changes {
-            let file_diff = match change {
-                gix::object::tree::diff::ChangeDetached::Addition {
-                    location,
-                    entry_mode,
-                    id,
-                    ..
-                } => {
-                    if entry_mode.kind() == EntryKind::Tree {
-                        continue;
-                    }
-                    let data = object_data(&repo, id)?;
-                    file_diff_for_addition(location.to_string(), &data)
-                }
-                gix::object::tree::diff::ChangeDetached::Deletion {
-                    location,
-                    entry_mode,
-                    id,
-                    ..
-                } => {
-                    if entry_mode.kind() == EntryKind::Tree {
-                        continue;
-                    }
-                    let data = object_data(&repo, id)?;
-                    file_diff_for_deletion(location.to_string(), &data)
-                }
-                gix::object::tree::diff::ChangeDetached::Modification {
-                    location,
-                    previous_id,
-                    id,
-                    entry_mode,
-                    ..
-                } => {
-                    if entry_mode.kind() == EntryKind::Tree {
-                        continue;
-                    }
-                    let old_data = object_data(&repo, previous_id)?;
-                    let new_data = object_data(&repo, id)?;
-                    file_diff_for_modification(location.to_string(), &old_data, &new_data)
-                }
-                // Unreachable in practice: rewrite tracking is disabled above,
-                // so the tree-diff never emits this variant. Handled
-                // explicitly (rather than a wildcard) so a future change to
-                // that call doesn't silently start dropping rewrites here.
-                gix::object::tree::diff::ChangeDetached::Rewrite { .. } => continue,
-            };
-            diffs.push(file_diff);
-        }
-        Ok(diffs)
+        file_diffs_between(&repo, parent_tree.as_ref(), Some(&new_tree))
     })();
     record_git_op("git.commit_diff", start, &result);
     result
+}
+
+/// The diff a pull request shows: from the merge base of `base_ref` and
+/// `head_ref` to `head_ref` (three-dot `base...head` semantics), across
+/// the whole tree, in `name`'s repository. `base_ref`/`head_ref` are
+/// fully-qualified refs — for a fork-sourced pull request `head_ref` is
+/// the internal `refs/edda/pull-heads/…` that
+/// [`crate::transfer::import_branch_tip`] wrote into this same repository,
+/// so this function never needs to know a second object store exists.
+/// If the two commits share no history, this falls back to a plain
+/// `base..head` diff.
+pub fn diff_refs(
+    store: &dyn RepoStore,
+    name: &str,
+    base_ref: &str,
+    head_ref: &str,
+) -> Result<Vec<FileDiff>, GitError> {
+    let repo = open_repo_dir(store, name)?;
+
+    let span =
+        tracing::info_span!("git.diff_refs", repo.name = %name, base = %base_ref, head = %head_ref);
+    let _guard = span.enter();
+    let start = std::time::Instant::now();
+    let result = (|| {
+        let base_id = resolve_commit_id(&repo, base_ref)?;
+        let head_id = resolve_commit_id(&repo, head_ref)?;
+        let from = repo
+            .merge_base(base_id, head_id)
+            .map(|id| id.detach())
+            .unwrap_or(base_id);
+        let from_tree = repo
+            .find_commit(from)
+            .map_err(|err| GitError::Git(err.to_string()))?
+            .tree()
+            .map_err(|err| GitError::Git(err.to_string()))?;
+        let head_tree = repo
+            .find_commit(head_id)
+            .map_err(|err| GitError::Git(err.to_string()))?
+            .tree()
+            .map_err(|err| GitError::Git(err.to_string()))?;
+        file_diffs_between(&repo, Some(&from_tree), Some(&head_tree))
+    })();
+    record_git_op("git.diff_refs", start, &result);
+    result
+}
+
+fn resolve_commit_id(
+    repo: &gix::Repository,
+    ref_name: &str,
+) -> Result<gix_hash::ObjectId, GitError> {
+    Ok(repo
+        .find_reference(ref_name)
+        .map_err(|err| GitError::Git(err.to_string()))?
+        .peel_to_commit()
+        .map_err(|err| GitError::Git(err.to_string()))?
+        .id()
+        .detach())
+}
+
+/// Turns a tree-to-tree change set into this crate's `FileDiff` shape.
+/// Shared by `commit_diff` (commit vs first parent) and `diff_refs`
+/// (merge base vs head). Rewrite tracking is disabled so a
+/// renamed-with-changes file shows as a delete + an add.
+fn file_diffs_between(
+    repo: &gix::Repository,
+    old_tree: Option<&gix::Tree<'_>>,
+    new_tree: Option<&gix::Tree<'_>>,
+) -> Result<Vec<FileDiff>, GitError> {
+    let mut options = gix::diff::Options::default();
+    options.track_rewrites(None);
+
+    let changes = repo
+        .diff_tree_to_tree(old_tree, new_tree, Some(options))
+        .map_err(|err| GitError::Git(err.to_string()))?;
+
+    let mut diffs = Vec::new();
+    for change in changes {
+        let file_diff = match change {
+            gix::object::tree::diff::ChangeDetached::Addition {
+                location,
+                entry_mode,
+                id,
+                ..
+            } => {
+                if entry_mode.kind() == EntryKind::Tree {
+                    continue;
+                }
+                let data = object_data(repo, id)?;
+                file_diff_for_addition(location.to_string(), &data)
+            }
+            gix::object::tree::diff::ChangeDetached::Deletion {
+                location,
+                entry_mode,
+                id,
+                ..
+            } => {
+                if entry_mode.kind() == EntryKind::Tree {
+                    continue;
+                }
+                let data = object_data(repo, id)?;
+                file_diff_for_deletion(location.to_string(), &data)
+            }
+            gix::object::tree::diff::ChangeDetached::Modification {
+                location,
+                previous_id,
+                id,
+                entry_mode,
+                ..
+            } => {
+                if entry_mode.kind() == EntryKind::Tree {
+                    continue;
+                }
+                let old_data = object_data(repo, previous_id)?;
+                let new_data = object_data(repo, id)?;
+                file_diff_for_modification(location.to_string(), &old_data, &new_data)
+            }
+            // Unreachable in practice: rewrite tracking is disabled above,
+            // so the tree-diff never emits this variant. Handled
+            // explicitly (rather than a wildcard) so a future change to
+            // that call doesn't silently start dropping rewrites here.
+            gix::object::tree::diff::ChangeDetached::Rewrite { .. } => continue,
+        };
+        diffs.push(file_diff);
+    }
+    Ok(diffs)
 }
 
 fn object_data(repo: &gix::Repository, id: gix_hash::ObjectId) -> Result<Vec<u8>, GitError> {
@@ -457,5 +526,70 @@ mod tests {
             .lines
             .iter()
             .all(|l| matches!(l, DiffLine::Added(_))));
+    }
+
+    #[tokio::test]
+    async fn diff_refs_shows_only_what_the_head_adds_over_the_merge_base() {
+        let test = TestStore::new("diff-refs");
+        let locks = LockRegistry::new();
+        create_repo(&test.store, &locks, "alice/demo")
+            .await
+            .unwrap();
+        let repo_dir = test.store.repo_dir("alice/demo");
+
+        // `main`: base commit, then a commit the feature branch never sees.
+        let base = commit_files(&repo_dir, None, &[("README.md", b"# Demo\n")]);
+        commit_files(
+            &repo_dir,
+            Some(base),
+            &[("README.md", b"# Demo\n\nUpstream moved on.\n")],
+        );
+
+        // `feature`: branches from `base`, adds one file.
+        {
+            let repo = gix::open(&repo_dir).unwrap();
+            let parent_tree_id = repo.find_commit(base).unwrap().tree_id().unwrap().detach();
+            let mut editor = repo.edit_tree(parent_tree_id).unwrap();
+            let blob = repo.write_blob(b"a feature\n").unwrap().detach();
+            editor
+                .upsert("feature.txt", gix_object::tree::EntryKind::Blob, blob)
+                .unwrap();
+            let tree_id = editor.write().unwrap().detach();
+            let sig = gix_actor::Signature {
+                name: "Test Author".into(),
+                email: "author@example.com".into(),
+                time: gix::date::Time::new(1_700_000_100, 0),
+            };
+            let commit = gix_object::Commit {
+                tree: tree_id,
+                parents: [base].into_iter().collect(),
+                author: sig.clone(),
+                committer: sig,
+                encoding: None,
+                message: "add feature".into(),
+                extra_headers: Vec::new(),
+            };
+            let id = repo.write_object(commit).unwrap().detach();
+            crate::apply_ref_update(
+                &repo_dir,
+                "refs/heads/feature",
+                crate::ZERO_ID,
+                &id.to_string(),
+            )
+            .unwrap();
+        }
+
+        let diffs = diff_refs(
+            &test.store,
+            "alice/demo",
+            "refs/heads/main",
+            "refs/heads/feature",
+        )
+        .unwrap();
+        // Only the feature's own addition — not the divergent README edit
+        // `main` made after the branch point (three-dot semantics).
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].new_path.as_deref(), Some("feature.txt"));
+        assert_eq!(diffs[0].old_path, None);
     }
 }

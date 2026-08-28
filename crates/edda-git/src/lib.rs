@@ -6,11 +6,13 @@ pub mod protocol;
 pub mod search;
 pub mod store;
 pub mod tags;
+pub mod transfer;
 
-pub use diff::{commit_diff, DiffHunk, DiffLine, FileDiff};
-pub use merge::{merge_branches, MergeOutcome};
+pub use diff::{commit_diff, diff_refs, DiffHunk, DiffLine, FileDiff};
+pub use merge::{merge_branches, merge_ref_into_branch, MergeOutcome};
 pub use search::{search_tree, SearchMatch};
 pub use tags::{create_tag, list_tags, resolve_tag};
+pub use transfer::import_branch_tip;
 
 use std::collections::HashMap;
 use std::fmt;

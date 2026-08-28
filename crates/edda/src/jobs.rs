@@ -211,6 +211,12 @@ async fn send_signed(
     let client = reqwest::Client::builder()
         .resolve(host, addr)
         .timeout(Duration::from_secs(10))
+        // Never follow redirects. The SSRF gate validated *this* address;
+        // a 3xx would send the follow-up request to a Location the gate
+        // never saw (`http://169.254.169.254/…` and friends). A webhook
+        // receiver has no legitimate reason to redirect, so a 3xx is a
+        // failed delivery, full stop (H5/S2).
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|err| err.to_string())?;
 
@@ -233,6 +239,7 @@ mod tests {
 
     use axum::extract::State;
     use axum::http::HeaderMap;
+    use axum::response::IntoResponse;
     use axum::routing::post;
     use axum::Router;
 
@@ -385,5 +392,57 @@ mod tests {
             .unwrap();
         assert_eq!(deliveries.len(), 1);
         assert!(deliveries[0].delivered_at.is_none());
+    }
+
+    /// H5/S2: a webhook target that answers with a 3xx must not be
+    /// followed — the redirect `Location` is a URL the SSRF gate never
+    /// vetted. `send_signed` returns the 3xx status verbatim (which
+    /// `deliver_webhook` then records as a failed delivery) and never
+    /// touches the redirect target.
+    #[tokio::test]
+    async fn a_redirecting_webhook_target_is_not_followed() {
+        #[derive(Clone, Default)]
+        struct Landed(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+        async fn redirector() -> axum::response::Response {
+            (
+                axum::http::StatusCode::FOUND,
+                [(axum::http::header::LOCATION, "/landed")],
+            )
+                .into_response()
+        }
+        async fn landing(State(landed): State<Landed>) -> &'static str {
+            landed.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            "should never be reached"
+        }
+
+        let landed = Landed::default();
+        let app = Router::new()
+            .route("/hook", post(redirector))
+            .route("/landed", axum::routing::get(landing).post(landing))
+            .with_state(landed.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let status = send_signed(
+            &format!("http://redirect-target.invalid:{}/hook", addr.port()),
+            "redirect-target.invalid",
+            addr,
+            edda_domain::WebhookEvent::PullRequestMerged,
+            "sig",
+            WebhookDeliveryId::new(),
+            "{}",
+        )
+        .await
+        .expect("the request itself completes — it just isn't a 2xx");
+
+        assert_eq!(status, 302, "the 3xx is surfaced verbatim, not followed");
+        assert!(
+            !landed.0.load(std::sync::atomic::Ordering::SeqCst),
+            "the redirect Location was never requested"
+        );
     }
 }

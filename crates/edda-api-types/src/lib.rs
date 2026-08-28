@@ -171,8 +171,16 @@ pub struct PullRequestDto {
     pub title: String,
     pub body_html: Option<String>,
     pub author_username: String,
+    /// The account that owns the repository the source branch lives in.
+    /// Equal to the target repository's owner for a same-repository PR;
+    /// different for a cross-repository (fork-sourced) one — the UI shows
+    /// `{source_owner}:{source_branch}` when it differs.
+    pub source_owner: String,
     pub source_branch: String,
     pub target_branch: String,
+    /// `true` when the source branch lives in a *different* repository
+    /// than the target (a fork-sourced pull request).
+    pub is_cross_repo: bool,
     pub state: PrStateDto,
     pub created_at: i64,
 }
@@ -228,6 +236,12 @@ pub struct CreatePullRequest {
     pub title: String,
     #[serde(default)]
     pub body: Option<String>,
+    /// The account owning the fork the source branch lives in, for a
+    /// cross-repository pull request. `None` (or equal to the target
+    /// owner) means a same-repository PR. `source_branch` may also carry
+    /// the `owner:branch` form, which the server splits when this is unset.
+    #[serde(default)]
+    pub source_owner: Option<String>,
     pub source_branch: String,
     pub target_branch: String,
     #[serde(default)]

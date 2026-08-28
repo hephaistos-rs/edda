@@ -4,8 +4,8 @@
 //! doesn't need any I/O to make: whether a resolved delivery-target IP
 //! address is one Edda must refuse to connect to at all (`is_blocked_ip`).
 //! Everything else — DNS resolution, the HTTP request itself, HMAC
-//! signing with the (encrypted-at-rest) secret — is I/O and lives in
-//! `edda-web`'s job handlers, not here.
+//! signing with the (encrypted-at-rest) secret — is I/O and lives in the
+//! `edda` binary's webhook-delivery job handler, not here.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -99,8 +99,8 @@ pub struct WebhookDelivery {
 /// resolution — a target that resolves to a public IP at creation and a
 /// private one by the time delivery actually happens (DNS rebinding) must
 /// be caught by the delivery-time call, not only the creation-time one;
-/// see `edda_web`'s webhook-delivery job handler for where that second
-/// call lives.
+/// see the `edda` binary's webhook-delivery job handler for where that
+/// second call lives.
 pub fn is_blocked_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_blocked_ipv4(v4),
@@ -119,10 +119,25 @@ fn is_blocked_ipv4(ip: Ipv4Addr) -> bool {
     {
         return true;
     }
-    // 100.64.0.0/10 — carrier-grade NAT (RFC 6598). Not classified by any
-    // `std::net::Ipv4Addr` helper, so checked directly.
     let octets = ip.octets();
-    octets[0] == 100 && (octets[1] & 0b1100_0000) == 0b0100_0000
+    // 100.64.0.0/10 — carrier-grade NAT (RFC 6598).
+    if octets[0] == 100 && (octets[1] & 0b1100_0000) == 0b0100_0000 {
+        return true;
+    }
+    // The remaining IANA special-purpose ranges no `std::net::Ipv4Addr`
+    // helper classifies (`Ipv4Addr::is_reserved` would cover 240/4 but is
+    // still unstable on the pinned toolchain), spelled out by octet so
+    // there's no toolchain-version surprise:
+    // - 192.0.0.0/24   — IETF protocol assignments (RFC 6890)
+    // - 198.18.0.0/15  — benchmarking (RFC 2544)
+    // - 240.0.0.0/4    — reserved / former class E (RFC 1112)
+    if octets[0] == 192 && octets[1] == 0 && octets[2] == 0 {
+        return true;
+    }
+    if octets[0] == 198 && (octets[1] == 18 || octets[1] == 19) {
+        return true;
+    }
+    octets[0] >= 240
 }
 
 fn is_blocked_ipv6(ip: Ipv6Addr) -> bool {
@@ -204,6 +219,24 @@ mod tests {
         // shouldn't over-match).
         assert!(!is_blocked_ip("100.63.255.255".parse().unwrap()));
         assert!(!is_blocked_ip("100.128.0.0".parse().unwrap()));
+    }
+
+    #[test]
+    fn iana_reserved_v4_ranges_are_blocked() {
+        // 192.0.0.0/24 — IETF protocol assignments.
+        assert!(is_blocked_ip("192.0.0.8".parse().unwrap()));
+        assert!(!is_blocked_ip("192.0.1.1".parse().unwrap()));
+        // 198.18.0.0/15 — benchmarking.
+        assert!(is_blocked_ip("198.18.0.1".parse().unwrap()));
+        assert!(is_blocked_ip("198.19.255.255".parse().unwrap()));
+        assert!(!is_blocked_ip("198.17.0.1".parse().unwrap()));
+        assert!(!is_blocked_ip("198.20.0.1".parse().unwrap()));
+        // 240.0.0.0/4 — reserved / former class E. (239.x is already
+        // blocked as multicast, so the boundary probe below 240 uses a
+        // unicast address.)
+        assert!(is_blocked_ip("240.0.0.1".parse().unwrap()));
+        assert!(is_blocked_ip("250.1.2.3".parse().unwrap()));
+        assert!(!is_blocked_ip("223.255.255.255".parse().unwrap()));
     }
 
     #[test]

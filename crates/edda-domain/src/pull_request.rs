@@ -8,11 +8,16 @@
 //! only the merge-commit strategy exists
 //! (`MergeStrategy` is a one-variant enum today, not a stringly-typed
 //! column, so a squash/rebase fast-follow is an additive match arm, not a
-//! migration); only same-repository pull requests are supported —
-//! `PrRef` already carries a `repository_id` so a cross-repo (fork-
-//! sourced) source is representable in the type, but `PullRequestRepo`
-//! and every call site currently require `source.repository_id ==
-//! target_repository_id`, enforced where a `PullRequest` is constructed.
+//! migration).
+//!
+//! Cross-repository (fork-sourced) pull requests **are** supported as of
+//! Phase 5: `source.repository_id` may differ from
+//! `PullRequest::repository_id` (the target). `access::
+//! can_open_cross_repo_pull_request` authorizes them (write on the fork +
+//! read on upstream); the merge still writes only into the target and
+//! leaves the fork untouched. The source tip's objects are made resolvable
+//! in the target's object store at open time (an interim copy — Phase 14
+//! replaces it with object-store alternates).
 
 use crate::ids::{PrCommentId, PrReviewId, PullRequestId, RepositoryId, UserId};
 
@@ -206,6 +211,21 @@ pub struct PrComment {
     pub created_at: i64,
 }
 
+/// Splits a pull-request *head* reference of the form `owner:branch` into
+/// its parts, or returns `(None, raw)` for a bare `branch` name (a
+/// same-repository head). This is the minimal parser the cross-repository
+/// (fork) PR path needs — `owner` names the fork's account, `branch` a
+/// branch within that fork. No validation beyond the split happens here:
+/// the caller resolves `owner` against the account namespace and `branch`
+/// against the fork's refs, and that resolution is where a bad value is
+/// actually rejected.
+pub fn parse_head_ref(raw: &str) -> (Option<&str>, &str) {
+    match raw.split_once(':') {
+        Some((owner, branch)) if !owner.is_empty() && !branch.is_empty() => (Some(owner), branch),
+        _ => (None, raw),
+    }
+}
+
 /// Reduces `reviews` to one entry per `reviewer_id` — their most recent
 /// review by `created_at` — which is what actually counts toward a
 /// required-approval-count decision (`access::can_merge_pull_request`).
@@ -284,6 +304,19 @@ mod tests {
             body: None,
             created_at,
         }
+    }
+
+    #[test]
+    fn parse_head_ref_splits_owner_prefixed_refs_and_passes_bare_ones_through() {
+        assert_eq!(
+            parse_head_ref("contributor:feature"),
+            (Some("contributor"), "feature")
+        );
+        assert_eq!(parse_head_ref("feature"), (None, "feature"));
+        // A degenerate `:x` or `x:` is treated as a bare name, not a
+        // half-parsed cross-repo ref.
+        assert_eq!(parse_head_ref(":feature"), (None, ":feature"));
+        assert_eq!(parse_head_ref("owner:"), (None, "owner:"));
     }
 
     #[test]

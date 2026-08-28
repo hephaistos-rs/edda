@@ -39,19 +39,51 @@ pub fn merge_branches(
     committer_email: &str,
     message: &str,
 ) -> Result<MergeOutcome, GitError> {
+    merge_ref_into_branch(
+        store,
+        name,
+        &format!("refs/heads/{source_branch}"),
+        source_branch,
+        target_branch,
+        committer_name,
+        committer_email,
+        message,
+    )
+}
+
+/// Like [`merge_branches`], but the incoming side is an arbitrary
+/// fully-qualified ref rather than a local branch name — a plain
+/// `refs/heads/…`, or the Edda-internal `refs/edda/pull-heads/…` that
+/// [`crate::transfer::import_branch_tip`] writes for a fork-sourced pull
+/// request. `source_label` is the human name that appears in conflict
+/// markers for the incoming side (`merge_branches` passes the branch name;
+/// the cross-repo caller passes `owner:branch`). The merge commit and the
+/// `target_branch` move are written into `name`'s repository only — a
+/// fork-sourced merge never touches the fork.
+#[allow(clippy::too_many_arguments)]
+pub fn merge_ref_into_branch(
+    store: &dyn RepoStore,
+    name: &str,
+    source_ref: &str,
+    source_label: &str,
+    target_branch: &str,
+    committer_name: &str,
+    committer_email: &str,
+    message: &str,
+) -> Result<MergeOutcome, GitError> {
     let repo = open_repo_dir(store, name)?;
 
     let span = tracing::info_span!(
         "git.merge",
         repo.name = %name,
-        merge.source = %source_branch,
+        merge.source = %source_label,
         merge.target = %target_branch,
     );
     let _guard = span.enter();
     let start = std::time::Instant::now();
     let result = (|| {
         let source_id = repo
-            .find_reference(&format!("refs/heads/{source_branch}"))
+            .find_reference(source_ref)
             .map_err(|err| GitError::Git(err.to_string()))?
             .peel_to_commit()
             .map_err(|err| GitError::Git(err.to_string()))?
@@ -72,7 +104,7 @@ pub fn merge_branches(
         let labels = gix::merge::blob::builtin_driver::text::Labels {
             ancestor: None,
             current: Some(target_branch.into()),
-            other: Some(source_branch.into()),
+            other: Some(source_label.into()),
         };
         let outcome = repo
             .merge_commits(target_id, source_id, labels, tree_merge_options.into())
@@ -323,5 +355,72 @@ mod tests {
             .summary()
             .to_string();
         assert_eq!(main_message, "test commit");
+    }
+
+    #[tokio::test]
+    async fn a_fork_sourced_merge_lands_upstream_and_leaves_the_fork_untouched() {
+        let test = TestStore::new("fork-merge");
+        let locks = LockRegistry::new();
+
+        // Upstream `main`, forked, then the fork adds a `feature` branch.
+        create_repo(&test.store, &locks, "up/demo").await.unwrap();
+        let up_dir = test.store.repo_dir("up/demo");
+        let base = commit_files(&up_dir, "main", None, &[("README.md", b"# Demo\n")]);
+        crate::fork_repo(&test.store, &locks, "up/demo", "carol/demo")
+            .await
+            .unwrap();
+        let fork_dir = test.store.repo_dir("carol/demo");
+        let feature_tip = commit_files(
+            &fork_dir,
+            "feature",
+            Some(base),
+            &[("feature.txt", b"a contribution\n")],
+        );
+
+        // The interim cross-object step, then a merge from the imported
+        // pull-head ref.
+        let head_ref = "refs/edda/pull-heads/merge-test";
+        crate::import_branch_tip(&test.store, "carol/demo", "feature", "up/demo", head_ref)
+            .unwrap();
+        let outcome = merge_ref_into_branch(
+            &test.store,
+            "up/demo",
+            head_ref,
+            "carol:feature",
+            "main",
+            "Maintainer",
+            "maint@example.com",
+            "Merge pull request #1 from carol:feature",
+        )
+        .unwrap();
+
+        // Upstream `main` is the merge commit; both files are in its tree.
+        let up = gix::open(&up_dir).unwrap();
+        let up_main = up
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_commit()
+            .unwrap();
+        assert_eq!(up_main.id().detach().to_string(), outcome.merge_commit);
+        let up_tree = up_main.tree().unwrap();
+        assert!(up_tree
+            .lookup_entry_by_path("feature.txt")
+            .unwrap()
+            .is_some());
+        assert!(up_tree.lookup_entry_by_path("README.md").unwrap().is_some());
+
+        // The fork is byte-identical: `feature` still at its own tip, no
+        // `main` move, no merge commit, no stray pull-head ref.
+        let fork = gix::open(&fork_dir).unwrap();
+        assert_eq!(
+            fork.find_reference("refs/heads/feature")
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .id()
+                .detach(),
+            feature_tip
+        );
+        assert!(fork.find_reference(head_ref).is_err());
     }
 }

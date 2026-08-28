@@ -8,8 +8,8 @@ use edda_db::{
 };
 use edda_domain::{
     can_administer_repository, can_manage_repository_danger_zone, can_merge_pull_request,
-    can_read_repository, can_write_repository, effective_repo_role, ActorContext, AuthzError,
-    OrganizationId, PrReview, Repository,
+    can_open_cross_repo_pull_request, can_read_repository, can_write_repository,
+    effective_repo_role, ActorContext, AuthzError, OrganizationId, PrReview, Repository,
 };
 
 #[derive(Clone)]
@@ -171,6 +171,29 @@ impl AuthorizationService {
             protection.as_ref(),
             reviews,
             access.as_ref(),
+        )
+    }
+
+    /// Whether `actor` may open a cross-repository (fork-sourced) pull
+    /// request proposing changes *from* `source` *into* `target`. Fetches
+    /// `actor`'s effective access on each and delegates to
+    /// `edda_domain::can_open_cross_repo_pull_request` (write on the fork +
+    /// read on upstream). Same-repository pull requests don't come through
+    /// here — they're a plain `check_write` on the one repository.
+    pub async fn check_open_cross_repo_pull_request(
+        &self,
+        actor: &ActorContext,
+        source: &Repository,
+        target: &Repository,
+    ) -> Result<(), AuthzError> {
+        let source_access = self.access_for(actor, source).await?;
+        let target_access = self.access_for(actor, target).await?;
+        can_open_cross_repo_pull_request(
+            actor,
+            source,
+            source_access.as_ref(),
+            target,
+            target_access.as_ref(),
         )
     }
 

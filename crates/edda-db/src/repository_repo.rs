@@ -323,6 +323,46 @@ impl RepositoryRepo {
         row.map(row_to_repository_row).transpose()
     }
 
+    /// A repository by id, together with its owner's display name (a
+    /// username or an organization name) — the same `COALESCE` join
+    /// `list_all_with_owner_username` does, narrowed to one id. Used to turn
+    /// a cross-repository pull request's stored `source_repository_id` back
+    /// into the `{owner}/{name}` identity the git layer needs.
+    pub async fn find_by_id_with_owner_username<'c>(
+        db: impl DbConn<'c>,
+        id: RepositoryId,
+    ) -> Result<Option<(Repository, String)>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let id_text = id.to_string();
+        let sql = match h.backend() {
+            Backend::Postgres => {
+                r#"SELECT r.id, r.owner_type, r.owner_id, r.name, r.description, r.visibility, r.forked_from,
+                          COALESCE(u.username, o.name) as owner_username
+                   FROM repositories r
+                   LEFT JOIN users u ON u.id = r.owner_id AND r.owner_type = 'user'
+                   LEFT JOIN organizations o ON o.id = r.owner_id AND r.owner_type = 'organization'
+                   WHERE r.id = $1"#
+            }
+            Backend::Sqlite | Backend::MySql => {
+                r#"SELECT r.id, r.owner_type, r.owner_id, r.name, r.description, r.visibility, r.forked_from,
+                          COALESCE(u.username, o.name) as owner_username
+                   FROM repositories r
+                   LEFT JOIN users u ON u.id = r.owner_id AND r.owner_type = 'user'
+                   LEFT JOIN organizations o ON o.id = r.owner_id AND r.owner_type = 'organization'
+                   WHERE r.id = ?"#
+            }
+        };
+        let row = sqlx::query(sql)
+            .bind(&id_text)
+            .fetch_optional(&mut *h.conn())
+            .await?;
+        row.map(|row| {
+            let owner_username = get_string(&row, "owner_username")?;
+            Ok((row_to_repository_row(row)?, owner_username))
+        })
+        .transpose()
+    }
+
     /// Every repository in the instance. `edda-app` filters this down to
     /// what the requesting actor may actually see (public repos plus any
     /// private repo they hold a grant on) — there is no per-owner or

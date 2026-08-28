@@ -1,12 +1,17 @@
 //! `/api/v1/*` — the versioned, documented REST surface: thin axum
 //! handlers that resolve an [`Actor`], call a `crate::services` method,
 //! and serialize its result. The single primary API (plan.local.md §14.3);
-//! the Dioxus UI is being cut over to consume exactly this.
+//! the Dioxus UI consumes exactly this.
 //!
-//! Authentication here is `Authorization: Bearer <PAT>` only — never a
-//! session cookie, so CSRF is structurally N/A on this surface. A missing
-//! or unresolvable token yields [`ActorContext::Anonymous`]; write
-//! handlers turn that into `ServiceError::Unauthorized`.
+//! The [`Actor`] extractor resolves an identity from **either** the
+//! session cookie (how the web UI authenticates) **or** an
+//! `Authorization: Bearer <PAT>` header (how API clients do). A request
+//! with neither, or an unusable one, yields [`ActorContext::Anonymous`];
+//! write handlers turn that into `ServiceError::Unauthorized`.
+//!
+//! A dedicated CSRF/Origin layer for the cookie-authenticated,
+//! state-changing subset is Phase 5 (S8); until then cookie writes rely on
+//! the `SameSite=Lax` session cookie the composition root sets.
 //!
 //! Versioning: `/api/v1` is additive-only; a breaking change means
 //! `/api/v2`, never an in-place change here.
@@ -20,6 +25,7 @@ pub mod notifications;
 pub mod orgs;
 pub mod pulls;
 pub mod releases;
+pub mod repo_browse;
 pub mod repos;
 pub mod teams;
 pub mod webhooks;
@@ -28,13 +34,16 @@ use axum::extract::FromRequestParts;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use axum::Router;
+use axum_login::AuthSession;
 
+use edda_auth::Backend;
 use edda_domain::{ActorContext, Repository, UserId};
 
 use crate::services::ServiceError;
 use crate::AppState;
 
-/// The `/api/v1` actor, resolved once per request from the bearer token.
+/// The `/api/v1` actor, resolved once per request from the session cookie
+/// or a bearer token.
 pub struct Actor(pub ActorContext);
 
 impl Actor {
@@ -58,6 +67,17 @@ impl FromRequestParts<AppState> for Actor {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        // Session cookie first — the web UI's path. `AuthSession` reads
+        // the identity the `AuthManagerLayer` (applied by the composition
+        // root, outside this router) already resolved; a request without
+        // that layer, or without a valid session, simply carries no user
+        // here and falls through to the bearer check.
+        if let Ok(auth) = AuthSession::<Backend>::from_request_parts(parts, state).await {
+            if let Some(session_user) = auth.user {
+                return Ok(Actor(ActorContext::User(session_user.user.id)));
+            }
+        }
+
         let token = parts
             .headers
             .get(AUTHORIZATION)
@@ -94,6 +114,7 @@ pub(crate) async fn read_repo(
 pub fn routes() -> Router<AppState> {
     Router::new()
         .merge(repos::routes())
+        .merge(repo_browse::routes())
         .merge(pulls::routes())
         .merge(issues::routes())
         .merge(releases::routes())

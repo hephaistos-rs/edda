@@ -1,10 +1,19 @@
 use dioxus::prelude::*;
 
-use crate::issue_server::{
-    add_issue_comment, apply_label_to_issue, close_issue, create_issue, create_label, get_issue,
-    list_issues, list_labels, reopen_issue, IssueStateDto,
+use edda_api_types::{
+    ApplyLabelRequest, BodyRequest, CreateIssueRequest, CreateLabelRequest, IssueDetailDto,
+    IssueDto, IssueStateDto, LabelDto,
 };
+
+use crate::api_client::{self, ApiResult};
 use crate::Route;
+
+fn issues_path(owner: &str, name: &str) -> String {
+    format!("/api/v1/repos/{owner}/{name}/issues")
+}
+fn labels_path(owner: &str, name: &str) -> String {
+    format!("/api/v1/repos/{owner}/{name}/labels")
+}
 
 fn relative_time(unix_seconds: i64) -> String {
     let now = web_time::SystemTime::now()
@@ -25,9 +34,8 @@ pub fn IssuesList(owner: String, name: String) -> Element {
     let owner_c = owner.clone();
     let name_c = name.clone();
     let mut issues = use_resource(move || {
-        let owner = owner_c.clone();
-        let name = name_c.clone();
-        async move { list_issues(owner, name).await }
+        let path = issues_path(&owner_c, &name_c);
+        async move { api_client::get_json::<Vec<IssueDto>>(&path).await }
     });
 
     let mut show_form = use_signal(|| false);
@@ -43,23 +51,20 @@ pub fn IssuesList(owner: String, name: String) -> Element {
 
     let on_submit = move |event: FormEvent| {
         event.prevent_default();
-        let owner = owner_for_submit.clone();
-        let name = name_for_submit.clone();
+        let path = issues_path(&owner_for_submit, &name_for_submit);
         let title_value = title.read().clone();
         let body_value = body.read().clone();
         submitting.set(true);
         error.set(None);
         spawn(async move {
-            let result = create_issue(
-                owner,
-                name,
-                title_value,
-                (!body_value.trim().is_empty()).then_some(body_value),
-            )
-            .await;
+            let request = CreateIssueRequest {
+                title: title_value,
+                body: (!body_value.trim().is_empty()).then_some(body_value),
+            };
+            let result = api_client::post_ok(&path, &request).await;
             submitting.set(false);
             match result {
-                Ok(_number) => {
+                Ok(()) => {
                     title.set(String::new());
                     body.set(String::new());
                     show_form.set(false);
@@ -165,16 +170,14 @@ pub fn IssueDetail(owner: String, name: String, number: i64) -> Element {
     let owner_c = owner.clone();
     let name_c = name.clone();
     let mut detail = use_resource(move || {
-        let owner = owner_c.clone();
-        let name = name_c.clone();
-        async move { get_issue(owner, name, number).await }
+        let path = format!("{}/{number}", issues_path(&owner_c, &name_c));
+        async move { api_client::get_json::<IssueDetailDto>(&path).await }
     });
     let owner_c2 = owner.clone();
     let name_c2 = name.clone();
     let mut repo_labels = use_resource(move || {
-        let owner = owner_c2.clone();
-        let name = name_c2.clone();
-        async move { list_labels(owner, name).await }
+        let path = labels_path(&owner_c2, &name_c2);
+        async move { api_client::get_json::<Vec<LabelDto>>(&path).await }
     });
 
     let mut comment_body = use_signal(String::new);
@@ -183,17 +186,18 @@ pub fn IssueDetail(owner: String, name: String, number: i64) -> Element {
     let mut new_label_name = use_signal(String::new);
     let mut new_label_color = use_signal(|| "#e0af3b".to_string());
 
-    let owner_for_comment = owner.clone();
-    let name_for_comment = name.clone();
+    let issues_base = issues_path(&owner, &name);
+    let labels_base = labels_path(&owner, &name);
+
+    let comment_base = issues_base.clone();
     let on_add_comment = move |event: FormEvent| {
         event.prevent_default();
-        let owner = owner_for_comment.clone();
-        let name = name_for_comment.clone();
+        let path = format!("{comment_base}/{number}/comments");
         let body_value = comment_body.read().clone();
         busy.set(true);
         action_error.set(None);
         spawn(async move {
-            match add_issue_comment(owner, name, number, body_value).await {
+            match api_client::post_ok(&path, &BodyRequest { body: body_value }).await {
                 Ok(()) => {
                     comment_body.set(String::new());
                     detail.restart();
@@ -204,20 +208,14 @@ pub fn IssueDetail(owner: String, name: String, number: i64) -> Element {
         });
     };
 
-    let owner_for_toggle = owner.clone();
-    let name_for_toggle = name.clone();
+    let toggle_base = issues_base.clone();
     let mut on_toggle_state = move |currently_open: bool| {
-        let owner = owner_for_toggle.clone();
-        let name = name_for_toggle.clone();
+        let verb = if currently_open { "close" } else { "reopen" };
+        let path = format!("{toggle_base}/{number}/{verb}");
         busy.set(true);
         action_error.set(None);
         spawn(async move {
-            let result = if currently_open {
-                close_issue(owner, name, number).await
-            } else {
-                reopen_issue(owner, name, number).await
-            };
-            match result {
+            match api_client::post_empty_ok(&path).await {
                 Ok(()) => detail.restart(),
                 Err(err) => action_error.set(Some(err.to_string())),
             }
@@ -226,31 +224,31 @@ pub fn IssueDetail(owner: String, name: String, number: i64) -> Element {
     };
 
     fn apply_label(
-        owner: String,
-        name: String,
+        base: String,
         number: i64,
         label_id: String,
-        mut detail: Resource<Result<crate::issue_server::IssueDetailDto, ServerFnError>>,
+        mut detail: Resource<ApiResult<IssueDetailDto>>,
     ) {
         spawn(async move {
-            let _ = apply_label_to_issue(owner, name, number, label_id).await;
+            let request = ApplyLabelRequest { label_id };
+            let _ = api_client::post_ok(&format!("{base}/{number}/labels"), &request).await;
             detail.restart();
         });
     }
 
-    let owner_for_new_label = owner.clone();
-    let name_for_new_label = name.clone();
+    let new_label_base = labels_base.clone();
     let on_create_label = move |event: FormEvent| {
         event.prevent_default();
-        let owner = owner_for_new_label.clone();
-        let name = name_for_new_label.clone();
+        let path = new_label_base.clone();
         let label_name = new_label_name.read().clone();
         let color = new_label_color.read().clone();
         spawn(async move {
-            if create_label(owner, name, label_name, color, None)
-                .await
-                .is_ok()
-            {
+            let request = CreateLabelRequest {
+                name: label_name,
+                color,
+                description: None,
+            };
+            if api_client::post_ok(&path, &request).await.is_ok() {
                 new_label_name.set(String::new());
                 repo_labels.restart();
             }
@@ -291,10 +289,9 @@ pub fn IssueDetail(owner: String, name: String, number: i64) -> Element {
                                         r#type: "button",
                                         class: "border border-line px-2 py-0.5 font-mono text-xs text-ink-muted hover:text-ink",
                                         onclick: {
-                                            let owner = owner.clone();
-                                            let name = name.clone();
+                                            let base = issues_base.clone();
                                             let label_id = l.id.clone();
-                                            move |_| apply_label(owner.clone(), name.clone(), number, label_id.clone(), detail)
+                                            move |_| apply_label(base.clone(), number, label_id.clone(), detail)
                                         },
                                         "+ {l.name}"
                                     }

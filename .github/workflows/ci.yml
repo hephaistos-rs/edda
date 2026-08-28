@@ -35,14 +35,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      # Two passes: the `edda` binary only ever builds as the wasm client
-      # (`--features web`) or the native server (`--features server`), never
-      # with host default features, so it is excluded from the first pass
-      # and linted on its own in the second.
-      - name: clippy (workspace minus the app binary)
-        run: cargo clippy --workspace --exclude edda --all-targets -- -D warnings
+      # Two passes: the `edda` binary and the `edda-web` UI crate only ever
+      # build as the wasm client (`--features web`) or the native server
+      # (`--features server`), never with host default features, so they are
+      # excluded from the first pass and linted via the binary in the second.
+      - name: clippy (workspace minus the app binary + UI crate)
+        run: cargo clippy --workspace --exclude edda --exclude edda-web --all-targets -- -D warnings
       - name: clippy (the app binary, server configuration)
         run: cargo clippy -p edda --features server --all-targets -- -D warnings
+      - name: clippy (the UI crate, server + wasm configurations)
+        run: |
+          cargo clippy -p edda-web --features server --all-targets -- -D warnings
+          cargo clippy -p edda-web --target wasm32-unknown-unknown --features web -- -D warnings
 
   wasm:
     name: wasm client build
@@ -116,7 +120,7 @@ jobs:
           # (not "unset") — so the sqlite leg names the in-memory DB
           # explicitly rather than relying on the var being absent.
           EDDA_TEST_DATABASE_URL: ${{ matrix.backend == 'postgres' && 'postgres://edda:edda@localhost:5432/eddadb' || matrix.backend == 'mysql' && 'mysql://edda:edda@localhost:3306/eddadb' || 'sqlite::memory:' }}
-        run: cargo test --workspace --exclude edda
+        run: cargo test --workspace --exclude edda --exclude edda-web
 
   deny:
     name: cargo-deny

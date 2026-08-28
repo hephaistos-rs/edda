@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/edda-domain",
+    "crates/edda-api-types",
     "crates/edda-db",
     "crates/edda-git",
     "crates/edda-render",
@@ -11,9 +12,10 @@ members = [
     "crates/edda-jobs",
     "crates/edda-ssh",
     "crates/edda-telemetry",
-    "app/edda-web",
+    "crates/edda-web",
+    "crates/edda",
 ]
-default-members = ["app/edda-web"]
+default-members = ["crates/edda"]
 
 [workspace.package]
 version = "0.1.0"
@@ -80,6 +82,7 @@ zero_sized_map_values = "warn"
 # version.
 [workspace.dependencies]
 edda-domain = { path = "crates/edda-domain" }
+edda-api-types = { path = "crates/edda-api-types" }
 edda-db = { path = "crates/edda-db" }
 edda-git = { path = "crates/edda-git" }
 edda-render = { path = "crates/edda-render" }
@@ -89,6 +92,7 @@ edda-app = { path = "crates/edda-app" }
 edda-jobs = { path = "crates/edda-jobs" }
 edda-ssh = { path = "crates/edda-ssh" }
 edda-telemetry = { path = "crates/edda-telemetry" }
+edda-web = { path = "crates/edda-web" }
 
 # Secret-at-rest encryption for the TOTP shared secret (`totp_secrets.
 # secret_ciphertext`) — see `crates/edda-auth/src/secret_box.rs`'s doc

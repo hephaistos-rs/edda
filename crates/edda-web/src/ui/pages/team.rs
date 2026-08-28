@@ -1,15 +1,20 @@
 use dioxus::prelude::*;
 
-use crate::team_server::{add_team_member, get_team, remove_team_member, set_team_code_permission};
+use edda_api_types::{MemberRequest, PermissionRequest, TeamDto};
+
+use crate::api_client;
+
+fn team_path(org: &str, team: &str) -> String {
+    format!("/api/v1/orgs/{org}/teams/{team}")
+}
 
 #[component]
 pub fn TeamDetail(org_name: String, team_name: String) -> Element {
     let org_c = org_name.clone();
     let team_c = team_name.clone();
     let mut team = use_resource(move || {
-        let org = org_c.clone();
-        let team = team_c.clone();
-        async move { get_team(org, team).await }
+        let path = team_path(&org_c, &team_c);
+        async move { api_client::get_json::<TeamDto>(&path).await }
     });
 
     let mut username = use_signal(String::new);
@@ -24,12 +29,14 @@ pub fn TeamDetail(org_name: String, team_name: String) -> Element {
         if username_value.is_empty() {
             return;
         }
-        let org = org_for_add.clone();
-        let team_name = team_for_add.clone();
+        let path = format!("{}/members", team_path(&org_for_add, &team_for_add));
         submitting.set(true);
         error.set(None);
         spawn(async move {
-            let result = add_team_member(org, team_name, username_value).await;
+            let request = MemberRequest {
+                username: username_value,
+            };
+            let result = api_client::post_ok(&path, &request).await;
             submitting.set(false);
             match result {
                 Ok(()) => {
@@ -64,16 +71,12 @@ pub fn TeamDetail(org_name: String, team_name: String) -> Element {
                                 r#type: "button",
                                 class: "border border-line px-2.5 py-1 font-mono text-xs text-ink-muted hover:border-accent hover:text-ink",
                                 onclick: {
-                                    let org = org_for_permission.clone();
-                                    let team_name = team_for_permission.clone();
+                                    let base = team_path(&org_for_permission, &team_for_permission);
                                     move |_| {
-                                        let org = org.clone();
-                                        let team_name = team_name.clone();
+                                        let path = format!("{base}/code-permission");
                                         spawn(async move {
-                                            if set_team_code_permission(org, team_name, level.to_string())
-                                                .await
-                                                .is_ok()
-                                            {
+                                            let request = PermissionRequest { permission: level.to_string() };
+                                            if api_client::put_ok(&path, &request).await.is_ok() {
                                                 team.restart();
                                             }
                                         });
@@ -114,15 +117,12 @@ pub fn TeamDetail(org_name: String, team_name: String) -> Element {
                                     r#type: "button",
                                     class: "font-mono text-xs text-ink-muted hover:text-status-conflict",
                                     onclick: {
-                                        let org = org_for_remove.clone();
-                                        let team_name = team_for_remove.clone();
+                                        let base = team_path(&org_for_remove, &team_for_remove);
                                         let member = member.clone();
                                         move |_| {
-                                            let org = org.clone();
-                                            let team_name = team_name.clone();
-                                            let member = member.clone();
+                                            let path = format!("{base}/members/{member}");
                                             spawn(async move {
-                                                if remove_team_member(org, team_name, member).await.is_ok() {
+                                                if api_client::delete_ok(&path).await.is_ok() {
                                                     team.restart();
                                                 }
                                             });

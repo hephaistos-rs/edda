@@ -1,10 +1,16 @@
 use dioxus::prelude::*;
 
-use crate::pr_server::{
-    add_pull_request_comment, close_pull_request, create_pull_request, get_pull_request,
-    list_pull_requests, merge_pull_request, submit_pull_request_review, PrStateDto, PullRequestDto,
+use edda_api_types::{
+    AddCommentRequest, CreatePullRequest, MergedPullDto, PrStateDto, PullRequestDetailDto,
+    PullRequestDto, SubmitReviewRequest,
 };
+
+use crate::api_client::{self, ApiResult};
 use crate::Route;
+
+fn pulls_path(owner: &str, name: &str) -> String {
+    format!("/api/v1/repos/{owner}/{name}/pulls")
+}
 
 fn relative_time(unix_seconds: i64) -> String {
     let now = web_time::SystemTime::now()
@@ -34,9 +40,8 @@ pub fn PullsList(owner: String, name: String) -> Element {
     let owner_c = owner.clone();
     let name_c = name.clone();
     let mut pulls = use_resource(move || {
-        let owner = owner_c.clone();
-        let name = name_c.clone();
-        async move { list_pull_requests(owner, name).await }
+        let path = pulls_path(&owner_c, &name_c);
+        async move { api_client::get_json::<Vec<PullRequestDto>>(&path).await }
     });
 
     let mut show_form = use_signal(|| false);
@@ -54,8 +59,7 @@ pub fn PullsList(owner: String, name: String) -> Element {
 
     let on_submit = move |event: FormEvent| {
         event.prevent_default();
-        let owner = owner_for_submit.clone();
-        let name = name_for_submit.clone();
+        let path = pulls_path(&owner_for_submit, &name_for_submit);
         let title_value = title.read().clone();
         let body_value = body.read().clone();
         let source_value = source_branch.read().clone();
@@ -63,19 +67,17 @@ pub fn PullsList(owner: String, name: String) -> Element {
         submitting.set(true);
         error.set(None);
         spawn(async move {
-            let result = create_pull_request(
-                owner,
-                name,
-                title_value,
-                (!body_value.trim().is_empty()).then_some(body_value),
-                source_value,
-                target_value,
-                false,
-            )
-            .await;
+            let request = CreatePullRequest {
+                title: title_value,
+                body: (!body_value.trim().is_empty()).then_some(body_value),
+                source_branch: source_value,
+                target_branch: target_value,
+                draft: false,
+            };
+            let result = api_client::post_ok(&path, &request).await;
             submitting.set(false);
             match result {
-                Ok(_number) => {
+                Ok(()) => {
                     title.set(String::new());
                     body.set(String::new());
                     source_branch.set(String::new());
@@ -196,26 +198,29 @@ pub fn PullDetail(owner: String, name: String, number: i64) -> Element {
     let owner_c = owner.clone();
     let name_c = name.clone();
     let mut detail = use_resource(move || {
-        let owner = owner_c.clone();
-        let name = name_c.clone();
-        async move { get_pull_request(owner, name, number).await }
+        let path = format!("{}/{number}", pulls_path(&owner_c, &name_c));
+        async move { api_client::get_json::<PullRequestDetailDto>(&path).await }
     });
 
     let mut comment_body = use_signal(String::new);
     let mut action_error = use_signal(|| Option::<String>::None);
     let mut busy = use_signal(|| false);
 
-    let owner_for_comment = owner.clone();
-    let name_for_comment = name.clone();
+    let pr_base = pulls_path(&owner, &name);
+
+    let comment_base = pr_base.clone();
     let on_add_comment = move |event: FormEvent| {
         event.prevent_default();
-        let owner = owner_for_comment.clone();
-        let name = name_for_comment.clone();
+        let path = format!("{comment_base}/{number}/comments");
         let body_value = comment_body.read().clone();
         busy.set(true);
         action_error.set(None);
         spawn(async move {
-            match add_pull_request_comment(owner, name, number, body_value, None).await {
+            let request = AddCommentRequest {
+                body: body_value,
+                anchor: None,
+            };
+            match api_client::post_ok(&path, &request).await {
                 Ok(()) => {
                     comment_body.set(String::new());
                     detail.restart();
@@ -227,18 +232,21 @@ pub fn PullDetail(owner: String, name: String, number: i64) -> Element {
     };
 
     fn submit_review(
-        owner: String,
-        name: String,
+        base: String,
         number: i64,
         state: &'static str,
         mut busy: Signal<bool>,
         mut action_error: Signal<Option<String>>,
-        mut detail: Resource<Result<crate::pr_server::PullRequestDetailDto, ServerFnError>>,
+        mut detail: Resource<ApiResult<PullRequestDetailDto>>,
     ) {
         busy.set(true);
         action_error.set(None);
         spawn(async move {
-            match submit_pull_request_review(owner, name, number, state.to_string(), None).await {
+            let request = SubmitReviewRequest {
+                state: state.to_string(),
+                body: None,
+            };
+            match api_client::post_ok(&format!("{base}/{number}/reviews"), &request).await {
                 Ok(()) => detail.restart(),
                 Err(err) => action_error.set(Some(err.to_string())),
             }
@@ -246,31 +254,27 @@ pub fn PullDetail(owner: String, name: String, number: i64) -> Element {
         });
     }
 
-    let owner_for_merge = owner.clone();
-    let name_for_merge = name.clone();
+    let merge_base = pr_base.clone();
     let on_merge = move |_| {
-        let owner = owner_for_merge.clone();
-        let name = name_for_merge.clone();
+        let path = format!("{merge_base}/{number}/merge");
         busy.set(true);
         action_error.set(None);
         spawn(async move {
-            match merge_pull_request(owner, name, number).await {
-                Ok(()) => detail.restart(),
+            match api_client::post_empty::<MergedPullDto>(&path).await {
+                Ok(_) => detail.restart(),
                 Err(err) => action_error.set(Some(err.to_string())),
             }
             busy.set(false);
         });
     };
 
-    let owner_for_close = owner.clone();
-    let name_for_close = name.clone();
+    let close_base = pr_base.clone();
     let on_close = move |_| {
-        let owner = owner_for_close.clone();
-        let name = name_for_close.clone();
+        let path = format!("{close_base}/{number}/close");
         busy.set(true);
         action_error.set(None);
         spawn(async move {
-            match close_pull_request(owner, name, number).await {
+            match api_client::post_empty_ok(&path).await {
                 Ok(()) => detail.restart(),
                 Err(err) => action_error.set(Some(err.to_string())),
             }
@@ -346,9 +350,8 @@ pub fn PullDetail(owner: String, name: String, number: i64) -> Element {
                                     r#type: "button", disabled: busy(),
                                     class: "border border-line px-3 py-1.5 font-mono text-sm text-status-ahead hover:opacity-80 disabled:opacity-60",
                                     onclick: {
-                                        let owner = owner.clone();
-                                        let name = name.clone();
-                                        move |_| submit_review(owner.clone(), name.clone(), number, "approved", busy, action_error, detail)
+                                        let base = pr_base.clone();
+                                        move |_| submit_review(base.clone(), number, "approved", busy, action_error, detail)
                                     },
                                     "approve"
                                 }
@@ -356,9 +359,8 @@ pub fn PullDetail(owner: String, name: String, number: i64) -> Element {
                                     r#type: "button", disabled: busy(),
                                     class: "border border-line px-3 py-1.5 font-mono text-sm text-status-conflict hover:opacity-80 disabled:opacity-60",
                                     onclick: {
-                                        let owner = owner.clone();
-                                        let name = name.clone();
-                                        move |_| submit_review(owner.clone(), name.clone(), number, "changes_requested", busy, action_error, detail)
+                                        let base = pr_base.clone();
+                                        move |_| submit_review(base.clone(), number, "changes_requested", busy, action_error, detail)
                                     },
                                     "request changes"
                                 }

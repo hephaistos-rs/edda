@@ -22,10 +22,16 @@ axum = { workspace = true, features = ["multipart"] }
 axum-login = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
+edda-api-types = { workspace = true }
 edda-auth = { workspace = true }
 edda-db = { workspace = true }
 edda-domain = { workspace = true }
 edda-git = { workspace = true }
+# Markdown → sanitized HTML and syntax highlighting for the `/api/v1`
+# read surface: PR/issue/release bodies and comments are rendered
+# server-side (`body_html`), as are blob contents and per-line diff
+# fragments — the UI never re-runs a renderer.
+edda-render = { workspace = true }
 # Only for `rate_limit`'s concrete `GovernorLayer` type — see the workspace
 # `Cargo.toml` entry's comment.
 governor = { workspace = true }
@@ -92,7 +98,7 @@ axum-login = { workspace = true }
 # (those use the real `git`/`git-lfs` CLI instead, since that's the real
 # client for those protocols; a release asset's real client is any plain
 # HTTP client, so `reqwest` stands in for one directly).
-reqwest = { workspace = true, features = ["multipart"] }
+reqwest = { workspace = true, features = ["multipart", "cookies"] }
 sqlx = { workspace = true, features = ["sqlite"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
 tower-sessions = { workspace = true }

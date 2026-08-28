@@ -1,11 +1,17 @@
-//! `/api/v1/repos/{owner}/{repo}` — issues, labels, milestones.
+//! `/api/v1/repos/{owner}/{repo}` — issues, labels, milestones. Bodies and
+//! comments are rendered server-side.
 
 use axum::extract::{Path, State};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
 
-use edda_domain::{Issue, IssueState, LabelId, MilestoneId};
+use edda_api_types::{
+    ApplyLabelRequest, BodyRequest, CreateIssueRequest, CreateLabelRequest, CreateMilestoneRequest,
+    CreatedNumberDto, IssueCommentDto, IssueDetailDto, IssueDto, IssueStateDto, LabelDto,
+    MilestoneDto, SetMilestoneRequest,
+};
+use edda_db::DbPool;
+use edda_domain::{Issue, IssueState, LabelId, MilestoneId, UserId};
 
 use super::{read_repo, Actor};
 use crate::services::issue::NewIssueInput;
@@ -43,48 +49,62 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/repos/{owner}/{repo}/issues/{number}/milestone",
             put(set_milestone),
         )
-        .route("/api/v1/repos/{owner}/{repo}/labels", post(create_label))
+        .route(
+            "/api/v1/repos/{owner}/{repo}/labels",
+            get(list_labels).post(create_label),
+        )
         .route(
             "/api/v1/repos/{owner}/{repo}/milestones",
-            post(create_milestone),
+            get(list_milestones).post(create_milestone),
         )
 }
 
-#[derive(Serialize)]
-pub struct IssueDto {
-    pub number: i64,
-    pub title: String,
-    pub body: Option<String>,
-    pub state: IssueStateDto,
-    pub created_at: i64,
-}
-
-#[derive(Serialize)]
-pub struct IssueStateDto {
-    pub status: &'static str,
-    pub closed_at: Option<i64>,
-}
-
-impl From<&Issue> for IssueDto {
-    fn from(issue: &Issue) -> Self {
-        let state = match &issue.state {
-            IssueState::Open => IssueStateDto {
-                status: "open",
-                closed_at: None,
-            },
-            IssueState::Closed { closed_at, .. } => IssueStateDto {
-                status: "closed",
-                closed_at: Some(*closed_at),
-            },
-        };
-        Self {
-            number: issue.number,
-            title: issue.title.clone(),
-            body: issue.body.clone(),
-            state,
-            created_at: issue.created_at,
-        }
+fn issue_state_dto(state: &IssueState) -> IssueStateDto {
+    match state {
+        IssueState::Open => IssueStateDto::Open,
+        IssueState::Closed { closed_at, reason } => IssueStateDto::Closed {
+            closed_at: *closed_at,
+            reason: reason.as_db_str().to_string(),
+        },
     }
+}
+
+fn label_dto(label: edda_domain::Label) -> LabelDto {
+    LabelDto {
+        id: label.id.to_string(),
+        name: label.name,
+        color: label.color,
+        description: label.description,
+    }
+}
+
+async fn username_for(pool: &DbPool, user_id: UserId) -> Result<String, ServiceError> {
+    Ok(edda_db::UserRepo::find_by_id(pool, user_id)
+        .await?
+        .map(|row| row.user.username)
+        .unwrap_or_else(|| "(unknown)".to_string()))
+}
+
+async fn issue_dto(pool: &DbPool, issue: &Issue) -> Result<IssueDto, ServiceError> {
+    let milestone_title = match issue.milestone_id {
+        Some(milestone_id) => {
+            edda_db::MilestoneRepo::list_for_repository(pool, issue.repository_id)
+                .await?
+                .into_iter()
+                .find(|m| m.id == milestone_id)
+                .map(|m| m.title)
+        }
+        None => None,
+    };
+    Ok(IssueDto {
+        number: issue.number,
+        title: issue.title.clone(),
+        body_html: issue.body.as_deref().map(edda_render::markdown::render),
+        author_username: username_for(pool, issue.author_id).await?,
+        state: issue_state_dto(&issue.state),
+        milestone_title,
+        created_at: issue.created_at,
+    })
 }
 
 async fn list(
@@ -94,40 +114,53 @@ async fn list(
 ) -> Result<Json<Vec<IssueDto>>, ServiceError> {
     let repository = read_repo(&state, actor.context(), &owner, &repo).await?;
     let issues = edda_db::IssueRepo::list_for_repository(&state.pool, repository.id).await?;
-    Ok(Json(issues.iter().map(IssueDto::from).collect()))
+    let mut out = Vec::with_capacity(issues.len());
+    for issue in &issues {
+        out.push(issue_dto(&state.pool, issue).await?);
+    }
+    Ok(Json(out))
 }
 
 async fn get_one(
     State(state): State<AppState>,
     actor: Actor,
     Path((owner, repo, number)): Path<(String, String, i64)>,
-) -> Result<Json<IssueDto>, ServiceError> {
+) -> Result<Json<IssueDetailDto>, ServiceError> {
     let repository = read_repo(&state, actor.context(), &owner, &repo).await?;
     let issue =
         edda_db::IssueRepo::find_by_repository_and_number(&state.pool, repository.id, number)
             .await?
             .ok_or(ServiceError::NotFound)?;
-    Ok(Json(IssueDto::from(&issue)))
-}
 
-#[derive(Deserialize)]
-pub struct CreateIssueBody {
-    pub title: String,
-    #[serde(default)]
-    pub body: Option<String>,
-}
+    let comment_rows = edda_db::IssueCommentRepo::list_for_issue(&state.pool, issue.id).await?;
+    let mut comments = Vec::with_capacity(comment_rows.len());
+    for comment in &comment_rows {
+        comments.push(IssueCommentDto {
+            author_username: username_for(&state.pool, comment.author_id).await?,
+            body_html: edda_render::markdown::render(&comment.body),
+            created_at: comment.created_at,
+        });
+    }
 
-#[derive(Serialize)]
-pub struct CreatedIssueDto {
-    pub number: i64,
+    let labels = edda_db::LabelRepo::list_for_issue(&state.pool, issue.id)
+        .await?
+        .into_iter()
+        .map(label_dto)
+        .collect();
+
+    Ok(Json(IssueDetailDto {
+        issue: issue_dto(&state.pool, &issue).await?,
+        comments,
+        labels,
+    }))
 }
 
 async fn create(
     State(state): State<AppState>,
     actor: Actor,
     Path((owner, repo)): Path<(String, String)>,
-    Json(body): Json<CreateIssueBody>,
-) -> Result<Json<CreatedIssueDto>, ServiceError> {
+    Json(body): Json<CreateIssueRequest>,
+) -> Result<Json<CreatedNumberDto>, ServiceError> {
     actor.require_user()?;
     let number = IssueService::from_state(&state)
         .open(
@@ -140,19 +173,14 @@ async fn create(
             },
         )
         .await?;
-    Ok(Json(CreatedIssueDto { number }))
-}
-
-#[derive(Deserialize)]
-pub struct CommentBody {
-    pub body: String,
+    Ok(Json(CreatedNumberDto { number }))
 }
 
 async fn comment(
     State(state): State<AppState>,
     actor: Actor,
     Path((owner, repo, number)): Path<(String, String, i64)>,
-    Json(body): Json<CommentBody>,
+    Json(body): Json<BodyRequest>,
 ) -> Result<Json<()>, ServiceError> {
     actor.require_user()?;
     IssueService::from_state(&state)
@@ -185,19 +213,21 @@ async fn reopen(
     Ok(Json(()))
 }
 
-#[derive(Deserialize)]
-pub struct CreateLabelBody {
-    pub name: String,
-    pub color: String,
-    #[serde(default)]
-    pub description: Option<String>,
+async fn list_labels(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path((owner, repo)): Path<(String, String)>,
+) -> Result<Json<Vec<LabelDto>>, ServiceError> {
+    let repository = read_repo(&state, actor.context(), &owner, &repo).await?;
+    let labels = edda_db::LabelRepo::list_for_repository(&state.pool, repository.id).await?;
+    Ok(Json(labels.into_iter().map(label_dto).collect()))
 }
 
 async fn create_label(
     State(state): State<AppState>,
     actor: Actor,
     Path((owner, repo)): Path<(String, String)>,
-    Json(body): Json<CreateLabelBody>,
+    Json(body): Json<CreateLabelRequest>,
 ) -> Result<Json<()>, ServiceError> {
     actor.require_user()?;
     IssueService::from_state(&state)
@@ -213,16 +243,11 @@ async fn create_label(
     Ok(Json(()))
 }
 
-#[derive(Deserialize)]
-pub struct ApplyLabelBody {
-    pub label_id: String,
-}
-
 async fn apply_label(
     State(state): State<AppState>,
     actor: Actor,
     Path((owner, repo, number)): Path<(String, String, i64)>,
-    Json(body): Json<ApplyLabelBody>,
+    Json(body): Json<ApplyLabelRequest>,
 ) -> Result<Json<()>, ServiceError> {
     actor.require_user()?;
     let label_id: LabelId = body.label_id.parse().map_err(|_| ServiceError::NotFound)?;
@@ -245,20 +270,33 @@ async fn remove_label(
     Ok(Json(()))
 }
 
-#[derive(Deserialize)]
-pub struct CreateMilestoneBody {
-    pub title: String,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub due_on: Option<i64>,
+async fn list_milestones(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path((owner, repo)): Path<(String, String)>,
+) -> Result<Json<Vec<MilestoneDto>>, ServiceError> {
+    let repository = read_repo(&state, actor.context(), &owner, &repo).await?;
+    let milestones =
+        edda_db::MilestoneRepo::list_for_repository(&state.pool, repository.id).await?;
+    Ok(Json(
+        milestones
+            .into_iter()
+            .map(|m| MilestoneDto {
+                id: m.id.to_string(),
+                title: m.title,
+                description: m.description,
+                due_on: m.due_on,
+                state: m.state.as_db_str().to_string(),
+            })
+            .collect(),
+    ))
 }
 
 async fn create_milestone(
     State(state): State<AppState>,
     actor: Actor,
     Path((owner, repo)): Path<(String, String)>,
-    Json(body): Json<CreateMilestoneBody>,
+    Json(body): Json<CreateMilestoneRequest>,
 ) -> Result<Json<()>, ServiceError> {
     actor.require_user()?;
     IssueService::from_state(&state)
@@ -274,17 +312,11 @@ async fn create_milestone(
     Ok(Json(()))
 }
 
-#[derive(Deserialize)]
-pub struct SetMilestoneBody {
-    #[serde(default)]
-    pub milestone_id: Option<String>,
-}
-
 async fn set_milestone(
     State(state): State<AppState>,
     actor: Actor,
     Path((owner, repo, number)): Path<(String, String, i64)>,
-    Json(body): Json<SetMilestoneBody>,
+    Json(body): Json<SetMilestoneRequest>,
 ) -> Result<Json<()>, ServiceError> {
     actor.require_user()?;
     let milestone_id = body

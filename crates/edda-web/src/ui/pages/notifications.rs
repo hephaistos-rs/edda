@@ -1,6 +1,8 @@
 use dioxus::prelude::*;
 
-use crate::notification_server::{list_notifications, mark_notification_read};
+use edda_api_types::NotificationDto;
+
+use crate::api_client;
 
 fn relative_time(unix_seconds: i64) -> String {
     let now = web_time::SystemTime::now()
@@ -27,7 +29,8 @@ fn kind_label(kind: &str) -> &'static str {
 
 #[component]
 pub fn Notifications() -> Element {
-    let mut notifications = use_resource(list_notifications);
+    let mut notifications =
+        use_resource(|| api_client::get_json::<Vec<NotificationDto>>("/api/v1/notifications"));
 
     rsx! {
         main { class: "mx-auto max-w-3xl px-4 py-8",
@@ -56,9 +59,9 @@ pub fn Notifications() -> Element {
                                             onclick: {
                                                 let id = item.id.clone();
                                                 move |_| {
-                                                    let id = id.clone();
+                                                    let path = format!("/api/v1/notifications/{id}/read");
                                                     spawn(async move {
-                                                        if mark_notification_read(id).await.is_ok() {
+                                                        if api_client::post_empty_ok(&path).await.is_ok() {
                                                             notifications.restart();
                                                         }
                                                     });

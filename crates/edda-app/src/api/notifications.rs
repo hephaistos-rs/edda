@@ -1,11 +1,14 @@
-//! `/api/v1/notifications` + `/api/v1/user/email-notifications`.
+//! `/api/v1/notifications` + `/api/v1/user/email-notifications` — a user's
+//! own notifications and the email-notification preference toggle. These
+//! are read-your-own-data endpoints, so "is someone signed in" is the only
+//! access question.
 
 use axum::extract::{Path, State};
-use axum::routing::{post, put};
+use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
 
-use edda_domain::NotificationId;
+use edda_api_types::{EmailNotificationsRequest, NotificationDto};
+use edda_domain::{Notification, NotificationId, NotificationSubject};
 
 use super::Actor;
 use crate::services::{NotificationService, ServiceError};
@@ -13,11 +16,51 @@ use crate::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route("/api/v1/notifications", get(list))
+        .route("/api/v1/notifications/unread-count", get(unread_count))
         .route("/api/v1/notifications/{id}/read", post(mark_read))
         .route(
             "/api/v1/user/email-notifications",
-            put(set_email_notifications),
+            get(get_email_notifications).put(set_email_notifications),
         )
+}
+
+fn notification_dto(notification: &Notification) -> NotificationDto {
+    let (subject_type, subject_id) = match notification.subject {
+        NotificationSubject::PullRequest(id) => ("pull_request", id.to_string()),
+        NotificationSubject::Issue(id) => ("issue", id.to_string()),
+    };
+    NotificationDto {
+        id: notification.id.to_string(),
+        kind: notification.kind.as_db_str().to_string(),
+        subject_type: subject_type.to_string(),
+        subject_id,
+        read: !notification.is_unread(),
+        created_at: notification.created_at,
+    }
+}
+
+async fn list(
+    State(state): State<AppState>,
+    actor: Actor,
+) -> Result<Json<Vec<NotificationDto>>, ServiceError> {
+    let user_id = actor.require_user()?;
+    let notifications = edda_db::NotificationRepo::list_for_user(&state.pool, user_id).await?;
+    Ok(Json(notifications.iter().map(notification_dto).collect()))
+}
+
+async fn unread_count(
+    State(state): State<AppState>,
+    actor: Actor,
+) -> Result<Json<i64>, ServiceError> {
+    // Anonymous has no notifications — `0`, not an error, so the navbar
+    // badge need not special-case "not logged in".
+    let Some(user_id) = actor.context().user_id() else {
+        return Ok(Json(0));
+    };
+    Ok(Json(
+        edda_db::NotificationRepo::unread_count(&state.pool, user_id).await?,
+    ))
 }
 
 async fn mark_read(
@@ -33,15 +76,20 @@ async fn mark_read(
     Ok(Json(()))
 }
 
-#[derive(Deserialize)]
-pub struct EmailNotificationsBody {
-    pub enabled: bool,
+async fn get_email_notifications(
+    State(state): State<AppState>,
+    actor: Actor,
+) -> Result<Json<bool>, ServiceError> {
+    let user_id = actor.require_user()?;
+    Ok(Json(
+        edda_db::UserRepo::email_notifications_enabled(&state.pool, user_id).await?,
+    ))
 }
 
 async fn set_email_notifications(
     State(state): State<AppState>,
     actor: Actor,
-    Json(body): Json<EmailNotificationsBody>,
+    Json(body): Json<EmailNotificationsRequest>,
 ) -> Result<Json<()>, ServiceError> {
     actor.require_user()?;
     NotificationService::from_state(&state)

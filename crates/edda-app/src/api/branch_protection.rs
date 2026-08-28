@@ -1,37 +1,54 @@
-//! `/api/v1/repos/{owner}/{repo}/branch-protection` — set / delete rules.
+//! `/api/v1/repos/{owner}/{repo}/branch-protection` — list / set / delete
+//! rules.
 
 use axum::extract::{Path, State};
-use axum::routing::put;
+use axum::routing::get;
 use axum::{Json, Router};
-use serde::Deserialize;
 
+use edda_api_types::{BranchProtectionDto, CreateBranchProtectionRequest};
 use edda_domain::BranchProtectionRuleId;
 
-use super::Actor;
+use super::{read_repo, Actor};
 use crate::services::{BranchProtectionService, ServiceError};
 use crate::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/api/v1/repos/{owner}/{repo}/branch-protection", put(set))
+        .route(
+            "/api/v1/repos/{owner}/{repo}/branch-protection",
+            get(list).put(set),
+        )
         .route(
             "/api/v1/repos/{owner}/{repo}/branch-protection/{id}",
             axum::routing::delete(delete),
         )
 }
 
-#[derive(Deserialize)]
-pub struct SetRuleBody {
-    pub branch: String,
-    #[serde(default)]
-    pub required_approvals: i64,
+async fn list(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path((owner, repo)): Path<(String, String)>,
+) -> Result<Json<Vec<BranchProtectionDto>>, ServiceError> {
+    let repository = read_repo(&state, actor.context(), &owner, &repo).await?;
+    let rules =
+        edda_db::BranchProtectionRepo::list_for_repository(&state.pool, repository.id).await?;
+    Ok(Json(
+        rules
+            .into_iter()
+            .map(|rule| BranchProtectionDto {
+                id: rule.id.to_string(),
+                branch: rule.branch,
+                required_approvals: rule.required_approvals,
+            })
+            .collect(),
+    ))
 }
 
 async fn set(
     State(state): State<AppState>,
     actor: Actor,
     Path((owner, repo)): Path<(String, String)>,
-    Json(body): Json<SetRuleBody>,
+    Json(body): Json<CreateBranchProtectionRequest>,
 ) -> Result<Json<()>, ServiceError> {
     actor.require_user()?;
     BranchProtectionService::from_state(&state)

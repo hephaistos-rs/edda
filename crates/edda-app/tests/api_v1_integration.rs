@@ -2,9 +2,10 @@
 //! request to a public repo returns correct data; the same request to a
 //! private repo 404s (not 403) without credentials — the workspace-wide
 //! information-hiding rule, re-checked at this surface rather than assumed
-//! to carry over. Also checks that a valid PAT does see the private repo,
-//! and that a session cookie alone (no bearer token) is *not* accepted
-//! here.
+//! to carry over. Also checks that a valid PAT does see the private repo.
+//! Since the Phase-4 cutover the `Actor` extractor accepts a session
+//! cookie *or* a bearer token on `/api/v1`; the bearer path is exercised
+//! here, the cookie path in `api_v1_write_surface`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -120,7 +121,7 @@ async fn a_public_repo_is_visible_unauthenticated_and_a_private_one_404s_without
     let body: serde_json::Value = response.json().await.unwrap();
     assert_eq!(body["name"], "public-repo");
     assert_eq!(body["owner"], "alice");
-    assert_eq!(body["private"], false);
+    assert_eq!(body["is_private"], false);
 
     // Private repo, no credentials: 404 — not 403, not a 200 with
     // redacted fields. Existence itself must not be observable.
@@ -154,7 +155,7 @@ async fn a_public_repo_is_visible_unauthenticated_and_a_private_one_404s_without
     assert_eq!(response.status(), 200);
     let body: serde_json::Value = response.json().await.unwrap();
     assert_eq!(body["name"], "secret-repo");
-    assert_eq!(body["private"], true);
+    assert_eq!(body["is_private"], true);
 
     let _ = std::fs::remove_dir_all(&store_root);
 }
@@ -235,8 +236,9 @@ async fn pull_requests_and_issues_are_readable_through_the_versioned_api() {
         .unwrap();
     assert_eq!(response.status(), 200);
     let body: serde_json::Value = response.json().await.unwrap();
-    assert_eq!(body["title"], "Add feature");
-    assert_eq!(body["state"]["status"], "open");
+    assert_eq!(body["pull_request"]["title"], "Add feature");
+    assert_eq!(body["pull_request"]["state"]["status"], "open");
+    assert_eq!(body["can_merge"], false);
 
     let response = client
         .get(format!(
@@ -247,7 +249,7 @@ async fn pull_requests_and_issues_are_readable_through_the_versioned_api() {
         .unwrap();
     assert_eq!(response.status(), 200);
     let body: serde_json::Value = response.json().await.unwrap();
-    assert_eq!(body["title"], "Something's broken");
+    assert_eq!(body["issue"]["title"], "Something's broken");
 
     let _ = std::fs::remove_dir_all(&store_root);
 }

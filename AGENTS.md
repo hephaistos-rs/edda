@@ -52,7 +52,7 @@ compatibility layers for.
   name a concrete pool type** (`SqlitePool`/`PgPool`/`MySqlPool`) or
   branch on which backend is connected.
   - **Documented exception**: `tower-sessions-sqlx-store` does not
-    support `AnyPool`. `edda-web`'s `session_store` module opens a
+    support `AnyPool`. The `edda` binary's `session_store` module opens a
     second, small, _concrete_ typed connection specifically to satisfy
     that one dependency. This is an explicit, narrow infrastructure
     exception — do not generalize it to any other persistence code.
@@ -107,7 +107,7 @@ application / domain
 ## Crate architecture (modular monolith)
 
 ```
-edda-domain
+edda-domain, edda-api-types
      |
      v
 edda-db, edda-git, edda-auth, edda-jobs, edda-telemetry   (infrastructure/application crates)
@@ -116,14 +116,27 @@ edda-db, edda-git, edda-auth, edda-jobs, edda-telemetry   (infrastructure/applic
 edda-app, edda-ssh                                       (transport shells)
      |
      v
-edda-web                                                  (composition root / server binary)
+edda-web                                                  (Dioxus UI — a pure /api/v1 client)
+     |
+     v
+edda                                                     (composition root / server binary)
 ```
 
-Current crates: `edda-domain`, `edda-db`, `edda-git`, `edda-render`,
-`edda-auth`, `edda-jobs`, `edda-app`, `edda-ssh`, `edda-telemetry`,
-`edda-cli`, `edda-web`. Two crates sit outside the layered chain above:
+Current crates: `edda-domain`, `edda-api-types`, `edda-db`, `edda-git`,
+`edda-render`, `edda-auth`, `edda-jobs`, `edda-app`, `edda-ssh`,
+`edda-telemetry`, `edda-cli`, `edda-web`, `edda`. `edda-api-types` is a
+serde-only leaf holding the `/api/v1` request/response DTOs, shared by
+`edda-app` (which serializes them) and `edda-web` (which deserializes
+them). `edda-web` is the Dioxus frontend: it consumes `/api/v1` over HTTP,
+defines no server functions, holds no server state, and depends on no
+server-only Edda crate (`axum` types appear only in `edda-app`; `dioxus`
+only in `edda-web`; the `edda` binary, as the composition root, names
+both). `edda` is the thin binary that parses `Settings`, builds
+`AppState`, mounts `edda_web::App` (SSR + assets) merged with
+`edda_app::router`, and starts the poller / dispatcher / SSH listener.
+Two crates sit outside the layered chain above:
 `edda-render` is a leaf (markdown sanitization + syntax highlighting, no
-dependency on any other Edda crate) pulled in directly by `edda-web`, and
+dependency on any other Edda crate) pulled in directly by `edda-app`, and
 `edda-cli` is a second binary entry point that talks to
 `edda-db`/`edda-auth` directly (no HTTP) for offline instance
 administration.
@@ -148,9 +161,10 @@ administration.
   machinery only — never handler *logic*. It depends on `edda-domain` +
   `edda-db` and must never depend on `edda-app`/`edda-auth`: the actual
   handlers (send this webhook, send this email) need those crates'
-  capabilities, so they're defined in `edda-web`'s composition root and
-  registered *into* the poller. The dependency runs shell-calls-handler,
-  never handler-crate-depends-on-transport-crate.
+  capabilities, so they're defined in the `edda` binary's composition
+  root (`crates/edda/src/jobs.rs`) and registered *into* the poller. The
+  dependency runs shell-calls-handler, never handler-crate-depends-on-
+  transport-crate.
 - A crate boundary must represent a real architectural seam. Don't add a
   crate for organizational aesthetics, and don't merge unrelated
   responsibilities to minimize crate count either.

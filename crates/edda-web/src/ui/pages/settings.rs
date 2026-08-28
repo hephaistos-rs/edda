@@ -1,9 +1,9 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::notification_server::{
-    get_email_notifications_enabled, set_email_notifications_enabled,
-};
+use edda_api_types::EmailNotificationsRequest;
+
+use crate::api_client;
 use crate::ui::webauthn_js;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -545,13 +545,18 @@ pub fn Settings() -> Element {
         });
     };
 
-    let email_notifications_enabled = use_resource(get_email_notifications_enabled);
+    let email_notifications_enabled =
+        use_resource(|| api_client::get_json::<bool>("/api/v1/user/email-notifications"));
     let mut email_notifications_busy = use_signal(|| false);
     let on_toggle_email_notifications = move |event: FormEvent| {
         let enabled = event.checked();
         email_notifications_busy.set(true);
         spawn(async move {
-            let _ = set_email_notifications_enabled(enabled).await;
+            let _ = api_client::put_ok(
+                "/api/v1/user/email-notifications",
+                &EmailNotificationsRequest { enabled },
+            )
+            .await;
             email_notifications_busy.set(false);
         });
     };

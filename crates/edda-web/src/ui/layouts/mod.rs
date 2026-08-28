@@ -2,7 +2,9 @@ use dioxus::prelude::*;
 use dioxus_free_icons::icons::ld_icons::LdSearch;
 use dioxus_free_icons::Icon;
 
-use crate::server::CurrentUser;
+use edda_api_types::CurrentUser;
+
+use crate::api_client;
 use crate::Route;
 
 /// Provided here, above the `Outlet`, so pages rendered inside it (e.g. the
@@ -147,7 +149,7 @@ pub fn Navbar() -> Element {
 /// `ui/pages/notifications.rs`'s page uses.
 #[component]
 fn NotificationsLink() -> Element {
-    let unread = use_resource(crate::notification_server::unread_notification_count);
+    let unread = use_resource(|| api_client::get_json::<i64>("/api/v1/notifications/unread-count"));
     let count = match &*unread.read() {
         Some(Ok(count)) if *count > 0 => Some(*count),
         _ => None,

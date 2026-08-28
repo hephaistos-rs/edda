@@ -4,7 +4,9 @@ use dioxus_free_icons::icons::ld_icons::{
 };
 use dioxus_free_icons::Icon;
 
-use crate::server::{create_repo, RepoDto};
+use edda_api_types::{CreateRepoRequest, RepoDto};
+
+use crate::api_client;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum RepoStatus {
@@ -189,7 +191,13 @@ pub fn NewRepoRow(on_created: EventHandler<()>) -> Element {
                         }
                         let is_private = private();
                         spawn(async move {
-                            match create_repo(repo_name, None, is_private, None).await {
+                            let request = CreateRepoRequest {
+                                name: repo_name,
+                                description: None,
+                                private: is_private,
+                                owner: None,
+                            };
+                            match api_client::post_ok("/api/v1/repos", &request).await {
                                 Ok(()) => {
                                     creating.set(false);
                                     name.set(String::new());

@@ -86,7 +86,7 @@ enforce "edda-render manifest depends on no other Edda crate" \
 #   - src/main.rs (either binary)        — the composition roots
 #   - tests/ dirs                        — tests set their own env
 enforce "only edda-app::config + the binaries read EDDA_* / IP / PORT from the environment" \
-    "$(g 'env::(var|set_var|remove_var)\s*\(\s*\"(EDDA_|IP\"|PORT\")' --include=*.rs crates app \
+    "$(g 'env::(var|set_var|remove_var)\s*\(\s*\"(EDDA_|IP\"|PORT\")' --include=*.rs crates \
         | grep -vE 'edda-app/src/config\.rs|edda-telemetry/src/config\.rs|/src/main\.rs|/tests/|EDDA_TEST_' \
         || true)"
 
@@ -94,15 +94,15 @@ enforce "only edda-app::config + the binaries read EDDA_* / IP / PORT from the e
 # types, and `sqlx::Error` live only in `edda-db`; every other crate names
 # `edda_db::DbError` and the narrow repo methods instead. Exceptions, each
 # deliberate:
-#   - app/edda-web/src/session_store.rs — `tower-sessions-sqlx-store` needs
+#   - crates/edda/src/session_store.rs — `tower-sessions-sqlx-store` needs
 #     a *concrete* `SqlitePool`/`PgPool`/`MySqlPool` that `AnyPool` can't
 #     provide; this one composition-root module opens that typed pool
-#     itself (moves into the `edda` binary in Phase 4).
+#     itself (the narrow, documented AGENTS.md exception).
 #   - tests/ dirs — integration-test harnesses stand up their own session
 #     store / fixtures the same way.
 enforce "sqlx types stay inside crates/edda-db/" \
-    "$(g '\bsqlx::' --include=*.rs crates app \
-        | grep -vE 'crates/edda-db/|app/edda-web/src/session_store\.rs|/tests/' \
+    "$(g '\bsqlx::' --include=*.rs crates \
+        | grep -vE 'crates/edda-db/|crates/edda/src/session_store\.rs|/tests/' \
         || true)"
 
 # Transactional outbox (plan.local.md §13 / Phase 3): a domain event is
@@ -112,19 +112,45 @@ enforce "sqlx types stay inside crates/edda-db/" \
 # was lost for good if the process died in the window. That call, and the
 # `EmailContent` struct it took, no longer exist.
 enforce "no post-commit event dispatch — the outbox is the only path" \
-    "$(g '\bedda_jobs::dispatch\b|\bEmailContent\b' --include=*.rs crates app || true)"
+    "$(g '\bedda_jobs::dispatch\b|\bEmailContent\b' --include=*.rs crates || true)"
+
+# API/Dioxus decoupling (plan.local.md §5.1 / Phase 4). `axum` types live
+# in `edda-app` (the one HTTP application). The `edda` binary is the
+# composition root: it merges `edda_app::router` with Dioxus's SSR router
+# and applies the session/auth layer, so it names `axum`/`axum_login` too —
+# the one sanctioned crossing, and the last one Phase 13 removes when the
+# binary owns `axum::serve` outright. `edda-auth` still names `axum` in its
+# OIDC-callback test module only; Phase 9 moves that `Session` coupling out.
+enforce "axum:: outside crates/edda-app/ (composition-root binary + edda-auth OIDC test excepted)" \
+    "$(g '\baxum::' --include=*.rs crates \
+        | grep -vE 'crates/edda-app/|crates/edda/|crates/edda-auth/|:[0-9]+:\s*(//|//!)' || true)"
+
+# `dioxus` types live only in the UI crate `edda-web`. The `edda` binary's
+# `main.rs` calls `dioxus::launch` / `dioxus::server::{serve,router}` to
+# host the UI — the sanctioned composition-root crossing; Phase 13 folds
+# it behind an `edda_web` wrapper.
+enforce "dioxus outside crates/edda-web/ (composition-root main.rs excepted)" \
+    "$(g '\bdioxus\b' --include=*.rs crates \
+        | grep -vE 'crates/edda-web/|crates/edda/src/main\.rs|:[0-9]+:\s*(//|//!)' || true)"
+
+# The removed process-global and the deleted Dioxus server-function
+# surface (plan.local.md §19.1) — neither may reappear.
+enforce "no 'shared::' process-global — State<AppState> everywhere" \
+    "$(g '\bshared::(get|init|SharedServerState)\b' --include=*.rs crates || true)"
+
+enforce "no Dioxus server functions in crates/edda-web/" \
+    "$(g '#\[(server|get|post)\(' --include=*.rs crates/edda-web || true)"
+
+# The UI is a client, not the server: `edda-web`'s manifest names no
+# server-only Edda crate (plan.local.md §5.1).
+enforce "edda-web manifest depends on no server-only Edda crate" \
+    "$(g '^\s*edda-(db|auth|git|jobs|app|ssh|telemetry|render)\s*[=.]' crates/edda-web/Cargo.toml || true)"
 
 echo
 echo "── PENDING (target invariants, not yet enforced) ────────"
 
-pending "Phase 4" "axum:: / http:: outside the HTTP app crate" \
-    "$(g '\b(axum|http)::' --include=*.rs crates app | grep -vE 'crates/edda-app/|:[0-9]+:\s*(//|//!)' || true)"
-
-pending "Phase 4" "dioxus outside the web UI crate" \
-    "$(g '\bdioxus\b' --include=*.rs crates app | grep -vE 'app/edda-web/|:[0-9]+:\s*(//|//!)' || true)"
-
 pending "Phase 6/7" "gix:: / gix_*:: outside crates/edda-git/" \
-    "$(g '\bgix(_[a-z]+)?::' --include=*.rs crates app | grep -v 'crates/edda-git/' || true)"
+    "$(g '\bgix(_[a-z]+)?::' --include=*.rs crates | grep -v 'crates/edda-git/' || true)"
 
 echo
 if [[ $fail -ne 0 ]]; then

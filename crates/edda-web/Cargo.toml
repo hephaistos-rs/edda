@@ -1,0 +1,37 @@
+[package]
+name = "edda-web"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# The Dioxus web UI. Consumes `/api/v1` over HTTP and holds no server
+# state. It compiles for the wasm32 client and, behind the `server`
+# feature, for the SSR pass the composition-root binary runs — never with
+# a server-only Edda crate in its graph (plan.local.md §5.1). `dioxus` is
+# allowed here and nowhere else.
+[lints]
+workspace = true
+
+[dependencies]
+dioxus = { workspace = true, features = ["router", "fullstack"] }
+dioxus-free-icons = { workspace = true, features = ["lucide"] }
+# The `/api/v1` wire DTOs — serde-only, no server-side dependency.
+edda-api-types = { workspace = true }
+# Browser `fetch` for `api_client` and the handful of hand-written auth /
+# admin calls in `ui/`; wasm-only, so it's behind the `web` feature and
+# every use site is `#[cfg(target_arch = "wasm32")]`.
+gloo-net = { workspace = true, features = ["json"], optional = true }
+serde = { workspace = true, features = ["derive"] }
+# `ui/webauthn_js` passes the WebAuthn ceremony JSON through unopened —
+# see that module's own doc comment.
+serde_json = { workspace = true }
+tracing = { workspace = true }
+# `std::time::SystemTime::now()` panics on `wasm32-unknown-unknown`; this
+# is a drop-in that's `std::time` everywhere else and `Date.now()` on wasm.
+web-time = { workspace = true }
+
+[features]
+default = ["web"]
+web = ["dioxus/web", "dep:gloo-net"]
+server = ["dioxus/server"]

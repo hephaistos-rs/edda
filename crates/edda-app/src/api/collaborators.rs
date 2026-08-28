@@ -4,8 +4,8 @@
 use axum::extract::{Path, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
 
+use edda_api_types::{AddCollaboratorRequest, CollaboratorDto};
 use edda_domain::UserId;
 
 use super::Actor;
@@ -22,14 +22,6 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/repos/{owner}/{repo}/collaborators/{user_id}",
             axum::routing::delete(remove),
         )
-}
-
-#[derive(Serialize)]
-pub struct CollaboratorDto {
-    pub user_id: String,
-    pub email: String,
-    pub role: String,
-    pub added_at: i64,
 }
 
 async fn list(
@@ -53,16 +45,11 @@ async fn list(
     ))
 }
 
-#[derive(Deserialize)]
-pub struct AddCollaboratorBody {
-    pub email: String,
-}
-
 async fn add(
     State(state): State<AppState>,
     actor: Actor,
     Path((owner, repo)): Path<(String, String)>,
-    Json(body): Json<AddCollaboratorBody>,
+    Json(body): Json<AddCollaboratorRequest>,
 ) -> Result<Json<()>, ServiceError> {
     actor.require_user()?;
     CollaboratorService::from_state(&state)

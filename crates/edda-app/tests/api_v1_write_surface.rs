@@ -198,7 +198,7 @@ async fn the_repository_write_endpoints_round_trip() {
         .json()
         .await
         .unwrap();
-    assert_eq!(body["private"], true);
+    assert_eq!(body["is_private"], true);
     assert_eq!(body["description"], "updated");
 
     // delete
@@ -300,7 +300,52 @@ async fn the_issue_lifecycle_endpoints_round_trip() {
         .json()
         .await
         .unwrap();
-    assert_eq!(detail["state"]["status"], "open");
+    assert_eq!(detail["issue"]["state"]["status"], "open");
+}
+
+/// The `Actor` extractor accepts a session cookie, not only a bearer
+/// token: sign up (which establishes a session), then drive a `/api/v1`
+/// read and write with the cookie jar alone — no `Authorization` header.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_api_v1_surface_accepts_a_session_cookie() {
+    let h = Harness::new().await;
+
+    let jar = reqwest::Client::builder()
+        .cookie_store(true)
+        .build()
+        .unwrap();
+
+    let signup = jar
+        .post(format!("{}/api/auth/signup", h.base))
+        .json(&json!({
+            "username": "carol",
+            "email": "carol@example.com",
+            "password": "correct horse battery staple"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(signup.status(), 200, "{}", signup.text().await.unwrap());
+
+    // A cookie-authenticated read.
+    let repos = jar
+        .get(format!("{}/api/v1/repos", h.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(repos.status(), 200);
+
+    // A cookie-authenticated write: create a repo under carol's namespace.
+    let created = jar
+        .post(format!("{}/api/v1/repos", h.base))
+        .json(&json!({ "name": "cookie-made" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 200, "{}", created.text().await.unwrap());
+    let body: serde_json::Value = created.json().await.unwrap();
+    assert_eq!(body["owner"], "carol");
+    assert_eq!(body["name"], "cookie-made");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

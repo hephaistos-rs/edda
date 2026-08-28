@@ -28,7 +28,7 @@ dx serve --package edda --platform web
 
 `dx serve` builds the client and server together, links the web UI's
 assets, and hot-reloads on change. Run it from the workspace root, not
-from `app/edda-web`: `dx serve` inside the member directory trips a
+from `crates/edda`: `dx serve` inside the member directory trips a
 path-resolution panic in dioxus-cli 0.7.10 on some setups. (`just run` is
 the same command.) Edda listens on `127.0.0.1:8080` by default; repository
 data and the SQLite database live under `./data`.
@@ -106,8 +106,7 @@ dx serve --package edda --platform web    # or: just run
 ```
 
 runs the client/server dev loop with hot reload, from the workspace root
-(see the Quick start note on why not from `app/edda-web`). Swap
-`--platform desktop` to run it as a desktop app instead. Tailwind is compiled automatically as of Dioxus 0.7 — no separate Tailwind install needed unless you want to customize the input/output paths (see `app/edda-web/Dioxus.toml`) or use Tailwind plugins, in which case install the [Tailwind CLI](https://tailwindcss.com/docs/installation/tailwind-cli) and run it directly:
+(see the Quick start note on why not from `crates/edda`). Tailwind is compiled automatically as of Dioxus 0.7 — no separate Tailwind install needed unless you want to customize the input/output paths (see `crates/edda/Dioxus.toml` / `crates/edda-web/tailwind.css`) or use Tailwind plugins, in which case install the [Tailwind CLI](https://tailwindcss.com/docs/installation/tailwind-cli) and run it directly:
 
 ```bash
 npx @tailwindcss/cli -i ./input.css -o ./assets/tailwind.css --watch
@@ -135,28 +134,29 @@ or query change must pass on all three.
 ### Project layout
 
 Edda is a Cargo workspace: a functional core of pure domain logic, thin
-I/O-performing "shell" crates around it, and a composition root
-(`app/edda-web`) that wires them together and hosts the Dioxus UI. See
-`AGENTS.md` for the full architectural rules.
+I/O-performing "shell" crates around it, a Dioxus UI that is a pure
+`/api/v1` client, and a thin composition-root binary (`edda`) that wires
+them together. See `AGENTS.md` for the full architectural rules.
 
 ```
 crates/
 ├─ edda-domain/     # entities, invariants, pure authorization/business-rule functions — no I/O
+├─ edda-api-types/  # the /api/v1 request/response DTOs — serde-only, shared by edda-app and edda-web
 ├─ edda-db/         # sqlx AnyPool (SQLite/PostgreSQL/MySQL-MariaDB, selected at runtime), embedded migrations, one repository struct per aggregate
 ├─ edda-git/        # repository storage and gix-backed operations (protocol core, diff, merge, LFS) — transport-agnostic
 ├─ edda-render/     # markdown rendering (sanitized) and syntax highlighting
 ├─ edda-auth/       # authentication (passwords/sessions/tokens/TOTP/WebAuthn/OAuth/SSH keys) and the authorization service
-├─ edda-app/       # axum app: git smart-HTTP bridge, LFS, auth/OAuth/WebAuthn/token/collaborator/admin/SSH-key routes, release-asset transfer, REST /api/v1, rate limiting
+├─ edda-app/        # axum app: the entire /api/v1, git smart-HTTP bridge, LFS, auth/OAuth/WebAuthn/token/collaborator/admin/SSH-key routes, release-asset transfer, rate limiting, application-service layer
 ├─ edda-ssh/        # git-over-SSH transport (russh), reusing edda-git's protocol core
-├─ edda-jobs/       # the background-job poller and handler registry (handler logic is wired in app/edda-web)
+├─ edda-jobs/       # the background-job poller and handler registry (handler logic is wired in crates/edda/src/jobs.rs)
 ├─ edda-cli/        # `edda-cli` — offline instance administration (user create/list/disable/enable/delete)
-└─ edda-telemetry/  # tracing/OpenTelemetry setup, see below
-app/
-└─ edda-web/        # the composition root: main.rs, Dioxus server functions, UI (components/layouts/pages)
+├─ edda-telemetry/  # tracing/OpenTelemetry setup, see below
+├─ edda-web/        # the Dioxus UI (components/layouts/pages) — consumes /api/v1 over HTTP, no server functions, no server state
+└─ edda/            # the composition root: main.rs (Settings → AppState → serve), session_store, job handlers
 migrations/          # SQL migration history — sqlite/, postgres/, and mysql/ subdirectories, applied by edda-db (kept at the workspace root for `sqlx-cli` convenience)
 ```
 
-`edda-web` is the only package built for both the wasm32 client and the native server (Dioxus fullstack's own constraint) — every other crate above is server-only, pulled in by `edda-web` behind its `server` feature, and never enters the wasm/web client build; see `app/edda-web/Cargo.toml`'s feature list.
+`edda` is the only package built for both the wasm32 client and the native server (Dioxus fullstack's own constraint) — every server-only crate above is pulled in behind its `server` feature and never enters the wasm/web client build; `edda-web` compiles for both targets too but names no server-only crate. See `crates/edda/Cargo.toml`'s feature list.
 
 ## Observability
 

@@ -33,6 +33,10 @@ ignore = [
     # usage (local key operations, not an oracle); revisit when `rsa`
     # publishes a constant-time fix.
     "RUSTSEC-2023-0071",
+    # `lru` use-after-free in `LruCache::pop()` under a panicking `Drop` —
+    # transitive (Dioxus caches), never reached by Edda. Kept in sync with
+    # `.cargo/audit.toml`.
+    "RUSTSEC-2026-0253",
 ]
 
 [licenses]

@@ -8,7 +8,7 @@ publish.workspace = true
 # Git-over-SSH transport — owns SSH-specific concerns only (server/session
 # lifecycle, public-key authentication, exec-command parsing, channel I/O
 # framing). Delegates every actual git operation to `edda-git::protocol`
-# (shared verbatim with `edda-http`'s bridge) and every access decision to
+# (shared verbatim with `edda-app`'s bridge) and every access decision to
 # `edda-auth::AuthorizationService` — this crate must never reimplement
 # either.
 [lints]

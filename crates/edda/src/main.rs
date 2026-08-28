@@ -1,72 +1,9 @@
-use dioxus::prelude::*;
+use edda_web::App;
 
-mod issue_server;
 #[cfg(feature = "server")]
-mod job_handlers;
-mod notification_server;
-mod org_server;
-mod pr_server;
-mod release_server;
-mod server;
+mod jobs;
 #[cfg(feature = "server")]
 mod session_store;
-#[cfg(feature = "server")]
-mod shared;
-mod team_server;
-mod ui;
-mod webhook_server;
-
-use ui::layouts::Navbar;
-use ui::pages::{
-    Admin, Home, IssueDetail, IssuesList, Login, Notifications, OrganizationDetail,
-    OrganizationsList, PullDetail, PullsList, ReleaseDetail, ReleasesList, Repo, ResetPassword,
-    Settings, Signup, TeamDetail, WebhooksSettings,
-};
-
-#[derive(Debug, Clone, Routable, PartialEq)]
-#[rustfmt::skip]
-enum Route {
-    #[layout(Navbar)]
-    #[route("/")]
-    Home {},
-    #[route("/settings")]
-    Settings {},
-    #[route("/notifications")]
-    Notifications {},
-    #[route("/admin")]
-    Admin {},
-    #[route("/orgs")]
-    OrganizationsList {},
-    #[route("/orgs/:name")]
-    OrganizationDetail { name: String },
-    #[route("/orgs/:org_name/teams/:team_name")]
-    TeamDetail { org_name: String, team_name: String },
-    #[route("/:owner/:name/pulls")]
-    PullsList { owner: String, name: String },
-    #[route("/:owner/:name/pulls/:number")]
-    PullDetail { owner: String, name: String, number: i64 },
-    #[route("/:owner/:name/issues")]
-    IssuesList { owner: String, name: String },
-    #[route("/:owner/:name/issues/:number")]
-    IssueDetail { owner: String, name: String, number: i64 },
-    #[route("/:owner/:name/releases")]
-    ReleasesList { owner: String, name: String },
-    #[route("/:owner/:name/releases/:tag_name")]
-    ReleaseDetail { owner: String, name: String, tag_name: String },
-    #[route("/:owner/:name/settings/webhooks")]
-    WebhooksSettings { owner: String, name: String },
-    #[route("/:owner/:name")]
-    Repo { owner: String, name: String },
-    #[route("/signup")]
-    Signup {},
-    #[route("/login")]
-    Login {},
-    #[route("/reset-password?:token")]
-    ResetPassword { token: Option<String> },
-}
-
-const FAVICON: Asset = asset!("/assets/favicon.ico");
-const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 /// Waits for either Ctrl-C or (on unix) SIGTERM — the two signals a process
 /// manager / `docker stop` / an interactive terminal actually send.
@@ -92,13 +29,13 @@ async fn wait_for_shutdown_signal() {
     }
 }
 
-/// The client (web) build launches normally. The server build needs its own
-/// axum router instead: Dioxus's own router (SSR, assets, server functions)
-/// merged with `edda_app::router` — the git-http bridge and account/token
-/// routes aren't server functions; they need to speak raw git wire
-/// protocol and plain REST, not typed RPC. This function is the workspace's
-/// one composition root: every other crate is wired together here, and
-/// nowhere else.
+/// The client (web) build launches normally. The server build assembles
+/// its own axum router: Dioxus's SSR + static-asset router (no server
+/// functions — those were removed in the Phase-4 cutover; the UI is a pure
+/// `/api/v1` HTTP client now) merged with `edda_app::router`, which owns
+/// the entire API, the git smart-HTTP bridge, and LFS. This function is
+/// the workspace's one composition root: every other crate is wired
+/// together here, and nowhere else.
 #[cfg(feature = "server")]
 fn main() {
     // Parse and validate every `EDDA_*` variable once, before anything
@@ -180,17 +117,6 @@ fn main() {
             let locks = std::sync::Arc::new(edda_git::LockRegistry::new());
             let authz = edda_auth::AuthorizationService::new(pool.clone());
 
-            // See `shared`'s module doc comment for why Dioxus server
-            // functions need this in addition to `AppState` below — both
-            // are built from the exact same values, not independently
-            // constructed copies.
-            shared::init(shared::SharedServerState {
-                pool: pool.clone(),
-                store: store.clone(),
-                locks: locks.clone(),
-                authz: authz.clone(),
-            });
-
             let state = edda_app::AppState {
                 pool: pool.clone(),
                 store: store.clone(),
@@ -215,7 +141,7 @@ fn main() {
             // that crate's own `Cargo.toml` doc comment).
             let mailer = match &settings.smtp {
                 Some(smtp) => Some(std::sync::Arc::new(
-                    job_handlers::Mailer::new(smtp).map_err(std::io::Error::other)?,
+                    jobs::Mailer::new(smtp).map_err(std::io::Error::other)?,
                 )),
                 None => {
                     tracing::info!(
@@ -228,15 +154,15 @@ fn main() {
             let mut handlers = edda_jobs::HandlerRegistry::new();
             handlers.register(edda_domain::JobKind::SendEmail, {
                 let mailer = mailer.clone();
-                move |payload| job_handlers::send_email(mailer.clone(), payload)
+                move |payload| jobs::send_email(mailer.clone(), payload)
             });
             handlers.register(edda_domain::JobKind::CreateNotification, {
                 let pool = pool.clone();
-                move |payload| job_handlers::create_notification(pool.clone(), payload)
+                move |payload| jobs::create_notification(pool.clone(), payload)
             });
             handlers.register(edda_domain::JobKind::DeliverWebhook, {
                 let pool = pool.clone();
-                move |payload| job_handlers::deliver_webhook(pool.clone(), payload)
+                move |payload| jobs::deliver_webhook(pool.clone(), payload)
             });
             edda_jobs::spawn_poller(
                 pool.clone(),
@@ -292,13 +218,4 @@ fn main() {
 #[cfg(not(feature = "server"))]
 fn main() {
     dioxus::launch(App);
-}
-
-#[component]
-fn App() -> Element {
-    rsx! {
-        document::Link { rel: "icon", href: FAVICON }
-        document::Link { rel: "stylesheet", href: TAILWIND_CSS }
-        Router::<Route> {}
-    }
 }

@@ -1,6 +1,8 @@
 use dioxus::prelude::*;
 
-use crate::server::list_repos;
+use edda_api_types::RepoDto;
+
+use crate::api_client;
 use crate::ui::components::repo::{NewRepoRow, Repo, RepoRow};
 use crate::ui::layouts::{AuthState, AuthStateSignal, SearchQuery};
 use crate::Route;
@@ -58,7 +60,7 @@ fn LandingPage() -> Element {
 #[component]
 fn RepoList() -> Element {
     let search = use_context::<SearchQuery>();
-    let mut repos = use_server_future(list_repos)?;
+    let mut repos = use_resource(|| api_client::get_json::<Vec<RepoDto>>("/api/v1/repos"));
     let query = search.read().to_lowercase();
 
     let body = match repos() {

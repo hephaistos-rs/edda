@@ -4,12 +4,17 @@ use dioxus_free_icons::icons::ld_icons::{
 };
 use dioxus_free_icons::Icon;
 
-use crate::server::{
-    delete_repo, fork_repo, get_blob, get_branches, get_commit_diff, get_commit_log, get_repo,
-    get_tree, search_code, set_repo_visibility, update_repo, DiffLineDto, DiffLineKind,
-    FileDiffDto,
+use edda_api_types::{
+    BlobDto, CommitLogEntryDto, DiffLineDto, DiffLineKind, FileDiffDto, ForkedRepoDto, RepoDto,
+    SearchMatchDto, SetVisibilityRequest, TreeEntryDto, UpdateRepoRequest,
 };
+
+use crate::api_client::{self, with_query};
 use crate::Route;
+
+fn repo_path(owner: &str, name: &str) -> String {
+    format!("/api/v1/repos/{owner}/{name}")
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum RepoTab {
@@ -59,11 +64,14 @@ fn relative_time(unix_seconds: i64) -> String {
 #[component]
 pub fn Repo(owner: String, name: String) -> Element {
     let navigator = use_navigator();
-    let mut repo = use_server_future({
+    let mut repo = use_resource({
         let owner = owner.clone();
         let name = name.clone();
-        move || get_repo(owner.clone(), name.clone())
-    })?;
+        move || {
+            let path = repo_path(&owner, &name);
+            async move { api_client::get_json::<RepoDto>(&path).await }
+        }
+    });
 
     let mut confirming_delete = use_signal(|| false);
     let mut delete_error = use_signal(|| Option::<String>::None);
@@ -83,9 +91,8 @@ pub fn Repo(owner: String, name: String) -> Element {
         let owner = owner.clone();
         let name = name.clone();
         move || {
-            let owner = owner.clone();
-            let name = name.clone();
-            async move { get_branches(owner, name).await }
+            let path = format!("{}/branches", repo_path(&owner, &name));
+            async move { api_client::get_json::<Vec<String>>(&path).await }
         }
     });
 
@@ -93,19 +100,13 @@ pub fn Repo(owner: String, name: String) -> Element {
         let owner = owner.clone();
         let name = name.clone();
         move || {
-            let owner = owner.clone();
-            let name = name.clone();
-            let branch = selected_branch.read().clone();
+            let branch = selected_branch.read().clone().unwrap_or_default();
             let path = path_segments.read().join("/");
-            async move {
-                get_tree(
-                    owner,
-                    name,
-                    branch,
-                    if path.is_empty() { None } else { Some(path) },
-                )
-                .await
-            }
+            let url = with_query(
+                &format!("{}/tree", repo_path(&owner, &name)),
+                &[("branch", &branch), ("path", &path)],
+            );
+            async move { api_client::get_json::<Vec<TreeEntryDto>>(&url).await }
         }
     });
 
@@ -113,13 +114,18 @@ pub fn Repo(owner: String, name: String) -> Element {
         let owner = owner.clone();
         let name = name.clone();
         move || {
-            let owner = owner.clone();
-            let name = name.clone();
-            let branch = selected_branch.read().clone();
+            let branch = selected_branch.read().clone().unwrap_or_default();
             let file = viewing_file.read().clone();
+            let base = repo_path(&owner, &name);
             async move {
                 match file {
-                    Some(path) => Some(get_blob(owner, name, branch, path).await),
+                    Some(path) => {
+                        let url = with_query(
+                            &format!("{base}/blob"),
+                            &[("branch", &branch), ("path", &path)],
+                        );
+                        Some(api_client::get_json::<BlobDto>(&url).await)
+                    }
                     None => None,
                 }
             }
@@ -133,15 +139,15 @@ pub fn Repo(owner: String, name: String) -> Element {
         let owner = owner.clone();
         let name = name.clone();
         move || {
-            let owner = owner.clone();
-            let name = name.clone();
-            let branch = selected_branch.read().clone();
+            let branch = selected_branch.read().clone().unwrap_or_default();
             let active = tab() == RepoTab::Commits;
+            let base = repo_path(&owner, &name);
             async move {
                 if !active {
                     return None;
                 }
-                Some(get_commit_log(owner, name, branch).await)
+                let url = with_query(&format!("{base}/commits"), &[("branch", &branch)]);
+                Some(api_client::get_json::<Vec<CommitLogEntryDto>>(&url).await)
             }
         }
     });
@@ -173,9 +179,17 @@ pub fn Repo(owner: String, name: String) -> Element {
             } else {
                 None
             };
+            let branch = branch.unwrap_or_default();
+            let base = repo_path(&owner, &name);
             async move {
                 match readme_name {
-                    Some(file_name) => Some(get_blob(owner, name, branch, file_name).await),
+                    Some(file_name) => {
+                        let url = with_query(
+                            &format!("{base}/blob"),
+                            &[("branch", &branch), ("path", &file_name)],
+                        );
+                        Some(api_client::get_json::<BlobDto>(&url).await)
+                    }
                     None => None,
                 }
             }
@@ -189,12 +203,16 @@ pub fn Repo(owner: String, name: String) -> Element {
         let owner = owner.clone();
         let name = name.clone();
         move || {
-            let owner = owner.clone();
-            let name = name.clone();
             let commit_id = selected_commit.read().clone();
+            let base = repo_path(&owner, &name);
             async move {
                 match commit_id {
-                    Some(commit_id) => Some(get_commit_diff(owner, name, commit_id).await),
+                    Some(commit_id) => Some(
+                        api_client::get_json::<Vec<FileDiffDto>>(&format!(
+                            "{base}/commits/{commit_id}/diff"
+                        ))
+                        .await,
+                    ),
                     None => None,
                 }
             }
@@ -211,13 +229,18 @@ pub fn Repo(owner: String, name: String) -> Element {
         let owner = owner.clone();
         let name = name.clone();
         move || {
-            let owner = owner.clone();
-            let name = name.clone();
-            let branch = selected_branch.read().clone();
+            let branch = selected_branch.read().clone().unwrap_or_default();
             let query = search_submitted.read().clone();
+            let base = repo_path(&owner, &name);
             async move {
                 match query {
-                    Some(query) => Some(search_code(owner, name, branch, query).await),
+                    Some(query) => {
+                        let url = with_query(
+                            &format!("{base}/search"),
+                            &[("branch", &branch), ("query", &query)],
+                        );
+                        Some(api_client::get_json::<Vec<SearchMatchDto>>(&url).await)
+                    }
                     None => None,
                 }
             }
@@ -280,12 +303,12 @@ pub fn Repo(owner: String, name: String) -> Element {
                                 let owner = owner.clone();
                                 let name = name.clone();
                                 move |_| {
-                                    let owner = owner.clone();
-                                    let name = name.clone();
+                                    let path = format!("{}/visibility", repo_path(&owner, &name));
                                     let next_private = !is_private;
                                     visibility_pending.set(true);
                                     spawn(async move {
-                                        match set_repo_visibility(owner, name, next_private).await {
+                                        let body = SetVisibilityRequest { private: next_private };
+                                        match api_client::put_ok(&path, &body).await {
                                             Ok(()) => {
                                                 visibility_error.set(None);
                                                 repo.restart();
@@ -308,14 +331,13 @@ pub fn Repo(owner: String, name: String) -> Element {
                                 let owner = owner.clone();
                                 let name = name.clone();
                                 move |_| {
-                                    let owner = owner.clone();
-                                    let name = name.clone();
+                                    let path = format!("{}/fork", repo_path(&owner, &name));
                                     fork_pending.set(true);
                                     spawn(async move {
-                                        match fork_repo(owner, name).await {
-                                            Ok((new_owner, new_name)) => {
+                                        match api_client::post_empty::<ForkedRepoDto>(&path).await {
+                                            Ok(forked) => {
                                                 fork_error.set(None);
-                                                navigator.push(Route::Repo { owner: new_owner, name: new_name });
+                                                navigator.push(Route::Repo { owner: forked.owner, name: forked.name });
                                             }
                                             Err(err) => {
                                                 fork_error.set(Some(err.to_string()));
@@ -356,12 +378,12 @@ pub fn Repo(owner: String, name: String) -> Element {
                                         let owner = owner.clone();
                                         let name = name.clone();
                                         move |_| {
-                                            let owner = owner.clone();
-                                            let name = name.clone();
+                                            let path = repo_path(&owner, &name);
                                             let text = description_draft.read().clone();
                                             spawn(async move {
                                                 let value = if text.trim().is_empty() { None } else { Some(text) };
-                                                match update_repo(owner, name, value).await {
+                                                let body = UpdateRepoRequest { description: value };
+                                                match api_client::patch_ok(&path, &body).await {
                                                     Ok(()) => {
                                                         editing_description.set(false);
                                                         description_error.set(None);
@@ -728,10 +750,9 @@ pub fn Repo(owner: String, name: String) -> Element {
                                     let owner = owner.clone();
                                     let name = name.clone();
                                     move |_| {
-                                        let owner = owner.clone();
-                                        let name = name.clone();
+                                        let path = repo_path(&owner, &name);
                                         spawn(async move {
-                                            match delete_repo(owner, name).await {
+                                            match api_client::delete_ok(&path).await {
                                                 Ok(()) => { navigator.push(Route::Home {}); }
                                                 Err(err) => {
                                                     delete_error.set(Some(err.to_string()));

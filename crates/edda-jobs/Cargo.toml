@@ -8,7 +8,7 @@ publish.workspace = true
 # The background-job poller: a hand-rolled `tokio::spawn` +
 # polling loop over `edda-db`'s `jobs` table, not a third-party queue
 # crate. Deliberately depends on `edda-domain` + `edda-db` only — never
-# `edda-http`/`edda-auth`: the actual handler *logic* ("send this
+# `edda-app`/`edda-auth`: the actual handler *logic* ("send this
 # webhook," "send this email") needs those crates' capabilities (HTTP
 # client, secret decryption), so it's defined in `edda-web`'s composition
 # root, where those dependencies already exist, and registered *into* this

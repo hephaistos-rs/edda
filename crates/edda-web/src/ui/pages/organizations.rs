@@ -1,12 +1,13 @@
 use dioxus::prelude::*;
 
-use crate::org_server::{create_organization, get_organization, list_my_organizations};
-use crate::team_server::{create_team, list_teams};
+use edda_api_types::{CreateOrgRequest, CreateTeamRequest, OrganizationDto, TeamSummaryDto};
+
+use crate::api_client;
 use crate::Route;
 
 #[component]
 pub fn OrganizationsList() -> Element {
-    let mut orgs = use_resource(list_my_organizations);
+    let mut orgs = use_resource(|| api_client::get_json::<Vec<OrganizationDto>>("/api/v1/orgs"));
 
     let mut name = use_signal(String::new);
     let mut display_name = use_signal(String::new);
@@ -24,7 +25,11 @@ pub fn OrganizationsList() -> Element {
         submitting.set(true);
         error.set(None);
         spawn(async move {
-            let result = create_organization(name_value, display_value).await;
+            let request = CreateOrgRequest {
+                name: name_value,
+                display_name: display_value,
+            };
+            let result = api_client::post_ok("/api/v1/orgs", &request).await;
             submitting.set(false);
             match result {
                 Ok(()) => {
@@ -105,14 +110,14 @@ pub fn OrganizationsList() -> Element {
 pub fn OrganizationDetail(name: String) -> Element {
     let name_c = name.clone();
     let org = use_resource(move || {
-        let name = name_c.clone();
-        async move { get_organization(name).await }
+        let path = format!("/api/v1/orgs/{name_c}");
+        async move { api_client::get_json::<OrganizationDto>(&path).await }
     });
 
     let name_for_teams = name.clone();
     let mut teams = use_resource(move || {
-        let name = name_for_teams.clone();
-        async move { list_teams(name).await }
+        let path = format!("/api/v1/orgs/{name_for_teams}/teams");
+        async move { api_client::get_json::<Vec<TeamSummaryDto>>(&path).await }
     });
 
     let mut team_name = use_signal(String::new);
@@ -127,12 +132,16 @@ pub fn OrganizationDetail(name: String) -> Element {
         if team_value.is_empty() {
             return;
         }
-        let org_name = org_for_submit.clone();
+        let path = format!("/api/v1/orgs/{}/teams", org_for_submit);
         let permission_value = permission.read().clone();
         submitting.set(true);
         error.set(None);
         spawn(async move {
-            let result = create_team(org_name, team_value, permission_value).await;
+            let request = CreateTeamRequest {
+                name: team_value,
+                permission: permission_value,
+            };
+            let result = api_client::post_ok(&path, &request).await;
             submitting.set(false);
             match result {
                 Ok(()) => {

@@ -9,4 +9,16 @@ ignore = [
     # RS256 (plan.local.md §4.5). Not remotely exploitable in Edda's usage;
     # revisit when `rsa` ships a constant-time fix.
     "RUSTSEC-2023-0071",
+    # `lru` — potential use-after-free in `LruCache::pop()` on a panicking
+    # `Drop`. Transitive (Dioxus's internal caches); Edda never calls it
+    # and stores no panic-on-drop types. `deny.toml` mirrors this ignore.
+    "RUSTSEC-2026-0253",
+    # `bincode` 1.x unmaintained — transitive, pulled by Dioxus's
+    # hot-reload/devtools serialization. `deny.toml` already lets transitive
+    # unmaintained crates through (`unmaintained = "workspace"`); this makes
+    # `cargo audit --deny warnings` agree.
+    "RUSTSEC-2025-0141",
+    # `yaml-rust` unmaintained — transitive under `syntect` (theme/syntax
+    # definition parsing). Same rationale as `bincode` above.
+    "RUSTSEC-2024-0320",
 ]

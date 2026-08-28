@@ -1,16 +1,21 @@
 use dioxus::prelude::*;
 
-use crate::release_server::{create_release, get_release, list_releases, ReleaseDto, ReleaseFlags};
+use edda_api_types::{CreateReleaseRequest, ReleaseDto};
+
+use crate::api_client;
 use crate::Route;
+
+fn releases_path(owner: &str, name: &str) -> String {
+    format!("/api/v1/repos/{owner}/{name}/releases")
+}
 
 #[component]
 pub fn ReleasesList(owner: String, name: String) -> Element {
     let owner_c = owner.clone();
     let name_c = name.clone();
     let mut releases = use_resource(move || {
-        let owner = owner_c.clone();
-        let name = name_c.clone();
-        async move { list_releases(owner, name).await }
+        let path = releases_path(&owner_c, &name_c);
+        async move { api_client::get_json::<Vec<ReleaseDto>>(&path).await }
     });
 
     let mut show_form = use_signal(|| false);
@@ -30,8 +35,7 @@ pub fn ReleasesList(owner: String, name: String) -> Element {
 
     let on_submit = move |event: FormEvent| {
         event.prevent_default();
-        let owner = owner_for_submit.clone();
-        let name = name_for_submit.clone();
+        let path = releases_path(&owner_for_submit, &name_for_submit);
         let tag_value = tag_name.read().clone();
         let target_value = target.read().clone();
         let title_value = title.read().clone();
@@ -41,22 +45,18 @@ pub fn ReleasesList(owner: String, name: String) -> Element {
         submitting.set(true);
         error.set(None);
         spawn(async move {
-            let result = create_release(
-                owner,
-                name,
-                tag_value,
-                target_value,
-                title_value,
-                (!body_value.trim().is_empty()).then_some(body_value),
-                ReleaseFlags {
-                    draft: draft_value,
-                    prerelease: prerelease_value,
-                },
-            )
-            .await;
+            let request = CreateReleaseRequest {
+                tag_name: tag_value,
+                target: target_value,
+                title: title_value,
+                body: (!body_value.trim().is_empty()).then_some(body_value),
+                draft: draft_value,
+                prerelease: prerelease_value,
+            };
+            let result = api_client::post_ok(&path, &request).await;
             submitting.set(false);
             match result {
-                Ok(_tag) => {
+                Ok(()) => {
                     tag_name.set(String::new());
                     title.set(String::new());
                     body.set(String::new());
@@ -187,10 +187,8 @@ pub fn ReleaseDetail(owner: String, name: String, tag_name: String) -> Element {
     let name_c = name.clone();
     let tag_c = tag_name.clone();
     let detail = use_resource(move || {
-        let owner = owner_c.clone();
-        let name = name_c.clone();
-        let tag = tag_c.clone();
-        async move { get_release(owner, name, tag).await }
+        let path = format!("{}/{}", releases_path(&owner_c, &name_c), tag_c);
+        async move { api_client::get_json::<ReleaseDto>(&path).await }
     });
 
     let upload_action = format!("/{owner}/{name}/releases/{tag_name}/assets");

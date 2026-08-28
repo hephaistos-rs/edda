@@ -1,6 +1,12 @@
 use dioxus::prelude::*;
 
-use crate::webhook_server::{create_webhook, delete_webhook, list_webhooks};
+use edda_api_types::{CreateWebhookRequest, CreatedWebhookDto, WebhookDto};
+
+use crate::api_client;
+
+fn webhooks_path(owner: &str, name: &str) -> String {
+    format!("/api/v1/repos/{owner}/{name}/webhooks")
+}
 
 const ALL_EVENTS: &[&str] = &[
     "pull_request.opened",
@@ -15,9 +21,8 @@ pub fn WebhooksSettings(owner: String, name: String) -> Element {
     let owner_c = owner.clone();
     let name_c = name.clone();
     let mut webhooks = use_resource(move || {
-        let owner = owner_c.clone();
-        let name = name_c.clone();
-        async move { list_webhooks(owner, name).await }
+        let path = webhooks_path(&owner_c, &name_c);
+        async move { api_client::get_json::<Vec<WebhookDto>>(&path).await }
     });
 
     let mut target_url = use_signal(String::new);
@@ -31,14 +36,17 @@ pub fn WebhooksSettings(owner: String, name: String) -> Element {
 
     let on_submit = move |event: FormEvent| {
         event.prevent_default();
-        let owner = owner_for_submit.clone();
-        let name = name_for_submit.clone();
+        let path = webhooks_path(&owner_for_submit, &name_for_submit);
         let url_value = target_url.read().clone();
         let events_value: Vec<String> = selected_events.read().iter().cloned().collect();
         submitting.set(true);
         error.set(None);
         spawn(async move {
-            let result = create_webhook(owner, name, url_value, events_value).await;
+            let request = CreateWebhookRequest {
+                target_url: url_value,
+                events: events_value,
+            };
+            let result = api_client::post_json::<_, CreatedWebhookDto>(&path, &request).await;
             submitting.set(false);
             match result {
                 Ok(created) => {
@@ -144,15 +152,12 @@ pub fn WebhooksSettings(owner: String, name: String) -> Element {
                                         r#type: "button",
                                         class: "shrink-0 font-mono text-xs text-ink-muted hover:text-status-conflict",
                                         onclick: {
-                                            let owner = owner_for_delete.clone();
-                                            let name = name_for_delete.clone();
+                                            let base = webhooks_path(&owner_for_delete, &name_for_delete);
                                             let id = hook.id.clone();
                                             move |_| {
-                                                let owner = owner.clone();
-                                                let name = name.clone();
-                                                let id = id.clone();
+                                                let path = format!("{base}/{id}");
                                                 spawn(async move {
-                                                    if delete_webhook(owner, name, id).await.is_ok() {
+                                                    if api_client::delete_ok(&path).await.is_ok() {
                                                         webhooks.restart();
                                                     }
                                                 });

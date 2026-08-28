@@ -30,11 +30,12 @@ set shell := ["pwsh.exe", "-NoLogo", "-Command"]
 [unix]
 set shell := ["bash", "-cu"]
 
-# `edda` (the app crate) is excluded from the workspace-wide cargo commands:
-# it only builds for wasm (`--features web`) or as the server
-# (`--features server`), never with default features on the host, so it gets
-# its own targeted recipes (`clippy-server`, `wasm`, `run*`).
-no_app := "--workspace --exclude edda"
+# `edda` (the composition-root binary) and `edda-web` (the Dioxus UI) are
+# excluded from the workspace-wide cargo commands: they only build for wasm
+# (`--features web`) or as the server (`--features server`), never with
+# default features on the host, so they get their own targeted recipes
+# (`clippy-server`, `wasm`, `run*`).
+no_app := "--workspace --exclude edda --exclude edda-web"
 pg_url := env_var_or_default("EDDA_PG_TEST_URL", "postgres://edda:edda@localhost:5432/eddadb")
 maria_url := env_var_or_default("EDDA_MARIA_TEST_URL", "mysql://edda:edda@localhost:3306/eddadb")
 
@@ -55,13 +56,15 @@ check:
     cargo check {{no_app}} --all-targets
     cargo check -p edda --features server
 
-# Clippy the workspace minus the app crate, all targets.
+# Clippy the workspace minus the app binary + UI crate, all targets.
 clippy:
     cargo clippy {{no_app}} --all-targets
 
-# Clippy the app crate in its server configuration.
+# Clippy the app binary (server) and the UI crate (server + wasm).
 clippy-server:
     cargo clippy -p edda --features server
+    cargo clippy -p edda-web --features server
+    cargo clippy -p edda-web --target wasm32-unknown-unknown --features web
 
 # Formatting check plus both clippy passes — the full lint gate.
 lint: fmt-check clippy clippy-server

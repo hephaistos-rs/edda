@@ -48,7 +48,7 @@ pub struct Label {
     pub id: LabelId,
     pub repository_id: RepositoryId,
     pub name: String,
-    /// A `#rrggbb`-shaped string, validated by `edda-http` at the API
+    /// A `#rrggbb`-shaped string, validated by `edda-app` at the API
     /// boundary (this crate has no business rejecting malformed color
     /// strings — it isn't a security or invariant concern here the way
     /// e.g. a username charset is).

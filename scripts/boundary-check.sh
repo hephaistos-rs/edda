@@ -66,7 +66,7 @@ enforce "edda-domain source names no I/O / framework crate" \
 # edda-jobs owns the queue *mechanism* only — handler logic (which needs
 # auth + a HTTP client) is injected from the composition root.
 enforce "edda-jobs manifest does not depend on the HTTP app or edda-auth" \
-    "$(g '^\s*(edda-http|edda-app|edda-auth)\s*[=.]' crates/edda-jobs/Cargo.toml)"
+    "$(g '^\s*(edda-app|edda-auth)\s*[=.]' crates/edda-jobs/Cargo.toml)"
 
 # edda-git is transport- and storage-decision-agnostic: protected-ref names
 # and hook decisions are passed in by the caller.
@@ -77,7 +77,7 @@ enforce "edda-git manifest does not depend on edda-db or edda-auth" \
 enforce "edda-render manifest depends on no other Edda crate" \
     "$(g '^\s*edda-[a-z]+\s*[=.]' crates/edda-render/Cargo.toml)"
 
-# One config surface (plan.local.md §4.13 / Phase 1): only `edda-http::config`
+# One config surface (plan.local.md §4.13 / Phase 1): only `edda-app::config`
 # and the two binary roots read Edda's own `EDDA_*` (and `IP`/`PORT`)
 # variables. Exceptions, each deliberate:
 #   - crates/edda-telemetry/src/config.rs — the OTel SDK's own OTEL_* vars
@@ -85,9 +85,9 @@ enforce "edda-render manifest depends on no other Edda crate" \
 #   - EDDA_TEST_* anywhere               — test-harness plumbing, not config
 #   - src/main.rs (either binary)        — the composition roots
 #   - tests/ dirs                        — tests set their own env
-enforce "only edda-http::config + the binaries read EDDA_* / IP / PORT from the environment" \
+enforce "only edda-app::config + the binaries read EDDA_* / IP / PORT from the environment" \
     "$(g 'env::(var|set_var|remove_var)\s*\(\s*\"(EDDA_|IP\"|PORT\")' --include=*.rs crates app \
-        | grep -vE 'edda-http/src/config\.rs|edda-telemetry/src/config\.rs|/src/main\.rs|/tests/|EDDA_TEST_' \
+        | grep -vE 'edda-app/src/config\.rs|edda-telemetry/src/config\.rs|/src/main\.rs|/tests/|EDDA_TEST_' \
         || true)"
 
 # One persistence boundary (plan.local.md §5.1 / Phase 2): SQL, `sqlx`
@@ -118,7 +118,7 @@ echo
 echo "── PENDING (target invariants, not yet enforced) ────────"
 
 pending "Phase 4" "axum:: / http:: outside the HTTP app crate" \
-    "$(g '\b(axum|http)::' --include=*.rs crates app | grep -vE 'crates/edda-http/|:[0-9]+:\s*(//|//!)' || true)"
+    "$(g '\b(axum|http)::' --include=*.rs crates app | grep -vE 'crates/edda-app/|:[0-9]+:\s*(//|//!)' || true)"
 
 pending "Phase 4" "dioxus outside the web UI crate" \
     "$(g '\bdioxus\b' --include=*.rs crates app | grep -vE 'app/edda-web/|:[0-9]+:\s*(//|//!)' || true)"

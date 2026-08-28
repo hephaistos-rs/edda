@@ -252,7 +252,7 @@ impl PullRequestRepo {
     /// the one place that writes `pull_requests.state` and its
     /// variant-specific columns. Callers are responsible for the
     /// transition being valid (this method does not check the *current*
-    /// state); `edda-http`'s handlers only ever call this from a state
+    /// state); `edda-app`'s handlers only ever call this from a state
     /// they've already verified is `Open`/`Draft`.
     pub async fn update_state<'c>(
         db: impl DbConn<'c>,

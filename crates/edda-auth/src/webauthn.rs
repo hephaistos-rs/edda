@@ -99,7 +99,7 @@ pub enum WebauthnError {
 /// (e.g. `https://example.com`). A mismatch on either fails every
 /// ceremony, so there's no sensible partial default — an instance that
 /// hasn't configured both simply doesn't offer WebAuthn. Constructed by
-/// `edda_http::config` from `EDDA_WEBAUTHN_RP_ID`/`EDDA_WEBAUTHN_ORIGIN`
+/// `edda_app::config` from `EDDA_WEBAUTHN_RP_ID`/`EDDA_WEBAUTHN_ORIGIN`
 /// and passed in via `AppState`; this crate never reads the environment.
 #[derive(Debug, Clone)]
 pub struct Config {

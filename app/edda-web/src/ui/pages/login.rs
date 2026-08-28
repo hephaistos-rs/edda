@@ -10,7 +10,7 @@ struct LoginBody<'a> {
     password: &'a str,
 }
 
-/// Mirrors `edda_http::auth_routes::LoginResponse` — an untagged enum on
+/// Mirrors `edda_app::auth_routes::LoginResponse` — an untagged enum on
 /// the wire, told apart here the same way: whichever field is present.
 /// Only ever deserialized inside the wasm32-only `request_login`; the
 /// native (SSR) stub never constructs it, hence `allow(dead_code)`.

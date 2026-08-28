@@ -9,7 +9,7 @@
 //! account, and only completes the session on a second request presenting
 //! a valid code plus this token.
 //!
-//! Same shape as `edda_http::lfs::transfer_auth`'s transfer tokens: HS256,
+//! Same shape as `edda_app::lfs::transfer_auth`'s transfer tokens: HS256,
 //! a process-local `OnceLock`-cached secret, a short `exp`. A process
 //! restart between the two login requests just makes the client retry
 //! from the password step — not a correctness problem, since the whole

@@ -1,10 +1,10 @@
 //! Pull-request server functions — same `#[get]`/`#[post]` Dioxus
 //! server-function shape `server.rs` already uses for repo browsing (see
 //! that file's `require_read_access`/`require_write_access`, reused
-//! here), not raw `edda-http` axum routes: pull requests are page
+//! here), not raw `edda-app` axum routes: pull requests are page
 //! *content* (markdown bodies rendered at read time, comment/review
 //! threads) in the same sense repo browsing/diffs already are, not
-//! account/token/collaborator management (which is where `edda-http`'s
+//! account/token/collaborator management (which is where `edda-app`'s
 //! raw routes are reserved for — see that crate's own doc comment).
 
 use dioxus::prelude::*;
@@ -280,7 +280,7 @@ pub async fn add_pull_request_comment(
     // `UserMentioned` outbox event per `@mention` are the service's job —
     // all in one transaction so no mention notification is lost or fired
     // for a comment that rolled back.
-    edda_http::services::PullRequestService::new(
+    edda_app::services::PullRequestService::new(
         shared.pool.clone(),
         shared.store.clone(),
         shared.locks.clone(),
@@ -345,16 +345,15 @@ pub async fn merge_pull_request(
     let Some(session_user) = &auth.user else {
         return Err(ServerFnError::new("login required"));
     };
-    let user = &session_user.user;
-    let actor = edda_domain::ActorContext::User(user.id);
+    let actor = edda_domain::ActorContext::User(session_user.user.id);
 
-    edda_http::services::PullRequestService::new(
+    edda_app::services::PullRequestService::new(
         shared.pool.clone(),
         shared.store.clone(),
         shared.locks.clone(),
         shared.authz.clone(),
     )
-    .merge(&actor, &owner, &name, number, &user.username, &user.email)
+    .merge(&actor, &owner, &name, number)
     .await
     .map_err(|err| ServerFnError::new(err.to_string()))?;
 

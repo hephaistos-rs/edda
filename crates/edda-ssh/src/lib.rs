@@ -1,7 +1,7 @@
 //! Git-over-SSH transport. Owns SSH-specific concerns only — server/session
 //! lifecycle, public-key authentication, exec-command parsing, channel I/O
 //! framing — and delegates every actual git operation to
-//! `edda_git::protocol` (shared with `edda-http`'s bridge) and every
+//! `edda_git::protocol` (shared with `edda-app`'s bridge) and every
 //! access decision to `edda_auth::AuthorizationService`.
 
 mod command;

@@ -2,7 +2,7 @@
 //! generic OIDC-compliant provider — Edda authenticates against external
 //! identity providers, it does not act as one itself (that's out of this
 //! plan's scope entirely). Provider configuration is environment-driven,
-//! not database-stored (parsed once by `edda_http::config` from the
+//! not database-stored (parsed once by `edda_app::config` from the
 //! `EDDA_OAUTH_*` variables and passed in via `AppState`) — there is
 //! nothing per-instance-secret about it that needs at-rest encryption the
 //! way a per-user TOTP secret does.
@@ -28,7 +28,7 @@ use edda_domain::{OAuthIdentityId, User, UserId};
 pub const PROVIDER_NAME: &str = "oidc";
 
 /// One OIDC provider's consumer-login credentials. Constructed by
-/// `edda_http::config` from the `EDDA_OAUTH_*` variables (all four or
+/// `edda_app::config` from the `EDDA_OAUTH_*` variables (all four or
 /// none) and passed in via `AppState` — this crate never reads the
 /// environment. `None` in `AppState` means OIDC login isn't offered.
 #[derive(Debug, Clone)]

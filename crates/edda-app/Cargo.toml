@@ -1,0 +1,99 @@
+[package]
+name = "edda-app"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# The axum application: the git smart-HTTP bridge, account/token routes,
+# collaborator-management routes, the application-service layer
+# (`services/`), the config parser (`config/`), and cross-cutting
+# middleware (observability, health check). The only crate that names
+# `axum`/`http`/`tower` types. Handlers call into `edda-auth`'s
+# `AuthorizationService` and `edda-domain`'s pure functions for every
+# permission decision — they never re-derive access themselves.
+[lints]
+workspace = true
+
+[dependencies]
+# `multipart`: release-asset upload (`release_assets::upload_asset`) —
+# not a default `axum` feature.
+axum = { workspace = true, features = ["multipart"] }
+axum-login = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+edda-auth = { workspace = true }
+edda-db = { workspace = true }
+edda-domain = { workspace = true }
+edda-git = { workspace = true }
+# Only for `rate_limit`'s concrete `GovernorLayer` type — see the workspace
+# `Cargo.toml` entry's comment.
+governor = { workspace = true }
+# The narrow `enqueue`/`dispatch` primitives only (password-reset email,
+# webhook/notification fan-out from `pull_request`/`issue` mutations
+# routed through this crate's git-protected-branch check) — never the
+# poller or handler registry, which need `edda-auth`/an HTTP client and
+# stay in `edda-web`'s composition root (see `crates/edda-jobs/Cargo.toml`
+# for why that dependency direction is fixed).
+edda-jobs = { workspace = true }
+edda-telemetry = { workspace = true }
+# LFS transfer-auth tokens (short-lived HMAC-signed bearer tokens minting
+# access to exactly one upload/download URL) — see `lfs::transfer_auth`.
+jsonwebtoken = { workspace = true }
+# Only for the LFS transfer-auth HMAC secret, generated once per process
+# at startup (`lfs::transfer_auth`) — this crate has no other use for
+# randomness.
+rand = { workspace = true }
+# Outbound HTTP: the SSRF gate (`security::ssrf`) parses + resolves webhook
+# target URLs. `default-features = false` + `rustls-tls` at the workspace
+# level keeps native-tls (and its C `openssl`) out, per `deny.toml`.
+reqwest = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+# Only for verifying an uploaded LFS object's content against its
+# claimed `oid` (a hex-encoded SHA-256 digest) — the same hash Git LFS
+# itself uses to name objects.
+sha2 = { workspace = true }
+# `services::ServiceError` — the one error type the application-service
+# layer returns; a handler maps it to a status via `http_status`.
+thiserror = { workspace = true }
+# Streaming release-asset upload/download (`release_assets`) — async file
+# I/O off the request-handling task.
+tokio = { workspace = true, features = ["fs", "io-util"] }
+tower-http = { workspace = true, features = ["trace"] }
+# General API rate limiting (`rate_limit`) — see the workspace `Cargo.toml`
+# entry's comment for the dependency choice.
+tower_governor = { workspace = true }
+# The `Session` extractor for `oauth_routes` — stashing the CSRF
+# token/nonce/PKCE verifier across the redirect round-trip to the external
+# identity provider. The session *store* and *layer* are still wired up
+# only by the composition root (`edda-web`'s `main.rs`); this crate only
+# needs the extractor type, which works against whatever layer is already
+# applied outside this router (same reasoning as `AuthSession` already
+# being used throughout `auth_routes`/`admin_routes` without this crate
+# ever constructing an `axum_login` layer itself).
+tower-sessions = { workspace = true }
+tracing = { workspace = true }
+
+# Only the LFS integration test (`tests/lfs_integration.rs`) needs: a real
+# Tokio runtime and TCP listener to run this crate's router as an actual
+# HTTP server a real `git`/`git-lfs` CLI can talk to; and a real
+# session/auth middleware layer (`router()` itself doesn't apply one — the
+# composition root does, see `edda-web`'s `main.rs` — so the test builds
+# an equivalent one, same as production, with its own throwaway SQLite
+# session store regardless of which backend the test's own `DbPool` uses,
+# since this test never exercises session-cookie auth, only the token
+# path — see the test's own comments).
+[dev-dependencies]
+axum-login = { workspace = true }
+# The release-asset integration test's client — real multipart upload and
+# a real GET download against the real router, the same "test against the
+# real client" approach the LFS/branch-protection integration tests use
+# (those use the real `git`/`git-lfs` CLI instead, since that's the real
+# client for those protocols; a release asset's real client is any plain
+# HTTP client, so `reqwest` stands in for one directly).
+reqwest = { workspace = true, features = ["multipart"] }
+sqlx = { workspace = true, features = ["sqlite"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
+tower-sessions = { workspace = true }
+tower-sessions-sqlx-store = { workspace = true, features = ["sqlite"] }

@@ -323,7 +323,7 @@ impl RepositoryRepo {
         row.map(row_to_repository_row).transpose()
     }
 
-    /// Every repository in the instance. `edda-http` filters this down to
+    /// Every repository in the instance. `edda-app` filters this down to
     /// what the requesting actor may actually see (public repos plus any
     /// private repo they hold a grant on) — there is no per-owner or
     /// per-visibility variant yet because nothing needs one at the

@@ -40,7 +40,7 @@ pub trait RepoStore: Send + Sync {
     /// (a directory copy) then naturally carries release assets along
     /// with it too, with no separate copy step. `storage_key` is
     /// `{release_id}/{filename}` (already-validated, non-path-traversing
-    /// components — see `edda_http`'s upload handler); this default
+    /// components — see `edda_app`'s upload handler); this default
     /// implementation only ever joins it under `releases/`, never
     /// interprets it further.
     fn release_asset_path(&self, name: &str, storage_key: &str) -> PathBuf {
@@ -54,7 +54,7 @@ pub struct LocalFsStore {
 
 impl LocalFsStore {
     /// Rooted at an explicit directory. The composition root passes
-    /// `{data_dir}/repos` (resolved once by `edda_http::config`); tests
+    /// `{data_dir}/repos` (resolved once by `edda_app::config`); tests
     /// pass a temp dir. This crate never reads the environment itself.
     pub fn new(root: PathBuf) -> Self {
         Self { root }

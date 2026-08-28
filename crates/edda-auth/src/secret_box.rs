@@ -13,14 +13,14 @@
 //!
 //! The key is the primary `EDDA_SECRET_KEYS` entry — a 32-byte AES-256
 //! key. The composition root resolves and validates it via
-//! `edda_http::config` and installs it here **once**, at startup, with
+//! `edda_app::config` and installs it here **once**, at startup, with
 //! [`init`]. This module never reads the environment and never panics: an
 //! instance that never configured a key simply cannot enroll 2FA or store
 //! a webhook secret, and [`encrypt`]/[`decrypt`] say so with
 //! [`SecretBoxError::NotConfigured`] rather than aborting a request.
 //!
 //! Deliberately **not** a random per-process key (unlike
-//! `edda_http::lfs::transfer_auth`): a TOTP secret encrypted today must
+//! `edda_app::lfs::transfer_auth`): a TOTP secret encrypted today must
 //! still decrypt after a restart, so the key must be stable across runs.
 
 use std::sync::OnceLock;

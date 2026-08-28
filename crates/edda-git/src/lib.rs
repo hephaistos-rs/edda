@@ -38,7 +38,7 @@ use store::RepoStore;
 /// something worth adding reference-counted eviction for.
 ///
 /// An explicit, constructed value (one instance shared via the
-/// composition root, `edda-web`, across both `edda-http` and `edda-ssh`)
+/// composition root, `edda-web`, across both `edda-app` and `edda-ssh`)
 /// rather than a process-global `static`: a `static` registry is
 /// invisible plumbing that two independent test server instances in the
 /// same process would silently share, which is exactly the hazard an

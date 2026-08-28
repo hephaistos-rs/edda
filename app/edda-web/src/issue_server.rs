@@ -215,7 +215,7 @@ pub async fn add_issue_comment(
 
     // Write authorization, the comment insert, and one `UserMentioned`
     // outbox event per `@mention` — one transaction, in the service.
-    edda_http::services::IssueService::new(shared.pool.clone(), shared.authz.clone())
+    edda_app::services::IssueService::new(shared.pool.clone(), shared.authz.clone())
         .add_comment(&actor, &owner, &name, number, &body)
         .await
         .map_err(|err| ServerFnError::new(err.to_string()))?;

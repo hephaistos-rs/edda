@@ -32,7 +32,7 @@ fn unique_dir(label: &str) -> PathBuf {
 /// proves it's actually usable — not merely constructed.
 async fn assert_pool_works_with_data_dir(data_dir: &str) {
     // The data dir is the caller's responsibility (`edda_db::pool` no
-    // longer touches the filesystem) — `edda_http::config` / `edda-cli`
+    // longer touches the filesystem) — `edda_app::config` / `edda-cli`
     // create it at startup; here the test does.
     std::fs::create_dir_all(data_dir).expect("create the test data dir");
 

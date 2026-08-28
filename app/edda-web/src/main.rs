@@ -12,8 +12,6 @@ mod server;
 mod session_store;
 #[cfg(feature = "server")]
 mod shared;
-#[cfg(feature = "server")]
-mod ssrf;
 mod team_server;
 mod ui;
 mod webhook_server;
@@ -96,7 +94,7 @@ async fn wait_for_shutdown_signal() {
 
 /// The client (web) build launches normally. The server build needs its own
 /// axum router instead: Dioxus's own router (SSR, assets, server functions)
-/// merged with `edda_http::router` — the git-http bridge and account/token
+/// merged with `edda_app::router` — the git-http bridge and account/token
 /// routes aren't server functions; they need to speak raw git wire
 /// protocol and plain REST, not typed RPC. This function is the workspace's
 /// one composition root: every other crate is wired together here, and
@@ -106,7 +104,7 @@ fn main() {
     // Parse and validate every `EDDA_*` variable once, before anything
     // else runs. A misconfigured instance stops here with the *complete*
     // list of problems, printed plainly (no subscriber is installed yet).
-    let settings = match edda_http::config::Settings::from_env() {
+    let settings = match edda_app::config::Settings::from_env() {
         Ok(settings) => std::sync::Arc::new(settings),
         Err(errors) => {
             eprint!("{errors}");
@@ -155,7 +153,7 @@ fn main() {
             let session_store = session_store::connect(&pool, &settings.db.url).await?;
             // `SameSite=Lax`, not `tower-sessions`' own `Strict` default
             // (verified directly against a real instance, and found to
-            // matter): the OAuth login/link flow (`edda-http`'s
+            // matter): the OAuth login/link flow (`edda-app`'s
             // `oauth_routes::begin`) stashes its CSRF token/nonce/PKCE
             // verifier in this exact session before redirecting to the
             // external provider, then
@@ -193,13 +191,13 @@ fn main() {
                 authz: authz.clone(),
             });
 
-            let state = edda_http::AppState {
+            let state = edda_app::AppState {
                 pool: pool.clone(),
                 store: store.clone(),
                 locks: locks.clone(),
                 authz: authz.clone(),
                 backend,
-                config: edda_http::RuntimeConfig {
+                config: edda_app::RuntimeConfig {
                     webauthn: settings.webauthn.clone().map(|w| w.into_auth()),
                     oidc: settings.oidc.clone().map(|o| o.into_auth()),
                     external_url: settings.http.external_url.clone(),
@@ -207,7 +205,7 @@ fn main() {
                 },
             };
             let router = dioxus::server::router(App)
-                .merge(edda_http::router(state))
+                .merge(edda_app::router(state))
                 .layer(auth_layer);
 
             // The job poller: handler logic is registered here,

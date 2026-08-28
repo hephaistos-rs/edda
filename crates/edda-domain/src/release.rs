@@ -53,7 +53,7 @@ pub struct ReleaseAsset {
     pub size_bytes: i64,
     /// The uploader's claimed content type — stored for display only.
     /// Never trusted for how Edda itself serves the file back (see
-    /// `edda_http`'s release-asset download handler): a client-supplied
+    /// `edda_app`'s release-asset download handler): a client-supplied
     /// `Content-Type` of `text/html` must not make Edda serve the asset in
     /// a way a browser would render as HTML.
     pub content_type: String,

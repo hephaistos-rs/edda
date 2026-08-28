@@ -1,6 +1,6 @@
 //! Webhook management — Dioxus server functions (repo *settings* content,
 //! the same rationale branch-protection rules in `pr_server` already
-//! use), not raw `edda-http` routes; delivery itself is a background job
+//! use), not raw `edda-app` routes; delivery itself is a background job
 //! (`job_handlers::deliver_webhook`), never inline here.
 
 use dioxus::prelude::*;
@@ -117,8 +117,8 @@ pub async fn create_webhook(
         .collect::<Result<_, _>>()?;
 
     // Creation-time SSRF check — delivery re-checks independently;
-    // see `crate::ssrf`'s own doc comment for why both calls matter.
-    crate::ssrf::resolve_and_check(&target_url)
+    // see `edda_app::security::ssrf`'s own doc comment for why both calls matter.
+    edda_app::security::ssrf::resolve_and_check(&target_url)
         .await
         .map_err(|err| ServerFnError::new(err.to_string()))?;
 

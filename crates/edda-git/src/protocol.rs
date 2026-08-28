@@ -1,5 +1,5 @@
 //! The git smart-protocol request/response orchestration shared by every
-//! transport (`edda-http`'s HTTP bridge, `edda-ssh`'s SSH bridge).
+//! transport (`edda-app`'s HTTP bridge, `edda-ssh`'s SSH bridge).
 //! Everything here operates on plain byte buffers (`&[u8]` in,
 //! `bytes::Bytes`/`Vec<u8>` out) — no HTTP or SSH types appear anywhere in
 //! this module. A transport's own job shrinks to: authenticate, resolve
@@ -304,7 +304,7 @@ pub fn parse_receive_pack_commands(body: &[u8]) -> Result<(Vec<RefCommand>, usiz
 /// touch (empty — the common case — means no restriction). This crate
 /// has no notion of *why* a branch is protected or who's allowed to
 /// bypass it (no `edda-db`/`edda-domain` dependency, by design — see this
-/// crate's `Cargo.toml`); the caller (`edda-http`'s/`edda-ssh`'s receive-
+/// crate's `Cargo.toml`); the caller (`edda-app`'s/`edda-ssh`'s receive-
 /// pack handler) resolves that against `BranchProtectionRule`s and the
 /// pushing actor's role *before* calling this, and simply passes an empty
 /// set when the actor is exempt.

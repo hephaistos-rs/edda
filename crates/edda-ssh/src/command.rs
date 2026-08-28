@@ -15,7 +15,7 @@ pub struct GitCommand {
     /// The `{owner}/{repo}` identity, already split from the client's
     /// `/owner/repo.git` (or `owner/repo.git`, or `owner/repo`) path form
     /// — leading slash and trailing `.git` both stripped the same way
-    /// `edda-http`'s URL-segment handling does, so both transports resolve
+    /// `edda-app`'s URL-segment handling does, so both transports resolve
     /// to the exact same identity for the exact same repository.
     pub owner: String,
     pub name: String,

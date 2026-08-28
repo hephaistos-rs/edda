@@ -7,7 +7,7 @@
 //! same discipline this workspace already applies to every dependency
 //! decision — so there is no `git2`/libgit2 fallback here.
 //!
-//! The caller (`edda-http`'s merge handler) is responsible for holding
+//! The caller (`edda-app`'s merge handler) is responsible for holding
 //! `LockRegistry`'s per-repository lock for the *entire* merge-and-record
 //! sequence, not just this call — see that handler's own doc comment for
 //! why the lock must still be held while the pull request's row is

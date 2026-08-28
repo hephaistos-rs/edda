@@ -2508,11 +2508,11 @@ dependencies = [
  "axum-login",
  "dioxus",
  "dioxus-free-icons",
+ "edda-app",
  "edda-auth",
  "edda-db",
  "edda-domain",
  "edda-git",
- "edda-http",
  "edda-jobs",
  "edda-render",
  "edda-ssh",
@@ -2529,6 +2529,37 @@ dependencies = [
  "tower-sessions-sqlx-store",
  "tracing",
  "web-time",
+]
+
+[[package]]
+name = "edda-app"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "axum-login",
+ "base64 0.22.1",
+ "bytes",
+ "edda-auth",
+ "edda-db",
+ "edda-domain",
+ "edda-git",
+ "edda-jobs",
+ "edda-telemetry",
+ "governor",
+ "jsonwebtoken",
+ "rand 0.10.2",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "thiserror 2.0.20",
+ "tokio",
+ "tower-http",
+ "tower-sessions",
+ "tower-sessions-sqlx-store",
+ "tower_governor",
+ "tracing",
 ]
 
 [[package]]
@@ -2607,37 +2638,6 @@ dependencies = [
  "gix-hash",
  "gix-object",
  "tokio",
- "tracing",
-]
-
-[[package]]
-name = "edda-http"
-version = "0.1.0"
-dependencies = [
- "axum",
- "axum-login",
- "base64 0.22.1",
- "bytes",
- "edda-auth",
- "edda-db",
- "edda-domain",
- "edda-git",
- "edda-jobs",
- "edda-telemetry",
- "governor",
- "jsonwebtoken",
- "rand 0.10.2",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sqlx",
- "thiserror 2.0.20",
- "tokio",
- "tower-http",
- "tower-sessions",
- "tower-sessions-sqlx-store",
- "tower_governor",
  "tracing",
 ]
 

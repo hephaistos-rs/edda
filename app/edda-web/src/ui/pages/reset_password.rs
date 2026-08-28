@@ -15,7 +15,7 @@ struct ConsumeBody<'a> {
 }
 
 // Same wasm32-only-fetch / server-side-stub split as every other hand-written
-// (non-server-function) API call in `ui/` — these are raw `edda-http`
+// (non-server-function) API call in `ui/` — these are raw `edda-app`
 // routes, not Dioxus server functions, so there's no macro-generated stub
 // to lean on.
 #[cfg(target_arch = "wasm32")]

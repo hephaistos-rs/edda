@@ -38,7 +38,7 @@ async fn run(args: &[String]) -> Result<(), String> {
     // The same `EDDA_DATABASE_URL` / `EDDA_DATA_DIR` resolution the server
     // uses (`edda_db::effective_url`), so this points at whichever database
     // the running instance does. As a binary entry point, reading the
-    // environment directly here is allowed (`edda-http::config` is the
+    // environment directly here is allowed (`edda-app::config` is the
     // server's equivalent; a shared `Settings` is a later phase).
     let data_dir = std::env::var("EDDA_DATA_DIR")
         .map(std::path::PathBuf::from)

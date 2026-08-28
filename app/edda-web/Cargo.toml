@@ -21,11 +21,11 @@ axum = { workspace = true, optional = true }
 axum-login = { workspace = true, optional = true }
 dioxus = { workspace = true, features = ["router", "fullstack"] }
 dioxus-free-icons = { workspace = true, features = ["lucide"] }
+edda-app = { workspace = true, optional = true }
 edda-auth = { workspace = true, optional = true }
 edda-db = { workspace = true, optional = true }
 edda-domain = { workspace = true, optional = true }
 edda-git = { workspace = true, optional = true }
-edda-http = { workspace = true, optional = true }
 # The job poller + handler registry (`main.rs`'s composition root builds
 # and registers the actual handler closures here — see that crate's own
 # `Cargo.toml` doc comment for why the logic lives here, not inside
@@ -90,7 +90,7 @@ server = [
     "dep:edda-db",
     "dep:edda-domain",
     "dep:edda-git",
-    "dep:edda-http",
+    "dep:edda-app",
     "dep:edda-jobs",
     "dep:edda-render",
     "dep:edda-ssh",

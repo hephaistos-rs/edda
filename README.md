@@ -146,7 +146,7 @@ crates/
 ├─ edda-git/        # repository storage and gix-backed operations (protocol core, diff, merge, LFS) — transport-agnostic
 ├─ edda-render/     # markdown rendering (sanitized) and syntax highlighting
 ├─ edda-auth/       # authentication (passwords/sessions/tokens/TOTP/WebAuthn/OAuth/SSH keys) and the authorization service
-├─ edda-http/       # axum app: git smart-HTTP bridge, LFS, auth/OAuth/WebAuthn/token/collaborator/admin/SSH-key routes, release-asset transfer, REST /api/v1, rate limiting
+├─ edda-app/       # axum app: git smart-HTTP bridge, LFS, auth/OAuth/WebAuthn/token/collaborator/admin/SSH-key routes, release-asset transfer, REST /api/v1, rate limiting
 ├─ edda-ssh/        # git-over-SSH transport (russh), reusing edda-git's protocol core
 ├─ edda-jobs/       # the background-job poller and handler registry (handler logic is wired in app/edda-web)
 ├─ edda-cli/        # `edda-cli` — offline instance administration (user create/list/disable/enable/delete)

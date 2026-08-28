@@ -13,7 +13,7 @@ use lettre::{AsyncTransport, Tokio1Executor};
 use edda_db::DbPool;
 use edda_domain::{JobPayload, WebhookDeliveryId};
 
-/// SMTP delivery, configured from `edda_http::config`'s `SmtpConfig`
+/// SMTP delivery, configured from `edda_app::config`'s `SmtpConfig`
 /// (`EDDA_SMTP_URL`/`EDDA_SMTP_FROM`). Both unset (the default) is a
 /// supported, first-class standalone configuration, not a degraded one —
 /// `send_email` simply logs and no-ops rather than failing when this is
@@ -30,7 +30,7 @@ impl Mailer {
     /// human-readable reason if the URL or From mailbox don't parse — the
     /// composition root surfaces that as a startup failure rather than
     /// silently disabling email.
-    pub fn new(config: &edda_http::config::SmtpConfig) -> Result<Self, String> {
+    pub fn new(config: &edda_app::config::SmtpConfig) -> Result<Self, String> {
         let from: lettre::message::Mailbox = config
             .from
             .parse()
@@ -106,7 +106,7 @@ pub async fn create_notification(pool: DbPool, payload: JobPayload) -> Result<()
 
 /// The full delivery attempt: fetch the webhook + its decrypted secret,
 /// sign the already-built payload, re-resolve and re-check the target
-/// (`crate::ssrf::resolve_and_check` — independently of whatever check
+/// (`edda_app::security::ssrf::resolve_and_check` — independently of whatever check
 /// ran at creation time, per that module's own doc comment), then POST
 /// pinned to the checked address. Records one `WebhookDelivery` row per
 /// execution (including retries) — real git hosts' own "recent
@@ -144,7 +144,8 @@ pub async fn deliver_webhook(pool: DbPool, payload: JobPayload) -> Result<(), St
         .await
         .map_err(|err| err.to_string())?;
 
-    let (host, addr) = match crate::ssrf::resolve_and_check(&webhook.target_url).await {
+    let (host, addr) = match edda_app::security::ssrf::resolve_and_check(&webhook.target_url).await
+    {
         Ok(pair) => pair,
         Err(err) => {
             let _ =
@@ -194,7 +195,7 @@ pub async fn deliver_webhook(pool: DbPool, payload: JobPayload) -> Result<(), St
 /// The actual signed HTTP POST, pinned to an already-validated `addr` —
 /// takes the address as a parameter rather than resolving `target_url`
 /// itself, so the SSRF decision stays entirely in `deliver_webhook`/
-/// `crate::ssrf` (this function has no path that could accidentally skip
+/// `edda_app::security::ssrf` (this function has no path that could accidentally skip
 /// it) and so this function's HTTP/signing mechanics are unit-testable
 /// against a local mock server without needing to special-case a test
 /// exemption in the SSRF gate itself.
@@ -327,7 +328,7 @@ mod tests {
     }
 
     /// Exit criterion (the SSRF half): the delivery entrypoint itself —
-    /// not just the isolated `crate::ssrf` unit tests — refuses a webhook
+    /// not just the isolated `edda_app::security::ssrf` unit tests — refuses a webhook
     /// whose target resolves to a loopback address, proving the real
     /// `deliver_webhook` call path actually invokes the check rather than
     /// merely having it available.

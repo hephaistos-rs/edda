@@ -115,7 +115,7 @@ impl Backend {
 /// about *which* backend is behind it, even though `any` (an `AnyPool`,
 /// itself already backend-erased — no crate needs `SqlitePool`/`PgPool`/
 /// `MySqlPool` to use it) is reachable for the rare direct-SQL case
-/// (`edda-http`'s `/healthz` check). `backend` stays crate-private: it's
+/// (`edda-app`'s `/healthz` check). `backend` stays crate-private: it's
 /// what this crate's own repository functions match on to pick the right
 /// SQL text, not something a caller outside `edda-db` should ever branch
 /// on.
@@ -237,7 +237,7 @@ pub fn effective_url(configured: Option<&str>, data_dir: &std::path::Path) -> St
 /// Opens the pool for `url` and applies any migrations that haven't run
 /// yet. Safe to call more than once per process — pool creation is cheap
 /// and idempotent. The caller is responsible for the data directory
-/// existing (`edda_http::config` / `edda-cli` create it at startup); a
+/// existing (`edda_app::config` / `edda-cli` create it at startup); a
 /// file-backed SQLite URL under a missing directory fails here with a
 /// clear IO error rather than silently creating a tree.
 ///
@@ -255,7 +255,7 @@ pub async fn pool(url: &str, options: PoolOptions) -> Result<DbPool, DbError> {
 }
 
 /// A cheap `SELECT 1` against the pool — the `/healthz` liveness probe.
-/// Replaces `edda-http` reaching into the pool to issue that query
+/// Replaces `edda-app` reaching into the pool to issue that query
 /// itself (which needed a direct `sqlx` dependency there).
 pub async fn health(pool: &DbPool) -> Result<(), DbError> {
     sqlx::query("SELECT 1")

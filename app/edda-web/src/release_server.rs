@@ -1,8 +1,8 @@
 //! Release metadata — Dioxus server functions (create/list/get). Asset
-//! *bytes* go through `edda_http::release_assets`'s raw axum routes
+//! *bytes* go through `edda_app::release_assets`'s raw axum routes
 //! instead (streaming upload/download needs a real request/response
 //! body, which Dioxus's `#[get]`/`#[post]` macros don't support — same
-//! reasoning as `edda_http::lfs`).
+//! reasoning as `edda_app::lfs`).
 
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};

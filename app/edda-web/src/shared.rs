@@ -1,5 +1,5 @@
 //! A narrow bridge between Dioxus's server-function extraction model and
-//! the shared instances `edda-http`'s handlers already receive via axum's
+//! the shared instances `edda-app`'s handlers already receive via axum's
 //! `State<AppState>`.
 //!
 //! Dioxus 0.7's `#[get]`/`#[post]` macros extract a fixed, macro-recognized
@@ -8,11 +8,11 @@
 //! `axum_login::AuthSession<B>`); they do not expose arbitrary
 //! `axum::extract::State<T>` the way a hand-written axum handler does,
 //! because the underlying router Dioxus builds isn't the same `Router<S>`
-//! `edda_http::router` is merged into with its state already applied.
+//! `edda_app::router` is merged into with its state already applied.
 //!
 //! Every write path still needs to go through the *same* `LockRegistry`
 //! regardless of whether the write is
-//! triggered by a server function (this file) or an `edda-http` handler —
+//! triggered by a server function (this file) or an `edda-app` handler —
 //! that correctness property doesn't change just because the extraction
 //! mechanism differs. So this module holds the same values `main.rs`
 //! passes into `AppState`, set exactly once at startup via

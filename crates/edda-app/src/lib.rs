@@ -42,6 +42,11 @@ use tower_http::trace::TraceLayer;
 /// merging the exempt routes in, so it only ever wraps a route that
 /// actually matched inside this half of the router.
 pub fn router(state: AppState) -> Router {
+    let origin_policy = security::origin::OriginPolicy::new(
+        &state.config.external_url,
+        &state.config.trusted_origins,
+    );
+
     let rate_limited = Router::new()
         .merge(auth_routes::routes())
         .merge(oauth_routes::routes())
@@ -51,7 +56,15 @@ pub fn router(state: AppState) -> Router {
         .merge(admin_routes::routes())
         .merge(release_assets::routes())
         .merge(api::routes())
-        .route_layer(rate_limit::layer(&state.config.rate_limit));
+        .route_layer(rate_limit::layer(&state.config.rate_limit))
+        // CSRF/Origin check: runs before rate limiting, on the same
+        // cookie-or-bearer surface. Never touches the git/LFS routes
+        // (they're merged in below this) — a real `git` client sends no
+        // `Origin` and authenticates with Basic/bearer, not a cookie.
+        .route_layer(axum::middleware::from_fn_with_state(
+            origin_policy,
+            security::origin::enforce,
+        ));
 
     let routes = Router::new()
         .merge(git_http::routes())

@@ -35,7 +35,13 @@ pub struct RuntimeConfig {
     /// `None` unless the `EDDA_OAUTH_*` set is configured.
     pub oidc: Option<edda_auth::oauth::Config>,
     /// `EDDA_EXTERNAL_URL` (or a derived `http://ip:port`). Anchors
-    /// redirect/origin defaults in later phases; empty in `Default`.
+    /// redirect/origin defaults; empty in `Default`.
     pub external_url: String,
+    /// Extra web origins (`scheme://host[:port]`) a browser may send a
+    /// credentialed, state-changing request from, beyond same-origin and
+    /// `external_url` — `EDDA_TRUSTED_ORIGINS`, for a split
+    /// frontend/backend deployment. Empty by default (same-origin only).
+    /// Consumed by `security::origin`.
+    pub trusted_origins: Vec<String>,
     pub rate_limit: RateLimitConfig,
 }

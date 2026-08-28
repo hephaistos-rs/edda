@@ -9,9 +9,11 @@
 //! with neither, or an unusable one, yields [`ActorContext::Anonymous`];
 //! write handlers turn that into `ServiceError::Unauthorized`.
 //!
-//! A dedicated CSRF/Origin layer for the cookie-authenticated,
-//! state-changing subset is Phase 5 (S8); until then cookie writes rely on
-//! the `SameSite=Lax` session cookie the composition root sets.
+//! Cookie-authenticated, state-changing requests additionally pass the
+//! CSRF/Origin check in [`crate::security::origin`] (wired in
+//! [`crate::router`]) — an `Origin`/`Sec-Fetch-Site` allowlist on top of
+//! the `SameSite=Lax` session cookie. Bearer-token requests carry no
+//! ambient credential and are exempt.
 //!
 //! Versioning: `/api/v1` is additive-only; a breaking change means
 //! `/api/v2`, never an in-place change here.

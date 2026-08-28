@@ -103,11 +103,18 @@ impl Env {
 
 /// Where the HTTP server binds, and the URL the outside world reaches it
 /// on (`EDDA_EXTERNAL_URL` — anchors OAuth redirect / WebAuthn origin /
-/// CSRF-origin defaults in later phases).
+/// CSRF-origin defaults).
 #[derive(Debug, Clone)]
 pub struct HttpConfig {
     pub bind: SocketAddr,
     pub external_url: String,
+    /// `EDDA_TRUSTED_ORIGINS` — a comma-separated list of extra
+    /// `scheme://host[:port]` web origins a browser may send a
+    /// credentialed, state-changing request from (for a split
+    /// frontend/backend deployment). Same-origin and `external_url` are
+    /// always trusted; this is empty for the ordinary single-origin
+    /// deployment. See `crate::security::origin`.
+    pub trusted_origins: Vec<String>,
 }
 
 /// Where the git-over-SSH listener binds, and where its persistent host
@@ -286,6 +293,26 @@ impl Settings {
             None => format!("http://{ip}:{http_port}"),
         };
 
+        let trusted_origins = match env.get("EDDA_TRUSTED_ORIGINS") {
+            None => Vec::new(),
+            Some(raw) => {
+                let mut origins = Vec::new();
+                for entry in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    if entry.starts_with("http://") || entry.starts_with("https://") {
+                        origins.push(entry.trim_end_matches('/').to_string());
+                    } else {
+                        env.fail(
+                            "EDDA_TRUSTED_ORIGINS",
+                            format!(
+                                "each entry must start with http:// or https:// (got {entry:?})"
+                            ),
+                        );
+                    }
+                }
+                origins
+            }
+        };
+
         let db_url = edda_db::effective_url(env.get("EDDA_DATABASE_URL").as_deref(), &data_dir);
         let db_max_connections = env.parse_or::<u32>("EDDA_DB_MAX_CONNECTIONS", 10);
         if db_max_connections == 0 {
@@ -318,6 +345,7 @@ impl Settings {
             http: HttpConfig {
                 bind: SocketAddr::new(ip, http_port),
                 external_url,
+                trusted_origins,
             },
             ssh: SshConfig {
                 bind: SocketAddr::new(ip, ssh_port),
@@ -521,6 +549,7 @@ mod tests {
         "PORT",
         "EDDA_SSH_PORT",
         "EDDA_EXTERNAL_URL",
+        "EDDA_TRUSTED_ORIGINS",
         "EDDA_SECRET_KEYS",
         "EDDA_WEBAUTHN_RP_ID",
         "EDDA_WEBAUTHN_ORIGIN",

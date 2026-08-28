@@ -9,7 +9,7 @@
 //! module doc for why the split is drawn exactly there.
 
 use axum::body::Body;
-use axum::extract::{Path, RawQuery, State};
+use axum::extract::{DefaultBodyLimit, Path, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -24,6 +24,13 @@ use edda_git::protocol;
 
 use crate::state::AppState;
 
+/// An upload-pack request body is a want/have list, not a pack — a few KiB
+/// even for a huge repo. This is a generous absolute ceiling so a
+/// malformed or hostile client can't stream an unbounded "request" at us;
+/// it is unrelated to `EDDA_GIT_MAX_PACK_BYTES`, which bounds the *inbound
+/// pack* on the receive path.
+const UPLOAD_PACK_MAX_REQUEST_BYTES: u64 = 64 * 1024 * 1024;
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         // axum only allows one `{param}` per path segment — it can't match
@@ -32,6 +39,31 @@ pub fn routes() -> Router<AppState> {
         .route("/{owner}/{repo}/info/refs", get(info_refs))
         .route("/{owner}/{repo}/git-upload-pack", post(upload_pack))
         .route("/{owner}/{repo}/git-receive-pack", post(receive_pack))
+        // A real `git push`/`fetch` pack legitimately dwarfs axum's ~2 MiB
+        // `DefaultBodyLimit`. Turn it off here and enforce Edda's own,
+        // git-aware ceilings instead (`read_body_capped`, driven by
+        // `EDDA_GIT_MAX_PACK_BYTES`).
+        .layer(DefaultBodyLimit::disable())
+}
+
+/// Reads a request body fully into memory, refusing it with `413 Payload
+/// Too Large` once it passes `limit` bytes — Edda's explicit git/LFS
+/// transfer ceiling on routes where axum's `DefaultBodyLimit` is disabled.
+///
+/// This still buffers the whole body; it bounds memory by the *configured*
+/// cap rather than streaming to disk. The receive path's true
+/// stream-to-quarantine handling arrives with the `gix-pack` bundle-write
+/// step; every other caller here (`upload-pack` requests, LFS objects)
+/// legitimately fits in memory under its cap.
+pub(crate) async fn read_body_capped(body: Body, limit: u64) -> Result<Bytes, Response> {
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    axum::body::to_bytes(body, limit).await.map_err(|err| {
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("request body rejected (limit {limit} bytes): {err}"),
+        )
+            .into_response()
+    })
 }
 
 /// Joins the URL's `{owner}` and `{repo}.git` segments into the
@@ -258,7 +290,7 @@ async fn upload_pack(
     auth: AuthSession<Backend>,
     headers: HeaderMap,
     Path((owner, repo)): Path<(String, String)>,
-    body: Bytes,
+    body: Body,
 ) -> Response {
     let Some((identity, repo_name)) = repo_names(&owner, &repo) else {
         return (StatusCode::NOT_FOUND, "expected a \"<name>.git\" path").into_response();
@@ -270,6 +302,11 @@ async fn upload_pack(
     if let Err(response) = require_read_access(&state, &auth, &headers, &owner, &repository).await {
         return response;
     }
+
+    let body = match read_body_capped(body, UPLOAD_PACK_MAX_REQUEST_BYTES).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
 
     let out = match protocol::run_upload_pack(state.store.as_ref(), &identity, body).await {
         Ok(out) => out,
@@ -289,7 +326,7 @@ async fn receive_pack(
     auth: AuthSession<Backend>,
     headers: HeaderMap,
     Path((owner, repo)): Path<(String, String)>,
-    body: Bytes,
+    body: Body,
 ) -> Response {
     let Some((identity, repo_name)) = repo_names(&owner, &repo) else {
         return (StatusCode::NOT_FOUND, "expected a \"<name>.git\" path").into_response();
@@ -303,6 +340,11 @@ async fn receive_pack(
     {
         return response;
     }
+
+    let body = match read_body_capped(body, state.config.git_limits.max_pack_bytes).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
 
     let actor = resolve_actor(&state, &auth, &headers).await;
     let protected_refs = state

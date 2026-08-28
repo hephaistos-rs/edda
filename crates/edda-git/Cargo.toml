@@ -29,6 +29,11 @@ gix = { workspace = true, features = ["merge"] }
 gix-actor = { workspace = true }
 gix-hash = { workspace = true, features = ["sha1"] }
 gix-object = { workspace = true }
+# Inbound-pack ingestion + fsck-lite — see the workspace `Cargo.toml`
+# entries. `gix-pack`'s default features include `streaming-input`, which
+# is what gates `Bundle::write_to_directory`.
+gix-pack = { workspace = true }
+gix-zlib = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt"] }
 tracing = { workspace = true }
 

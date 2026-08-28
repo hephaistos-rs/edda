@@ -399,10 +399,9 @@ mod tests {
     /// Writes `content` to `path` inside the bare repo's object store
     /// directly (no `git` binary, no worktree checkout — this crate never
     /// shells out) by building a tree/commit by hand via `gix`, then points
-    /// `refs/heads/main` at it via this module's own `apply_ref_update`
-    /// (the same ref-write path a real push goes through) rather than any
-    /// gix reference-editing API — one less API surface for this test
-    /// fixture to depend on. Returns the new commit id.
+    /// `refs/heads/main` at it via `crate::force_set_ref` (the same
+    /// `gix-ref` transaction path a real push now goes through). Returns
+    /// the new commit id.
     fn commit_files(
         repo_dir: &std::path::Path,
         parent: Option<gix::ObjectId>,
@@ -438,11 +437,7 @@ mod tests {
             extra_headers: Vec::new(),
         };
         let commit_id = repo.write_object(commit).unwrap().detach();
-
-        let old = parent
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| crate::ZERO_ID.to_string());
-        crate::apply_ref_update(repo_dir, "refs/heads/main", &old, &commit_id.to_string()).unwrap();
+        crate::force_set_ref(&repo, "refs/heads/main", commit_id).unwrap();
 
         commit_id
     }
@@ -570,13 +565,7 @@ mod tests {
                 extra_headers: Vec::new(),
             };
             let id = repo.write_object(commit).unwrap().detach();
-            crate::apply_ref_update(
-                &repo_dir,
-                "refs/heads/feature",
-                crate::ZERO_ID,
-                &id.to_string(),
-            )
-            .unwrap();
+            crate::force_set_ref(&repo, "refs/heads/feature", id).unwrap();
         }
 
         let diffs = diff_refs(

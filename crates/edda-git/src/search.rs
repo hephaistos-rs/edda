@@ -166,13 +166,7 @@ mod tests {
             extra_headers: Vec::new(),
         };
         let commit_id = repo.write_object(commit).unwrap().detach();
-        crate::apply_ref_update(
-            repo_dir,
-            "refs/heads/main",
-            crate::ZERO_ID,
-            &commit_id.to_string(),
-        )
-        .unwrap();
+        crate::force_set_ref(&repo, "refs/heads/main", commit_id).unwrap();
         commit_id
     }
 

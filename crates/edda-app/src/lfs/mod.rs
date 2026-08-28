@@ -16,8 +16,8 @@ mod transfer_auth;
 
 use std::collections::HashMap;
 
-use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::body::{Body, Bytes};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{post, put};
@@ -30,25 +30,35 @@ use edda_auth::Backend;
 use edda_db::LfsRepo;
 use edda_domain::{ActorContext, LfsLockId};
 
-use crate::git_http::{not_found_response, repo_names, require_read_access, require_write_access};
+use crate::git_http::{
+    not_found_response, read_body_capped, repo_names, require_read_access, require_write_access,
+};
 use crate::state::AppState;
 use transfer_auth::TransferAction;
 
 const LFS_CONTENT_TYPE: &str = "application/vnd.git-lfs+json";
 
 pub fn routes() -> Router<AppState> {
-    Router::new()
-        .route("/{owner}/{repo}/info/lfs/objects/batch", post(batch))
+    // Only the object-transfer PUT legitimately exceeds axum's ~2 MiB
+    // `DefaultBodyLimit`; it is bounded instead by `EDDA_LFS_MAX_OBJECT_BYTES`
+    // inside `upload_object`. The batch/lock endpoints are small JSON and
+    // keep the default guard.
+    let object_transfer = Router::new()
         .route(
             "/{owner}/{repo}/info/lfs/objects/{oid}",
             put(upload_object).get(download_object),
         )
+        .layer(DefaultBodyLimit::disable());
+
+    Router::new()
+        .route("/{owner}/{repo}/info/lfs/objects/batch", post(batch))
         .route(
             "/{owner}/{repo}/info/lfs/locks",
             post(create_lock).get(list_locks),
         )
         .route("/{owner}/{repo}/info/lfs/locks/verify", post(verify_locks))
         .route("/{owner}/{repo}/info/lfs/locks/{id}/unlock", post(unlock))
+        .merge(object_transfer)
 }
 
 fn lfs_json(status: StatusCode, body: &impl Serialize) -> Response {
@@ -282,7 +292,7 @@ async fn upload_object(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((owner, repo, oid)): Path<(String, String, String)>,
-    body: Bytes,
+    body: Body,
 ) -> Response {
     let Some((identity, repo_name)) = repo_names(&owner, &repo) else {
         return not_found_response(&owner, &repo);
@@ -300,6 +310,11 @@ async fn upload_object(
     let repository = match state.authz.repository_by_name(&owner, repo_name).await {
         Ok(repository) => repository,
         Err(_) => return not_found_response(&owner, repo_name),
+    };
+
+    let body = match read_body_capped(body, state.config.git_limits.max_lfs_object_bytes).await {
+        Ok(body) => body,
+        Err(response) => return response,
     };
 
     let actual = sha256_hex(&body);

@@ -129,6 +129,7 @@ fn main() {
                     external_url: settings.http.external_url.clone(),
                     trusted_origins: settings.http.trusted_origins.clone(),
                     rate_limit: settings.rate_limit,
+                    git_limits: settings.git.limits,
                 },
             };
             let router = dioxus::server::router(App)

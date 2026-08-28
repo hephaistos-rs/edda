@@ -23,7 +23,7 @@ use gix_hash::ObjectId;
 use gix_object::Write as _;
 
 use crate::store::RepoStore;
-use crate::{open_repo_dir, record_git_op, GitError, ZERO_ID};
+use crate::{open_repo_dir, record_git_op, GitError};
 
 /// A hard ceiling on how many objects a single import will copy, so a
 /// pathologically large or malformed source can't run the destination out
@@ -71,7 +71,7 @@ pub fn import_branch_tip(
 
         let copied = copy_closure(&src, &dst, tip)?;
         span.record("objects_copied", copied);
-        force_update_ref(dst.git_dir(), dest_ref, tip)?;
+        crate::force_set_ref(&dst, dest_ref, tip)?;
         Ok(tip.to_string())
     })();
     record_git_op("git.import_branch_tip", start, &result);
@@ -143,23 +143,11 @@ fn copy_closure(
     Ok(copied)
 }
 
-fn force_update_ref(
-    git_dir: &std::path::Path,
-    ref_name: &str,
-    new_id: ObjectId,
-) -> Result<(), GitError> {
-    let current = std::fs::read_to_string(git_dir.join(ref_name))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| ZERO_ID.to_string());
-    crate::apply_ref_update(git_dir, ref_name, &current, &new_id.to_string()).map_err(GitError::Git)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::store::LocalFsStore;
-    use crate::{apply_ref_update, create_repo, LockRegistry, ZERO_ID};
+    use crate::{create_repo, force_set_ref, LockRegistry};
     use std::path::{Path, PathBuf};
 
     struct TestStore {
@@ -223,14 +211,7 @@ mod tests {
             extra_headers: Vec::new(),
         };
         let commit_id = repo.write_object(commit).unwrap().detach();
-        let ref_name = format!("refs/heads/{branch}");
-        let old = repo
-            .find_reference(&ref_name)
-            .ok()
-            .and_then(|mut r| r.peel_to_id().ok())
-            .map(|id| id.detach().to_string())
-            .unwrap_or_else(|| ZERO_ID.to_string());
-        apply_ref_update(repo_dir, &ref_name, &old, &commit_id.to_string()).unwrap();
+        force_set_ref(&repo, &format!("refs/heads/{branch}"), commit_id).unwrap();
         commit_id
     }
 

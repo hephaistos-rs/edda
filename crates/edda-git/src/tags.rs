@@ -93,13 +93,15 @@ pub fn create_tag(
             .map_err(|_| GitError::Git(format!("\"{target}\" does not resolve to a commit")))?;
         let target_hex = target_id.to_string();
 
-        crate::apply_ref_update(
-            repo.git_dir(),
-            &format!("refs/tags/{tag}"),
-            ZERO_ID,
-            &target_hex,
-        )
-        .map_err(GitError::Git)?;
+        crate::refs::update_refs(
+            &repo,
+            &[crate::refs::RefUpdate {
+                name: format!("refs/tags/{tag}"),
+                expected_old: ZERO_ID.to_string(),
+                new: target_hex.clone(),
+            }],
+            "tag: create",
+        )?;
 
         Ok(target_hex)
     })();
@@ -111,7 +113,7 @@ pub fn create_tag(
 mod tests {
     use super::*;
     use crate::store::LocalFsStore;
-    use crate::{apply_ref_update, create_repo, LockRegistry};
+    use crate::{create_repo, force_set_ref, LockRegistry};
     use std::path::PathBuf;
 
     struct TestStore {
@@ -174,14 +176,7 @@ mod tests {
             extra_headers: Vec::new(),
         };
         let commit_id = repo.write_object(commit).unwrap().detach();
-        let ref_name = format!("refs/heads/{branch}");
-        let old = repo
-            .find_reference(&ref_name)
-            .ok()
-            .and_then(|mut r| r.peel_to_id().ok())
-            .map(|id| id.detach().to_string())
-            .unwrap_or_else(|| ZERO_ID.to_string());
-        apply_ref_update(repo_dir, &ref_name, &old, &commit_id.to_string()).unwrap();
+        force_set_ref(&repo, &format!("refs/heads/{branch}"), commit_id).unwrap();
         commit_id
     }
 

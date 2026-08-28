@@ -148,10 +148,38 @@ impl DbConfig {
     }
 }
 
-/// Where bare repositories live on disk (`{data_dir}/repos`).
+/// Where bare repositories live on disk (`{data_dir}/repos`), plus the
+/// streamed-body size ceilings the git/LFS transfer paths enforce.
 #[derive(Debug, Clone)]
 pub struct GitConfig {
     pub repo_root: PathBuf,
+    pub limits: GitLimits,
+}
+
+/// Hard ceilings the git smart-HTTP and Git LFS transfer paths enforce
+/// **while the request body streams in** — a request over the limit is
+/// aborted with `413 Payload Too Large` and nothing is written to disk.
+/// Distinct from axum's `DefaultBodyLimit` (which the git/LFS routes
+/// disable outright, since a real push/upload legitimately exceeds its
+/// ~2 MiB default): these are Edda's own explicit, much larger, git-aware
+/// caps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GitLimits {
+    /// `EDDA_GIT_MAX_PACK_BYTES` (default 2 GiB) — the largest
+    /// `git-receive-pack` request body (the pack) a push may send.
+    pub max_pack_bytes: u64,
+    /// `EDDA_LFS_MAX_OBJECT_BYTES` (default 4 GiB) — the largest single
+    /// Git LFS object an upload may send.
+    pub max_lfs_object_bytes: u64,
+}
+
+impl Default for GitLimits {
+    fn default() -> Self {
+        Self {
+            max_pack_bytes: 2 * 1024 * 1024 * 1024,
+            max_lfs_object_bytes: 4 * 1024 * 1024 * 1024,
+        }
+    }
 }
 
 /// AES-256-GCM key material for at-rest secret encryption (TOTP shared
@@ -337,6 +365,20 @@ impl Settings {
             env.fail("EDDA_RATE_LIMIT_BURST", "must be greater than 0");
         }
 
+        let default_git_limits = GitLimits::default();
+        let max_pack_bytes =
+            env.parse_or::<u64>("EDDA_GIT_MAX_PACK_BYTES", default_git_limits.max_pack_bytes);
+        if max_pack_bytes == 0 {
+            env.fail("EDDA_GIT_MAX_PACK_BYTES", "must be greater than 0");
+        }
+        let max_lfs_object_bytes = env.parse_or::<u64>(
+            "EDDA_LFS_MAX_OBJECT_BYTES",
+            default_git_limits.max_lfs_object_bytes,
+        );
+        if max_lfs_object_bytes == 0 {
+            env.fail("EDDA_LFS_MAX_OBJECT_BYTES", "must be greater than 0");
+        }
+
         if !env.errors.is_empty() {
             return Err(ConfigErrors(env.errors));
         }
@@ -358,6 +400,10 @@ impl Settings {
             },
             git: GitConfig {
                 repo_root: data_dir.join("repos"),
+                limits: GitLimits {
+                    max_pack_bytes,
+                    max_lfs_object_bytes,
+                },
             },
             secret_keys,
             webauthn,
@@ -561,6 +607,8 @@ mod tests {
         "EDDA_SMTP_FROM",
         "EDDA_RATE_LIMIT_PER_SECOND",
         "EDDA_RATE_LIMIT_BURST",
+        "EDDA_GIT_MAX_PACK_BYTES",
+        "EDDA_LFS_MAX_OBJECT_BYTES",
     ];
 
     #[test]
@@ -575,10 +623,26 @@ mod tests {
         assert!(!s.secret_keys.is_configured());
         assert_eq!(s.rate_limit.per_second, 5);
         assert_eq!(s.git.repo_root, scope.data_dir.join("repos"));
+        assert_eq!(s.git.limits, GitLimits::default());
+        assert_eq!(s.git.limits.max_pack_bytes, 2 * 1024 * 1024 * 1024);
         assert_eq!(
             s.ssh.host_key_path,
             scope.data_dir.join("ssh_host_ed25519_key")
         );
+    }
+
+    #[test]
+    fn git_transfer_limits_parse_and_reject_zero() {
+        let mut scope = EnvScope::new();
+        scope.set("EDDA_GIT_MAX_PACK_BYTES", "104857600");
+        scope.set("EDDA_LFS_MAX_OBJECT_BYTES", "52428800");
+        let s = Settings::from_env().expect("valid limits");
+        assert_eq!(s.git.limits.max_pack_bytes, 100 * 1024 * 1024);
+        assert_eq!(s.git.limits.max_lfs_object_bytes, 50 * 1024 * 1024);
+
+        scope.set("EDDA_GIT_MAX_PACK_BYTES", "0");
+        let errs = Settings::from_env().expect_err("zero is rejected");
+        assert!(errs.0.iter().any(|e| e.var == "EDDA_GIT_MAX_PACK_BYTES"));
     }
 
     #[test]

@@ -21,16 +21,17 @@ use std::path::PathBuf;
 use bytes::Bytes;
 use gix::ObjectId;
 
-use crate::pack::{build_pack_excluding, parse_pack, write_loose_object};
+use crate::pack::build_pack_excluding;
 use crate::pktline::{read_pkt_line, write_flush, write_pkt_line, PktLine};
+use crate::quarantine::{self, Quarantine};
+use crate::refs::{update_refs, RefUpdate};
 use crate::store::RepoStore;
-use crate::{
-    apply_ref_update, fix_unborn_head, open_repo_dir, pick_default_branch, GitError, LockRegistry,
-    ZERO_ID,
-};
+use crate::{fix_unborn_head, open_repo_dir, pick_default_branch, GitError, LockRegistry, ZERO_ID};
 
 pub const UPLOAD_PACK_CAPABILITIES: &str = "agent=edda/0.1.0";
-pub const RECEIVE_PACK_CAPABILITIES: &str = "report-status agent=edda/0.1.0";
+/// `delete-refs` is advertised so `git push origin :branch` is allowed at
+/// all — a client refuses to send a deletion command otherwise.
+pub const RECEIVE_PACK_CAPABILITIES: &str = "report-status delete-refs agent=edda/0.1.0";
 
 /// HEAD (if it resolves) plus every local branch — everything a client
 /// needs to clone and check out the default branch. No tags: nothing in
@@ -240,6 +241,11 @@ pub async fn build_upload_pack_response(
 /// Opens `name` and runs the complete upload-pack cycle against `body`
 /// (the request bytes read verbatim off either transport). This is what a
 /// transport calls once it has the whole request buffered.
+///
+/// An empty request (no `want` lines — just a flush) is answered with an
+/// empty `Ok`, not an error: `git`'s HTTP transport sends exactly this as
+/// a *probe* before streaming a large chunked fetch request, and aborts
+/// the whole operation unless the probe gets a 2xx back.
 pub async fn run_upload_pack(
     store: &dyn RepoStore,
     name: &str,
@@ -248,7 +254,7 @@ pub async fn run_upload_pack(
     let repo = open_repo_dir(store, name)?;
     let request = parse_upload_pack_request(&body);
     if request.wants.is_empty() {
-        return Err(GitError::Git("no \"want\" lines in request".to_string()));
+        return Ok(Vec::new());
     }
     build_upload_pack_response(repo, request).await
 }
@@ -291,23 +297,30 @@ pub fn parse_receive_pack_commands(body: &[u8]) -> Result<(Vec<RefCommand>, usiz
     Ok((commands, pos))
 }
 
-/// Runs receive-pack: parses and stores the pack (if any command isn't a
-/// pure delete), applies each ref-update command with compare-and-swap
-/// semantics, and repairs an unborn HEAD if anything succeeded. Returns
-/// the wire response (`report-status` lines). The caller must hold
-/// `locks`'s lock for `name` for the duration of this call (and open the
-/// repo/resolve the on-disk directory itself, since it also needs the
-/// directory for the lock — see `run_receive_pack` for the common case
-/// that does both).
+/// Runs receive-pack:
 ///
-/// `protected_refs` names every `refs/heads/{branch}` this push may not
-/// touch (empty — the common case — means no restriction). This crate
-/// has no notion of *why* a branch is protected or who's allowed to
-/// bypass it (no `edda-db`/`edda-domain` dependency, by design — see this
-/// crate's `Cargo.toml`); the caller (`edda-app`'s/`edda-ssh`'s receive-
-/// pack handler) resolves that against `BranchProtectionRule`s and the
-/// pushing actor's role *before* calling this, and simply passes an empty
-/// set when the actor is exempt.
+/// 1. streams the request's pack (if any command isn't a pure delete)
+///    into a **quarantine** directory as a real indexed `.pack`/`.idx`
+///    via `gix-pack` bundle-write — never as loose objects;
+/// 2. fsck-lite: every new ref tip and its object closure must resolve
+///    (against the quarantined pack, then the repo);
+/// 3. applies **all** ref-update commands as one atomic `gix-ref`
+///    transaction with git compare-and-swap semantics — the push lands
+///    entirely or not at all;
+/// 4. promotes the quarantined pack into the live store, or, on **any**
+///    failure above, removes the quarantine wholesale — leaving the
+///    object store byte-identical to before;
+/// 5. repairs an unborn HEAD if the push landed.
+///
+/// Returns the wire response (`report-status` lines). The caller must
+/// hold `locks`'s lock for `name` for the duration of this call — see
+/// `run_receive_pack` for the common case.
+///
+/// `protected_refs` names every ref this push may not touch (empty — the
+/// common case — means no restriction). This crate has no notion of *why*
+/// a branch is protected (no `edda-db`/`edda-domain` dependency, by
+/// design); the caller resolves that against `BranchProtectionRule`s and
+/// the pushing actor's role *before* calling this.
 pub async fn apply_receive_pack(
     repo: gix::Repository,
     git_dir: PathBuf,
@@ -316,63 +329,126 @@ pub async fn apply_receive_pack(
     protected_refs: &HashSet<String>,
 ) -> Result<Vec<u8>, String> {
     if commands.is_empty() {
-        return Err("no ref-update commands in request".to_string());
+        // `git`'s HTTP transport probes a large chunked push with a bare
+        // flush pkt (no commands) and aborts unless that probe gets a 2xx
+        // — so an empty request is a benign no-op, not an error.
+        return Ok(Vec::new());
     }
 
-    let needs_pack = commands.iter().any(|command| command.new_id != ZERO_ID);
-    if needs_pack {
-        // Same reasoning as `build_upload_pack_response`: delta resolution
-        // and re-deflating every object to write it out as a loose object
-        // is real CPU work — run it on the blocking pool.
-        let git_dir_for_pack = git_dir.clone();
-        let current_span = tracing::Span::current();
-        let outcome = tokio::task::spawn_blocking(move || {
-            current_span.in_scope(|| {
-                let objects =
-                    parse_pack(&repo, &pack_data).map_err(|err| format!("bad pack: {err}"))?;
-                for object in &objects {
-                    write_loose_object(&git_dir_for_pack, object.kind, &object.data)
-                        .map_err(|err| format!("couldn't store object {}: {err}", object.id))?;
-                }
-                Ok::<_, String>(())
-            })
-        })
-        .await;
-        match outcome {
-            Ok(Ok(())) => {}
-            Ok(Err(message)) => return Err(message),
-            Err(_) => return Err("pack processing task panicked".to_string()),
+    // A push that touches a protected ref is rejected in full — atomic
+    // semantics mean the other refs in the same push don't land either.
+    let protected = commands
+        .iter()
+        .map(|command| command.ref_name.clone())
+        .find(|name| protected_refs.contains(name));
+
+    // Pack ingest, fsck, ref transaction and promotion are all CPU/FS
+    // work — one hop onto the blocking pool for the lot.
+    let current_span = tracing::Span::current();
+    match tokio::task::spawn_blocking(move || {
+        current_span.in_scope(|| receive_blocking(repo, git_dir, commands, pack_data, protected))
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err("receive-pack task panicked".to_string()),
+    }
+}
+
+/// Drops the quarantine directory unless it was explicitly promoted or
+/// taken — so every early return from [`receive_blocking`] leaves the
+/// object store byte-identical.
+struct QuarantineGuard(Option<Quarantine>);
+
+impl Drop for QuarantineGuard {
+    fn drop(&mut self) {
+        if let Some(quarantine) = self.0.take() {
+            quarantine.discard();
         }
     }
+}
 
-    let mut results = Vec::with_capacity(commands.len());
-    for command in &commands {
-        let outcome = if protected_refs.contains(&command.ref_name) {
-            Err("protected branch — push a pull request instead".to_string())
-        } else {
-            apply_ref_update(
-                &git_dir,
-                &command.ref_name,
-                &command.old_id,
-                &command.new_id,
-            )
+/// The synchronous body of [`apply_receive_pack`] — see its doc comment
+/// for the sequence. Runs entirely on the blocking pool.
+fn receive_blocking(
+    repo: gix::Repository,
+    git_dir: PathBuf,
+    commands: Vec<RefCommand>,
+    pack_data: Bytes,
+    protected: Option<String>,
+) -> Result<Vec<u8>, String> {
+    let needs_pack = commands.iter().any(|command| command.new_id != ZERO_ID);
+
+    let quarantine = if needs_pack {
+        Some(quarantine::write_pack(&repo, &pack_data).map_err(|err| err.to_string())?)
+    } else {
+        None
+    };
+    // From here on, any early return discards the quarantine via `Drop`.
+    let mut guard = QuarantineGuard(quarantine);
+
+    let applied: Result<(), String> = (|| {
+        if let Some(name) = &protected {
+            return Err(format!(
+                "{name}: protected branch — open a pull request instead"
+            ));
+        }
+
+        if let Some(quarantine) = guard.0.as_ref() {
+            let tips = commands
+                .iter()
+                .filter(|command| command.new_id != ZERO_ID)
+                .map(|command| {
+                    ObjectId::from_hex(command.new_id.as_bytes())
+                        .map_err(|_| format!("not a valid object id: {}", command.new_id))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            quarantine
+                .fsck(&repo, &tips)
+                .map_err(|err| err.to_string())?;
+        }
+
+        // Promote the pack into the live store *before* the ref
+        // transaction, so a committed ref never points at objects that
+        // aren't really there. If the transaction then fails its CAS, roll
+        // the pack back out — nothing references it yet.
+        let promoted = match guard.0.take() {
+            Some(quarantine) => Some(quarantine.promote(&repo).map_err(|err| err.to_string())?),
+            None => None,
         };
-        results.push((command.ref_name.clone(), outcome));
-    }
 
-    // A push can create the repo's first branch under a name HEAD doesn't
-    // point at yet (see `fix_unborn_head`'s doc comment) — repair it now
-    // so a client cloning right after this push gets a working checkout.
-    if results.iter().any(|(_, outcome)| outcome.is_ok()) {
+        let updates: Vec<RefUpdate> = commands
+            .iter()
+            .map(|command| RefUpdate {
+                name: command.ref_name.clone(),
+                expected_old: command.old_id.clone(),
+                new: command.new_id.clone(),
+            })
+            .collect();
+        match update_refs(&repo, &updates, "push") {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                if let Some(promoted) = promoted {
+                    promoted.rollback();
+                }
+                Err(err.to_string())
+            }
+        }
+    })();
+
+    if applied.is_ok() {
+        // A push can create the repo's first branch under a name HEAD
+        // doesn't point at yet — repair it so a client cloning right after
+        // gets a working checkout.
         let _ = fix_unborn_head(&git_dir);
     }
 
     let mut out = Vec::new();
     write_pkt_line(&mut out, b"unpack ok\n");
-    for (ref_name, outcome) in &results {
-        let line = match outcome {
-            Ok(()) => format!("ok {ref_name}\n"),
-            Err(reason) => format!("ng {ref_name} {reason}\n"),
+    for command in &commands {
+        let line = match &applied {
+            Ok(()) => format!("ok {}\n", command.ref_name),
+            Err(reason) => format!("ng {} {reason}\n", command.ref_name),
         };
         write_pkt_line(&mut out, line.as_bytes());
     }

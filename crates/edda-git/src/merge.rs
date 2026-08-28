@@ -142,13 +142,15 @@ pub fn merge_ref_into_branch(
             .map_err(|err| GitError::Git(err.to_string()))?
             .detach();
 
-        crate::apply_ref_update(
-            repo.git_dir(),
-            &target_ref_name,
-            &target_id.to_string(),
-            &commit_id.to_string(),
-        )
-        .map_err(GitError::Git)?;
+        crate::refs::update_refs(
+            &repo,
+            &[crate::refs::RefUpdate {
+                name: target_ref_name,
+                expected_old: target_id.to_string(),
+                new: commit_id.to_string(),
+            }],
+            "merge",
+        )?;
 
         Ok(MergeOutcome {
             merge_commit: commit_id.to_string(),
@@ -162,7 +164,7 @@ pub fn merge_ref_into_branch(
 mod tests {
     use super::*;
     use crate::store::LocalFsStore;
-    use crate::{apply_ref_update, create_repo, LockRegistry, ZERO_ID};
+    use crate::{create_repo, force_set_ref, LockRegistry};
     use std::path::PathBuf;
 
     struct TestStore {
@@ -229,18 +231,7 @@ mod tests {
         };
         let commit_id = repo.write_object(commit).unwrap().detach();
 
-        let ref_name = format!("refs/heads/{branch}");
-        // `old` is the *ref's own* previous value, not `parent` — the two
-        // only coincide for a linear single-branch history; here, a
-        // second branch's first commit shares `parent` with the first
-        // branch but the second branch's ref itself doesn't exist yet.
-        let old = repo
-            .find_reference(&ref_name)
-            .ok()
-            .and_then(|mut r| r.peel_to_id().ok())
-            .map(|id| id.detach().to_string())
-            .unwrap_or_else(|| ZERO_ID.to_string());
-        apply_ref_update(repo_dir, &ref_name, &old, &commit_id.to_string()).unwrap();
+        force_set_ref(&repo, &format!("refs/heads/{branch}"), commit_id).unwrap();
 
         commit_id
     }

@@ -181,3 +181,143 @@ async fn git_lfs_cli_round_trips_a_tracked_file_through_a_real_server() {
     let _ = std::fs::remove_dir_all(&work_dir);
     let _ = std::fs::remove_dir_all(&store_root);
 }
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Drives the LFS batch → PUT object-transfer flow directly (no `git-lfs`
+/// CLI) against a server configured with a low `EDDA_LFS_MAX_OBJECT_BYTES`:
+/// an object under the ceiling uploads (200), one over it is refused
+/// mid-transfer with 413 and never reaches disk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_lfs_upload_over_the_configured_object_ceiling_is_refused() {
+    let pool = edda_db::test_pool().await;
+    let store_root = std::env::temp_dir().join(format!(
+        "edda-app-lfs-cap-store-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&store_root);
+    let store: Arc<dyn RepoStore> = Arc::new(LocalFsStore::new(store_root.clone()));
+    let locks = Arc::new(LockRegistry::new());
+
+    let user_id = UserId::new();
+    edda_db::UserRepo::insert(&pool, user_id, "alice", "alice@example.com", "unused")
+        .await
+        .expect("insert user");
+    let (raw_token, _) = tokens::create(&pool, user_id, "ci")
+        .await
+        .expect("create access token");
+
+    edda_git::create_repo(store.as_ref(), &locks, "alice/demo")
+        .await
+        .expect("initialize bare repo");
+    let repository = Repository {
+        id: RepositoryId::new(),
+        owner: RepositoryOwner::User(user_id),
+        name: "demo".to_string(),
+        description: None,
+        visibility: Visibility::Public,
+        forked_from: None,
+    };
+    RepositoryRepo::insert_with_owner(&pool, &repository, user_id)
+        .await
+        .expect("insert repository row");
+
+    let state = AppState {
+        pool: pool.clone(),
+        store,
+        locks,
+        authz: AuthorizationService::new(pool.clone()),
+        backend: Backend::new(pool.clone()),
+        config: edda_app::RuntimeConfig {
+            git_limits: edda_app::config::GitLimits {
+                max_pack_bytes: 2 * 1024 * 1024 * 1024,
+                max_lfs_object_bytes: 64 * 1024,
+            },
+            ..Default::default()
+        },
+    };
+    let addr = spawn_server(state).await;
+    let base = format!("http://{addr}");
+    let auth = format!(
+        "Basic {}",
+        base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            format!("ci:{raw_token}")
+        )
+    );
+    let client = reqwest::Client::new();
+
+    // Ask for an upload action, then PUT the object at the returned href.
+    async fn upload(
+        client: &reqwest::Client,
+        base: &str,
+        auth: &str,
+        body: Vec<u8>,
+    ) -> reqwest::StatusCode {
+        let oid = sha256_hex(&body);
+        let batch: serde_json::Value = client
+            .post(format!("{base}/alice/demo.git/info/lfs/objects/batch"))
+            .header("Authorization", auth)
+            .header("Content-Type", "application/vnd.git-lfs+json")
+            .body(
+                serde_json::json!({
+                    "operation": "upload",
+                    "objects": [{ "oid": oid, "size": body.len() }],
+                })
+                .to_string(),
+            )
+            .send()
+            .await
+            .expect("batch request")
+            .json()
+            .await
+            .expect("batch json");
+
+        let action = &batch["objects"][0]["actions"]["upload"];
+        let href = action["href"].as_str().expect("an upload href");
+        let token = action["header"]["Authorization"]
+            .as_str()
+            .expect("an upload bearer header");
+
+        client
+            .put(href)
+            .header("Authorization", token)
+            .body(body)
+            .send()
+            .await
+            .expect("put object")
+            .status()
+    }
+
+    // Under the ceiling: accepted.
+    let small = vec![7u8; 1024];
+    assert_eq!(
+        upload(&client, &base, &auth, small).await,
+        reqwest::StatusCode::OK
+    );
+
+    // Over the ceiling: refused with 413, and nothing lands on disk.
+    let big = vec![9u8; 256 * 1024];
+    let big_oid = sha256_hex(&big);
+    assert_eq!(
+        upload(&client, &base, &auth, big).await,
+        reqwest::StatusCode::PAYLOAD_TOO_LARGE
+    );
+    let leaked = LocalFsStore::new(store_root.clone()).lfs_object_path("alice/demo", &big_oid);
+    assert!(
+        !leaked.exists(),
+        "the rejected LFS object must not have been written"
+    );
+
+    let _ = std::fs::remove_dir_all(&store_root);
+}

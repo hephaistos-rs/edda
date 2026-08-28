@@ -3,6 +3,8 @@ pub mod merge;
 pub mod pack;
 pub mod pktline;
 pub mod protocol;
+pub mod quarantine;
+pub mod refs;
 pub mod search;
 pub mod store;
 pub mod tags;
@@ -10,6 +12,7 @@ pub mod transfer;
 
 pub use diff::{commit_diff, diff_refs, DiffHunk, DiffLine, FileDiff};
 pub use merge::{merge_branches, merge_ref_into_branch, MergeOutcome};
+pub use refs::{force_set_ref, point_head_at, update_refs, RefUpdate, ZERO_ID};
 pub use search::{search_tree, SearchMatch};
 pub use tags::{create_tag, list_tags, resolve_tag};
 pub use transfer::import_branch_tip;
@@ -636,46 +639,6 @@ pub fn commit_log(
     result
 }
 
-/// The all-zeros object id git's protocols use to mean "no such object" —
-/// a ref-update command's old-id when creating a ref, or its new-id when
-/// deleting one.
-pub const ZERO_ID: &str = "0000000000000000000000000000000000000000";
-
-/// Applies one ref-update command with the same compare-and-swap semantics
-/// real git uses: the update only happens if `expected_old` matches the
-/// ref's *actual* current value. This is the entire non-fast-forward
-/// rejection mechanism — a stale push's `expected_old` won't match what's
-/// really there once someone else has pushed, so it fails here rather than
-/// silently overwriting history.
-pub fn apply_ref_update(
-    git_dir: &Path,
-    ref_name: &str,
-    expected_old: &str,
-    new_id: &str,
-) -> Result<(), String> {
-    let ref_path = git_dir.join(ref_name);
-    let current = std::fs::read_to_string(&ref_path)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| ZERO_ID.to_string());
-
-    if current != expected_old {
-        return Err(format!("expected {expected_old}, found {current}"));
-    }
-
-    if new_id == ZERO_ID {
-        if ref_path.exists() {
-            std::fs::remove_file(&ref_path).map_err(|err| err.to_string())?;
-        }
-    } else {
-        if let Some(parent) = ref_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-        }
-        std::fs::write(&ref_path, format!("{new_id}\n")).map_err(|err| err.to_string())?;
-    }
-    Ok(())
-}
-
 /// Prefers "main", then "master", then whatever's first — the same
 /// preference order used both for display (`repo_summary`), for repairing
 /// HEAD on disk (`fix_unborn_head`), and for the git-http bridge's ref
@@ -720,11 +683,10 @@ pub fn fix_unborn_head(dir: &Path) -> Result<(), GitError> {
         return Ok(()); // genuinely still empty — nothing to point HEAD at
     };
 
-    // HEAD's on-disk format for a symbolic ref is just this one line — the
-    // same thing `git symbolic-ref` itself would write, and how
-    // `gix::init_bare` sets it initially.
-    std::fs::write(dir.join("HEAD"), format!("ref: refs/heads/{branch}\n"))?;
-    Ok(())
+    // Repoint HEAD through `gix`'s symbolic-ref editing API rather than a
+    // raw `HEAD` file write, so it takes the same locked, packed-refs-aware
+    // path as every other ref update (see `refs::point_head_at`).
+    refs::point_head_at(&repo, branch)
 }
 
 #[cfg(test)]

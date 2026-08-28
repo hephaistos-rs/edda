@@ -5,7 +5,7 @@ use edda_db::DbPool;
 use edda_git::store::RepoStore;
 use edda_git::LockRegistry;
 
-use crate::config::RateLimitConfig;
+use crate::config::{GitLimits, RateLimitConfig};
 
 /// Everything an `edda-app` handler needs, constructed once by the
 /// composition root (`edda-web`) and shared via axum's `State` extractor
@@ -44,4 +44,8 @@ pub struct RuntimeConfig {
     /// Consumed by `security::origin`.
     pub trusted_origins: Vec<String>,
     pub rate_limit: RateLimitConfig,
+    /// Streamed-body size ceilings for the git/LFS transfer paths
+    /// (`EDDA_GIT_MAX_PACK_BYTES` / `EDDA_LFS_MAX_OBJECT_BYTES`). `Default`
+    /// is 2 GiB / 4 GiB — a real cap even in tests that don't tune it.
+    pub git_limits: GitLimits,
 }

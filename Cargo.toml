@@ -141,6 +141,17 @@ gix = "0.86.0"
 gix-actor = "0.41.2"
 gix-hash = "0.26.0"
 gix-object = "0.63.0"
+# Inbound `git push` pack ingestion (`edda-git::quarantine`): `gix-pack`'s
+# `Bundle::write_to_directory` streams the request's pack into a real
+# indexed `.pack`/`.idx` in a quarantine directory (thin packs resolved
+# against objects already in the repo), replacing the old hand-rolled
+# per-object loose-object receive that left orphans behind on a rejected
+# push. `gix` itself already depends on both at these exact versions;
+# named here only because `gix` doesn't re-export `gix_pack`, and
+# `gix-zlib::Inflate` is the decompressor `Bundle::find` takes for the
+# post-write fsck-lite connectivity walk.
+gix-pack = "0.73.0"
+gix-zlib = "0.1.0"
 gloo-net = "0.7.0"
 # The core rate-limiting algorithm `tower_governor` (`edda_app::rate_limit`)
 # is built on — already a transitive dependency of that crate;

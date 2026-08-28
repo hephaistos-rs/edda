@@ -80,6 +80,188 @@ pub fn build_pack_excluding(
     serialize_pack(&objects)
 }
 
+/// How far back from the `wants` a shallow fetch should reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Deepen {
+    /// Not a shallow request — full history.
+    None,
+    /// `deepen <N>` (`git clone --depth N`): commits within `N` of a want,
+    /// `N = 1` meaning the want commits only.
+    Depth(u32),
+    /// `deepen-since <unix_seconds>`: commits with a committer date at or
+    /// after this instant.
+    Since(i64),
+}
+
+/// A client's shallow-fetch parameters, parsed from the upload-pack request
+/// (`shallow`/`deepen` lines — see `protocol::parse_upload_pack_request`).
+#[derive(Debug, Clone)]
+pub struct ShallowSpec {
+    /// Commits the client already has as shallow boundaries (`shallow <id>`).
+    pub client_shallow: Vec<ObjectId>,
+    pub deepen: Deepen,
+}
+
+/// The result of [`build_shallow_pack`]: the pack plus the shallow-boundary
+/// bookkeeping the server must report back before the pack (`shallow` /
+/// `unshallow` lines).
+#[derive(Debug)]
+pub struct ShallowPack {
+    pub pack: Vec<u8>,
+    /// Commits whose parents were withheld — the client's *new* shallow
+    /// boundary (excludes anything already in `client_shallow`).
+    pub new_shallow: Vec<ObjectId>,
+    /// Commits the client had as shallow that are now sent with their
+    /// parents — the client removes these from its `.git/shallow`.
+    pub unshallow: Vec<ObjectId>,
+}
+
+/// Like [`build_pack_excluding`], but honouring a [`ShallowSpec`]: the
+/// commit walk from `wants` is bounded (by depth, or by committer date),
+/// boundary commits have their parents omitted, and the set of boundary
+/// commits is reported so the caller can emit the `shallow`/`unshallow`
+/// negotiation lines. With `deepen == Deepen::None` this is exactly
+/// [`build_pack_excluding`] with empty shallow bookkeeping.
+///
+/// Trees and blobs of every included commit are packed in full (a shallow
+/// clone still needs complete working trees at its tips); only the *commit*
+/// graph is truncated.
+pub fn build_shallow_pack(
+    repo: &gix::Repository,
+    wants: &[ObjectId],
+    haves: &[ObjectId],
+    spec: &ShallowSpec,
+) -> Result<ShallowPack, GitError> {
+    if spec.deepen == Deepen::None {
+        return Ok(ShallowPack {
+            pack: build_pack_excluding(repo, wants, haves)?,
+            new_shallow: Vec::new(),
+            unshallow: Vec::new(),
+        });
+    }
+
+    let client_shallow: HashSet<ObjectId> = spec.client_shallow.iter().copied().collect();
+
+    // Everything the client already has (unbounded — it asserts the full
+    // closure) is pre-marked so neither walk below re-emits it.
+    let mut seen: HashSet<ObjectId> = HashSet::new();
+    let mut have_queue: VecDeque<ObjectId> = haves.iter().copied().collect();
+    while let Some(id) = have_queue.pop_front() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if let Ok(object) = repo.find_object(id) {
+            extend_queue_from(&mut have_queue, object.kind, &object.data)?;
+        }
+    }
+
+    let mut objects: Vec<(Kind, Vec<u8>)> = Vec::new();
+    let mut non_commit_queue: VecDeque<ObjectId> = VecDeque::new();
+    let mut new_shallow: Vec<ObjectId> = Vec::new();
+    let mut unshallow: Vec<ObjectId> = Vec::new();
+
+    // Commit BFS, each entry tagged with its distance from a want (wants
+    // are depth 1).
+    let mut commit_queue: VecDeque<(ObjectId, u32)> = wants.iter().map(|id| (*id, 1u32)).collect();
+    let mut visited_commits: HashSet<ObjectId> = HashSet::new();
+
+    while let Some((id, depth)) = commit_queue.pop_front() {
+        if seen.contains(&id) || !visited_commits.insert(id) {
+            continue;
+        }
+        let object = repo
+            .find_object(id)
+            .map_err(|err| GitError::Git(err.to_string()))?;
+
+        match object.kind {
+            Kind::Tag => {
+                // A tag want: pack the tag, then depth-limit from the
+                // commit it points at (at the same depth).
+                if seen.insert(id) {
+                    objects.push((Kind::Tag, object.data.clone()));
+                }
+                let tag = gix_object::TagRef::from_bytes(&object.data, gix_hash::Kind::Sha1)
+                    .map_err(|err| GitError::Git(err.to_string()))?;
+                commit_queue.push_back((tag.target(), depth));
+                continue;
+            }
+            Kind::Tree | Kind::Blob => {
+                // An unusual want (a raw tree/blob) — just include its closure.
+                non_commit_queue.push_back(id);
+                continue;
+            }
+            Kind::Commit => {}
+        }
+
+        if seen.insert(id) {
+            objects.push((Kind::Commit, object.data.clone()));
+        }
+        let commit = gix_object::CommitRef::from_bytes(&object.data, gix_hash::Kind::Sha1)
+            .map_err(|err| GitError::Git(err.to_string()))?;
+        non_commit_queue.push_back(commit.tree());
+
+        let parents: Vec<ObjectId> = commit.parents().collect();
+        let mut cut_a_parent = false;
+        for parent in &parents {
+            let follow = match spec.deepen {
+                Deepen::None => true,
+                Deepen::Depth(limit) => depth < limit,
+                Deepen::Since(since) => commit_committer_time(repo, *parent)? >= since,
+            };
+            if follow {
+                commit_queue.push_back((*parent, depth + 1));
+            } else {
+                cut_a_parent = true;
+            }
+        }
+
+        if cut_a_parent {
+            if !client_shallow.contains(&id) {
+                new_shallow.push(id);
+            }
+        } else if !parents.is_empty() && client_shallow.contains(&id) {
+            unshallow.push(id);
+        }
+    }
+
+    // Trees/blobs of every included commit, in full.
+    while let Some(id) = non_commit_queue.pop_front() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let object = repo
+            .find_object(id)
+            .map_err(|err| GitError::Git(err.to_string()))?;
+        extend_queue_from(&mut non_commit_queue, object.kind, &object.data)?;
+        objects.push((object.kind, object.data.clone()));
+    }
+
+    Ok(ShallowPack {
+        pack: serialize_pack(&objects)?,
+        new_shallow,
+        unshallow,
+    })
+}
+
+/// The committer timestamp of commit `id`, in seconds since the epoch —
+/// needed to evaluate a `deepen-since` boundary.
+fn commit_committer_time(repo: &gix::Repository, id: ObjectId) -> Result<i64, GitError> {
+    let object = repo
+        .find_object(id)
+        .map_err(|err| GitError::Git(err.to_string()))?;
+    if object.kind != Kind::Commit {
+        return Ok(i64::MAX);
+    }
+    let commit = gix_object::CommitRef::from_bytes(&object.data, gix_hash::Kind::Sha1)
+        .map_err(|err| GitError::Git(err.to_string()))?;
+    Ok(commit
+        .committer()
+        .map_err(|err| GitError::Git(err.to_string()))?
+        .time()
+        .map(|time| time.seconds)
+        .unwrap_or(0))
+}
+
 /// Shared by both the `haves` exclusion walk and the `wants` inclusion
 /// walk in [`build_pack_excluding`]: given one already-fetched object,
 /// pushes whatever it references (a commit's tree and parents; a tree's

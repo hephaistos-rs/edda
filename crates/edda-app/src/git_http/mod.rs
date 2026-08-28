@@ -253,7 +253,10 @@ async fn info_refs(
     let capabilities = if service == "git-receive-pack" {
         protocol::RECEIVE_PACK_CAPABILITIES
     } else {
-        protocol::UPLOAD_PACK_CAPABILITIES
+        // HTTP is stateless-RPC: the client's shallow negotiation is two
+        // self-contained POSTs, which `run_upload_pack` handles — so
+        // `shallow` is advertised here (but not over SSH).
+        protocol::UPLOAD_PACK_CAPABILITIES_STATELESS
     };
 
     let advertisement =

@@ -813,13 +813,28 @@ pub fn Repo(owner: String, name: String) -> Element {
 /// would, and this isn't a status indicator in the same sense repo-row
 /// icons are.
 fn diff_file_header(file: &FileDiffDto) -> String {
-    match (&file.old_path, &file.new_path) {
+    let base = match (&file.old_path, &file.new_path) {
         (Some(old), Some(new)) if old == new => new.clone(),
         (Some(old), Some(new)) => format!("{old} → {new}"),
         (None, Some(new)) => format!("{new} (added)"),
         (Some(old), None) => format!("{old} (deleted)"),
         (None, None) => "(unknown file)".to_string(),
+    };
+    if file.is_rename {
+        format!("{base} (renamed)")
+    } else {
+        base
     }
+}
+
+/// The `@@ -a,b +c,d @@` line git prints before each hunk — lets a reader
+/// tell one windowed hunk from the next now that a file's changes are no
+/// longer a single run.
+fn hunk_header(hunk: &edda_api_types::DiffHunkDto) -> String {
+    format!(
+        "@@ -{},{} +{},{} @@",
+        hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
+    )
 }
 
 /// A single unified diff view (not side-by-side) for a commit — a
@@ -836,9 +851,16 @@ fn CommitDiffView(files: Vec<FileDiffDto>) -> Element {
                     }
                     if file.is_binary {
                         p { class: "px-3 py-2 text-sm text-ink-muted italic", "binary file — no line diff to show" }
+                    } else if file.is_too_large {
+                        p { class: "px-3 py-2 text-sm text-ink-muted italic", "diff too large to display" }
+                    } else if file.hunks.is_empty() {
+                        p { class: "px-3 py-2 text-sm text-ink-muted italic", "no content changes" }
                     } else {
                         div { class: "divide-y divide-line",
                             for hunk in file.hunks {
+                                div { class: "bg-surface px-3 py-0.5 font-mono text-xs text-ink-muted",
+                                    {hunk_header(&hunk)}
+                                }
                                 for line in hunk.lines {
                                     DiffLineRow { line }
                                 }

@@ -19,6 +19,7 @@
 //! `/api/v2`, never an in-place change here.
 
 mod error;
+mod git_read;
 
 pub mod branch_protection;
 pub mod collaborators;
@@ -43,6 +44,8 @@ use edda_domain::{ActorContext, Repository, UserId};
 
 use crate::services::ServiceError;
 use crate::AppState;
+
+pub(crate) use git_read::git_read;
 
 /// The `/api/v1` actor, resolved once per request from the session cookie
 /// or a bearer token.

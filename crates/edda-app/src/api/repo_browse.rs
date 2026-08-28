@@ -3,22 +3,25 @@
 //! body that carries source text is rendered server-side (`rendered_html`
 //! for blobs, per-line `html` for diffs) so the UI never runs a renderer.
 //!
-//! The blocking `edda-git` calls here run inline, matching the pre-cutover
-//! code; wrapping them in `spawn_blocking` + a request timeout is the
-//! Phase 7 A9/M2 sweep, tracked there.
+//! Every blocking `edda-git` call here goes through [`super::git_read`] —
+//! the blocking pool, span-propagated, request-timeout-bounded (A9/M2).
 
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
+use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
+use axum::http::HeaderValue;
+use axum::response::Response;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
 
 use edda_api_types::{
-    BlobDto, CommitLogEntryDto, DiffHunkDto, DiffLineDto, DiffLineKind, FileDiffDto,
-    SearchMatchDto, TreeEntryDto,
+    BlameDto, BlameHunkDto, BlobDto, CommitLogEntryDto, DiffHunkDto, DiffLineDto, DiffLineKind,
+    FileDiffDto, SearchMatchDto, TreeEntryDto,
 };
 
 use super::repos::read_repo_identity;
-use super::Actor;
+use super::{git_read, Actor};
 use crate::services::ServiceError;
 use crate::AppState;
 
@@ -33,6 +36,8 @@ pub fn routes() -> Router<AppState> {
             get(commit_diff),
         )
         .route("/api/v1/repos/{owner}/{repo}/search", get(search))
+        .route("/api/v1/repos/{owner}/{repo}/blame", get(blame))
+        .route("/api/v1/repos/{owner}/{repo}/archive", get(archive))
 }
 
 #[derive(Deserialize)]
@@ -57,6 +62,26 @@ pub struct SearchQuery {
     pub query: String,
 }
 
+#[derive(Deserialize)]
+pub struct BlameQuery {
+    /// A branch name, tag, or commit-ish. Defaults to `HEAD`. A path
+    /// segment isn't used (a branch name can contain `/`), matching how
+    /// `tree`/`blob` take `branch` as a query parameter.
+    #[serde(default)]
+    pub rev: Option<String>,
+    pub path: String,
+}
+
+#[derive(Deserialize)]
+pub struct ArchiveQuery {
+    /// A branch name, tag, or commit-ish. Defaults to `HEAD`.
+    #[serde(default)]
+    pub rev: Option<String>,
+    /// `tar.gz` (default) or `zip`.
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
 async fn tree(
     State(state): State<AppState>,
     actor: Actor,
@@ -65,8 +90,12 @@ async fn tree(
 ) -> Result<Json<Vec<TreeEntryDto>>, ServiceError> {
     let identity = read_repo_identity(&state, actor.context(), &owner, &repo).await?;
     let path = q.path.unwrap_or_default();
-    let entries =
-        edda_git::browse_tree(state.store.as_ref(), &identity, q.branch.as_deref(), &path)?;
+    let store = state.store.clone();
+    let branch = q.branch.clone();
+    let entries = git_read("browse_tree", move || {
+        edda_git::browse_tree(store.as_ref(), &identity, branch.as_deref(), &path)
+    })
+    .await?;
     Ok(Json(
         entries
             .into_iter()
@@ -87,7 +116,12 @@ async fn blob(
 ) -> Result<Json<BlobDto>, ServiceError> {
     let identity = read_repo_identity(&state, actor.context(), &owner, &repo).await?;
     let path = q.path.unwrap_or_default();
-    let blob = edda_git::read_blob(state.store.as_ref(), &identity, q.branch.as_deref(), &path)?;
+    let store = state.store.clone();
+    let branch = q.branch.clone();
+    let blob = git_read("read_blob", move || {
+        edda_git::read_blob(store.as_ref(), &identity, branch.as_deref(), &path)
+    })
+    .await?;
     Ok(Json(blob_dto(blob)))
 }
 
@@ -97,10 +131,12 @@ async fn branches(
     Path((owner, repo)): Path<(String, String)>,
 ) -> Result<Json<Vec<String>>, ServiceError> {
     let identity = read_repo_identity(&state, actor.context(), &owner, &repo).await?;
-    Ok(Json(edda_git::list_branches(
-        state.store.as_ref(),
-        &identity,
-    )?))
+    let store = state.store.clone();
+    let branches = git_read("list_branches", move || {
+        edda_git::list_branches(store.as_ref(), &identity)
+    })
+    .await?;
+    Ok(Json(branches))
 }
 
 async fn commits(
@@ -110,7 +146,12 @@ async fn commits(
     Query(q): Query<BranchQuery>,
 ) -> Result<Json<Vec<CommitLogEntryDto>>, ServiceError> {
     let identity = read_repo_identity(&state, actor.context(), &owner, &repo).await?;
-    let entries = edda_git::commit_log(state.store.as_ref(), &identity, q.branch.as_deref(), 50)?;
+    let store = state.store.clone();
+    let branch = q.branch.clone();
+    let entries = git_read("commit_log", move || {
+        edda_git::commit_log(store.as_ref(), &identity, branch.as_deref(), 50)
+    })
+    .await?;
     Ok(Json(
         entries
             .into_iter()
@@ -130,7 +171,11 @@ async fn commit_diff(
     Path((owner, repo, commit_id)): Path<(String, String, String)>,
 ) -> Result<Json<Vec<FileDiffDto>>, ServiceError> {
     let identity = read_repo_identity(&state, actor.context(), &owner, &repo).await?;
-    let diffs = edda_git::commit_diff(state.store.as_ref(), &identity, &commit_id)?;
+    let store = state.store.clone();
+    let diffs = git_read("commit_diff", move || {
+        edda_git::commit_diff(store.as_ref(), &identity, &commit_id)
+    })
+    .await?;
     Ok(Json(diffs.into_iter().map(file_diff_dto).collect()))
 }
 
@@ -144,12 +189,13 @@ async fn search(
     if q.query.trim().is_empty() {
         return Ok(Json(Vec::new()));
     }
-    let matches = edda_git::search_tree(
-        state.store.as_ref(),
-        &identity,
-        q.branch.as_deref(),
-        &q.query,
-    )?;
+    let store = state.store.clone();
+    let branch = q.branch.clone();
+    let query = q.query.clone();
+    let matches = git_read("search_tree", move || {
+        edda_git::search_tree(store.as_ref(), &identity, branch.as_deref(), &query)
+    })
+    .await?;
     Ok(Json(
         matches
             .into_iter()
@@ -160,6 +206,88 @@ async fn search(
             })
             .collect(),
     ))
+}
+
+async fn blame(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path((owner, repo)): Path<(String, String)>,
+    Query(q): Query<BlameQuery>,
+) -> Result<Json<BlameDto>, ServiceError> {
+    let identity = read_repo_identity(&state, actor.context(), &owner, &repo).await?;
+    let store = state.store.clone();
+    let rev = q.rev.clone().unwrap_or_else(|| "HEAD".to_string());
+    let path = q.path.clone();
+    let blame = git_read("blame", move || {
+        edda_git::blame(store.as_ref(), &identity, &rev, &path)
+    })
+    .await?;
+    Ok(Json(BlameDto {
+        hunks: blame
+            .hunks
+            .into_iter()
+            .map(|hunk| BlameHunkDto {
+                start_line: hunk.start_line,
+                line_count: hunk.line_count,
+                commit_id: hunk.commit_id,
+                summary: hunk.summary,
+                author_name: hunk.author_name,
+                author_unix_seconds: hunk.author_unix_seconds,
+            })
+            .collect(),
+        lines: blame.lines,
+    }))
+}
+
+async fn archive(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path((owner, repo)): Path<(String, String)>,
+    Query(q): Query<ArchiveQuery>,
+) -> Result<Response, ServiceError> {
+    let identity = read_repo_identity(&state, actor.context(), &owner, &repo).await?;
+    let format = match q.format.as_deref().unwrap_or("tar.gz") {
+        "tar.gz" | "tgz" | "targz" => edda_git::ArchiveFormat::TarGz,
+        "zip" => edda_git::ArchiveFormat::Zip,
+        other => {
+            return Err(ServiceError::Validation(format!(
+                "unknown archive format {other:?} — use \"tar.gz\" or \"zip\""
+            )))
+        }
+    };
+    let rev = q.rev.clone().unwrap_or_else(|| "HEAD".to_string());
+    // A ref like `feature/x` and any odd bytes must not leak into the
+    // header; keep it to a safe filename token.
+    let safe_rev: String = rev
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let filename = format!("{repo}-{safe_rev}.{ext}", ext = format.extension());
+
+    let store = state.store.clone();
+    let rev_for_task = rev.clone();
+    let bytes = git_read("archive", move || {
+        edda_git::archive(store.as_ref(), &identity, &rev_for_task, format)
+    })
+    .await?;
+
+    let mut response = Response::new(Body::from(bytes));
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static(format.content_type()),
+    );
+    response.headers_mut().insert(
+        CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
+            .unwrap_or_else(|_| HeaderValue::from_static("attachment")),
+    );
+    Ok(response)
 }
 
 /// `README`/`README.md`/`README.markdown`, case-insensitively — an
@@ -211,7 +339,9 @@ pub(crate) fn file_diff_dto(diff: edda_git::FileDiff) -> FileDiffDto {
         .into_iter()
         .map(|hunk| DiffHunkDto {
             old_start: hunk.old_start,
+            old_lines: hunk.old_lines,
             new_start: hunk.new_start,
+            new_lines: hunk.new_lines,
             lines: hunk
                 .lines
                 .into_iter()
@@ -233,6 +363,8 @@ pub(crate) fn file_diff_dto(diff: edda_git::FileDiff) -> FileDiffDto {
         old_path: diff.old_path,
         new_path: diff.new_path,
         is_binary: diff.is_binary,
+        is_rename: diff.is_rename,
+        is_too_large: diff.is_too_large,
         hunks,
     }
 }

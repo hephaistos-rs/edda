@@ -15,7 +15,7 @@ use edda_db::DbPool;
 use edda_domain::{ActorContext, DiffAnchor, PrState, PullRequest, RepositoryId, UserId};
 
 use super::repo_browse::file_diff_dto;
-use super::{read_repo, Actor};
+use super::{git_read, read_repo, Actor};
 use crate::services::pull_request::{pull_head_ref, NewPullRequestInput};
 use crate::services::{git_identity, PullRequestService, ServiceError};
 use crate::AppState;
@@ -191,7 +191,11 @@ async fn diff(
     } else {
         pull_head_ref(pr.id)
     };
-    let diffs = edda_git::diff_refs(state.store.as_ref(), &identity, &base_ref, &head_ref)?;
+    let store = state.store.clone();
+    let diffs = git_read("diff_refs", move || {
+        edda_git::diff_refs(store.as_ref(), &identity, &base_ref, &head_ref)
+    })
+    .await?;
     Ok(Json(diffs.into_iter().map(file_diff_dto).collect()))
 }
 

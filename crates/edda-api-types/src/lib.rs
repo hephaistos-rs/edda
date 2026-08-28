@@ -144,7 +144,9 @@ pub struct DiffLineDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiffHunkDto {
     pub old_start: u32,
+    pub old_lines: u32,
     pub new_start: u32,
+    pub new_lines: u32,
     pub lines: Vec<DiffLineDto>,
 }
 
@@ -153,6 +155,14 @@ pub struct FileDiffDto {
     pub old_path: Option<String>,
     pub new_path: Option<String>,
     pub is_binary: bool,
+    /// The file was renamed/copied (`old_path` differs from `new_path`);
+    /// `hunks` still carries any content change.
+    #[serde(default)]
+    pub is_rename: bool,
+    /// The file is too large to diff — `hunks` is empty and the UI shows
+    /// "diff too large" instead.
+    #[serde(default)]
+    pub is_too_large: bool,
     pub hunks: Vec<DiffHunkDto>,
 }
 
@@ -161,6 +171,25 @@ pub struct SearchMatchDto {
     pub path: String,
     pub line_number: u32,
     pub line: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlameHunkDto {
+    /// 1-based first line of the run.
+    pub start_line: u32,
+    pub line_count: u32,
+    pub commit_id: String,
+    pub summary: String,
+    pub author_name: String,
+    pub author_unix_seconds: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlameDto {
+    /// In file order; the hunks partition `1..=lines.len()`.
+    pub hunks: Vec<BlameHunkDto>,
+    /// The blamed file's lines (newline-stripped) — one per blamed line.
+    pub lines: Vec<String>,
 }
 
 // ─────────────────────────── pull requests ────────────────────────────

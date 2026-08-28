@@ -139,6 +139,13 @@ gix = "0.86.0"
 # `gix-diff` provides), never a `gix_diff::`-namespaced type by name, so
 # `gix-diff` doesn't need its own direct dependency entry here.
 gix-actor = "0.41.2"
+# `git archive` (`edda-git::archive`): `gix::Repository::worktree_archive`
+# writes the archive, but `gix` pulls `gix-archive` with
+# `default-features = false` and its `worktree-archive` feature does *not*
+# pass the container-format features through — so `TarGz`/`Zip` output is
+# "not compiled in" unless `gix-archive` is named here directly with those
+# features on. `gix` already depends on it at this version.
+gix-archive = { version = "0.35.0", default-features = false, features = ["tar_gz", "zip"] }
 gix-hash = "0.26.0"
 gix-object = "0.63.0"
 # Inbound `git push` pack ingestion (`edda-git::quarantine`): `gix-pack`'s

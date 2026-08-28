@@ -1,3 +1,5 @@
+pub mod archive;
+pub mod blame;
 pub mod diff;
 pub mod merge;
 pub mod pack;
@@ -6,10 +8,13 @@ pub mod protocol;
 pub mod quarantine;
 pub mod refs;
 pub mod search;
+pub mod sideband;
 pub mod store;
 pub mod tags;
 pub mod transfer;
 
+pub use archive::{archive, ArchiveFormat};
+pub use blame::{blame, Blame, BlameHunk};
 pub use diff::{commit_diff, diff_refs, DiffHunk, DiffLine, FileDiff};
 pub use merge::{merge_branches, merge_ref_into_branch, MergeOutcome};
 pub use refs::{force_set_ref, point_head_at, update_refs, RefUpdate, ZERO_ID};

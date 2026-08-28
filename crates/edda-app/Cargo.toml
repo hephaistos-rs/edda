@@ -63,9 +63,11 @@ sha2 = { workspace = true }
 # `services::ServiceError` — the one error type the application-service
 # layer returns; a handler maps it to a status via `http_status`.
 thiserror = { workspace = true }
-# Streaming release-asset upload/download (`release_assets`) — async file
-# I/O off the request-handling task.
-tokio = { workspace = true, features = ["fs", "io-util"] }
+# `fs`/`io-util`: streaming release-asset upload/download
+# (`release_assets`) off the request-handling task. `rt`/`time`:
+# `api::git_read` runs every blocking `gix` read on `spawn_blocking` under
+# a `tokio::time::timeout` (A9/M2).
+tokio = { workspace = true, features = ["fs", "io-util", "rt", "time"] }
 tower-http = { workspace = true, features = ["trace"] }
 # General API rate limiting (`rate_limit`) — see the workspace `Cargo.toml`
 # entry's comment for the dependency choice.

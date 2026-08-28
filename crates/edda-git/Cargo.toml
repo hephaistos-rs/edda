@@ -27,6 +27,10 @@ flate2 = { workspace = true }
 # not `git2`/libgit2.
 gix = { workspace = true, features = ["merge"] }
 gix-actor = { workspace = true }
+# `archive` module: `TarGz`/`Zip` container output for
+# `gix::Repository::worktree_archive` — `gix`'s own `worktree-archive`
+# feature enables the API but not the formats. See the workspace entry.
+gix-archive = { workspace = true }
 gix-hash = { workspace = true, features = ["sha1"] }
 gix-object = { workspace = true }
 # Inbound-pack ingestion + fsck-lite — see the workspace `Cargo.toml`

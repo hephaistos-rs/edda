@@ -8,7 +8,7 @@ use axum::{Json, Router};
 use edda_api_types::{CommitDto, CreateRepoRequest, ForkedRepoDto, RepoDto, UpdateRepoRequest};
 use edda_domain::{ActorContext, RepoRole, Repository};
 
-use super::{read_repo, Actor};
+use super::{git_read, read_repo, Actor};
 use crate::services::repository::NewRepository;
 use crate::services::{git_identity, RepositoryService, ServiceError};
 use crate::AppState;
@@ -72,7 +72,11 @@ async fn list(
             continue;
         }
         let identity = git_identity(&owner_username, &repository.name);
-        let summary = edda_git::repo_summary(state.store.as_ref(), &identity)?;
+        let store = state.store.clone();
+        let summary = git_read("repo_summary", move || {
+            edda_git::repo_summary(store.as_ref(), &identity)
+        })
+        .await?;
         let is_owner = role == Some(RepoRole::Owner);
         visible.push(repo_dto(&repository, &owner_username, summary, is_owner));
     }
@@ -91,7 +95,11 @@ async fn get_one(
         .await
         .is_ok();
     let identity = git_identity(&owner, &repo);
-    let summary = edda_git::repo_summary(state.store.as_ref(), &identity)?;
+    let store = state.store.clone();
+    let summary = git_read("repo_summary", move || {
+        edda_git::repo_summary(store.as_ref(), &identity)
+    })
+    .await?;
     Ok(Json(repo_dto(&repository, &owner, summary, is_owner)))
 }
 

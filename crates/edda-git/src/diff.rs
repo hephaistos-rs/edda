@@ -3,40 +3,60 @@
 //! rendered view (e.g. syntax-highlighted lines) is entirely the caller's
 //! concern, the same layering `read_blob` already uses: this crate returns
 //! raw structure, callers decide how to present it.
+//!
+//! Line-level alignment for a modified file is `imara-diff`'s histogram
+//! algorithm with Git's slider heuristics (`gix::diff::blob`), rendered as
+//! real multi-hunk unified output with 3 lines of context — the same
+//! engine gitoxide and Helix ship. A file whose either side exceeds
+//! [`MAX_DIFF_BYTES`] is reported with `is_too_large` set and no hunks.
 
 use gix_object::tree::EntryKind;
 
 use crate::store::RepoStore;
 use crate::{is_binary_data, open_repo_dir, record_git_op, GitError};
 
+/// Symmetrical unified-diff context, in lines on each side of a change —
+/// the `-U3` git default.
+const DIFF_CONTEXT_LINES: u32 = 3;
+
 /// One changed file within a commit's diff against its comparison point
 /// (its first parent, or the empty tree for a root commit — see
 /// `commit_diff`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileDiff {
-    /// `None` for a newly-added file.
+    /// `None` for a newly-added file. For a rename, the pre-rename path.
     pub old_path: Option<String>,
-    /// `None` for a deleted file.
+    /// `None` for a deleted file. For a rename, the post-rename path.
     pub new_path: Option<String>,
-    /// Empty when `is_binary` is true — there is nothing line-shaped to show.
+    /// Empty when `is_binary` or `is_too_large` is true — there is nothing
+    /// line-shaped to show. Otherwise every changed region of the file,
+    /// each windowed to [`DIFF_CONTEXT_LINES`] of surrounding context.
     pub hunks: Vec<DiffHunk>,
     pub is_binary: bool,
+    /// The tree-diff's rewrite tracking matched this file to one at a
+    /// different path (`old_path != new_path`); `hunks` still carries any
+    /// content change between the two sides.
+    pub is_rename: bool,
+    /// Either side of the file is larger than [`MAX_DIFF_BYTES`] — `hunks`
+    /// is empty and the caller shows "diff too large" rather than the file.
+    pub is_too_large: bool,
 }
 
-/// A contiguous run of diff lines. This module does not window hunks down to
-/// "only the changed regions plus a few lines of context" the way a real
-/// unified diff does — each file's `hunks` is always exactly one hunk
-/// spanning the full compared range, with unchanged lines included inline as
-/// `DiffLine::Context`. That's simpler and is enough to satisfy "added/
-/// removed/context lines are distinguishable"; multi-hunk windowing is a
-/// presentation refinement that can be added later without changing this
-/// shape (a renderer can always collapse long `Context` runs itself).
+/// One contiguous changed region of a file plus its surrounding context,
+/// positioned by a unified-diff `@@ -old_start,old_lines +new_start,new_lines @@`
+/// header.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiffHunk {
-    /// 1-based; 0 when the old side is empty (a newly-added file).
+    /// 1-based first old-side line the hunk covers; 0 when the old side is
+    /// empty (a newly-added file).
     pub old_start: u32,
-    /// 1-based; 0 when the new side is empty (a deleted file).
+    /// Old-side line span of the hunk.
+    pub old_lines: u32,
+    /// 1-based first new-side line the hunk covers; 0 when the new side is
+    /// empty (a deleted file).
     pub new_start: u32,
+    /// New-side line span of the hunk.
+    pub new_lines: u32,
     pub lines: Vec<DiffLine>,
 }
 
@@ -47,22 +67,19 @@ pub enum DiffLine {
     Removed(String),
 }
 
-/// Above this many lines on either side of a modified file, the line-level
-/// alignment below (an O(old_lines * new_lines) table) is skipped in favor
-/// of a single "every old line removed, every new line added" hunk. That
-/// table's memory cost grows quadratically, which is fine for source files
-/// (the common case, covered by the Rust/Python/Markdown fixture tests)
-/// but would be a real cost for a large generated file landing in a diff.
-const MAX_DIFF_LINES: usize = 2000;
+/// A file whose old or new blob exceeds this is reported as `is_too_large`
+/// with no hunks — a byte budget, not a line count: the concern is the
+/// cost of interning + serializing a giant generated file into a diff, and
+/// bytes bound that directly regardless of line length.
+const MAX_DIFF_BYTES: usize = 512 * 1024;
 
 /// The diff of commit `commit_id` against its first parent, or against the
 /// empty tree if it has no parent (the root-commit case) — matching how
 /// `git show`/`git log -p` present a root commit's diff. Rename/copy
-/// detection is deliberately disabled (`Options::track_rewrites(None)`): a
-/// renamed-with-changes file then simply appears as a `Deletion` of the old
-/// path plus an `Addition` of the new one, which is a strictly simpler
-/// output shape for this crate's callers (diff rendering, not a rename UI)
-/// to handle than the tree-diff's own three-way `Rewrite` variant.
+/// detection is on (`gix` rewrite tracking): a renamed file is one
+/// `FileDiff` with `is_rename` set and distinct `old_path`/`new_path`,
+/// carrying whatever content also changed, rather than an unrelated
+/// delete + add pair.
 pub fn commit_diff(
     store: &dyn RepoStore,
     name: &str,
@@ -162,15 +179,16 @@ fn resolve_commit_id(
 
 /// Turns a tree-to-tree change set into this crate's `FileDiff` shape.
 /// Shared by `commit_diff` (commit vs first parent) and `diff_refs`
-/// (merge base vs head). Rewrite tracking is disabled so a
-/// renamed-with-changes file shows as a delete + an add.
+/// (merge base vs head). Rewrite tracking is **on**: a renamed file is a
+/// single `Rewrite` change (surfaced with `is_rename`), not an unrelated
+/// delete + add pair.
 fn file_diffs_between(
     repo: &gix::Repository,
     old_tree: Option<&gix::Tree<'_>>,
     new_tree: Option<&gix::Tree<'_>>,
 ) -> Result<Vec<FileDiff>, GitError> {
     let mut options = gix::diff::Options::default();
-    options.track_rewrites(None);
+    options.track_rewrites(Some(gix::diff::Rewrites::default()));
 
     let changes = repo
         .diff_tree_to_tree(old_tree, new_tree, Some(options))
@@ -215,13 +233,43 @@ fn file_diffs_between(
                 }
                 let old_data = object_data(repo, previous_id)?;
                 let new_data = object_data(repo, id)?;
-                file_diff_for_modification(location.to_string(), &old_data, &new_data)
+                file_diff_for_modification(
+                    Some(location.to_string()),
+                    location.to_string(),
+                    &old_data,
+                    &new_data,
+                    false,
+                )
             }
-            // Unreachable in practice: rewrite tracking is disabled above,
-            // so the tree-diff never emits this variant. Handled
-            // explicitly (rather than a wildcard) so a future change to
-            // that call doesn't silently start dropping rewrites here.
-            gix::object::tree::diff::ChangeDetached::Rewrite { .. } => continue,
+            gix::object::tree::diff::ChangeDetached::Rewrite {
+                source_location,
+                source_id,
+                location,
+                id,
+                entry_mode,
+                ..
+            } => {
+                if entry_mode.kind() == EntryKind::Tree {
+                    continue;
+                }
+                let old_path = source_location.to_string();
+                let new_path = location.to_string();
+                if source_id == id {
+                    // A pure rename — no content change to diff.
+                    FileDiff {
+                        old_path: Some(old_path),
+                        new_path: Some(new_path),
+                        hunks: Vec::new(),
+                        is_binary: false,
+                        is_rename: true,
+                        is_too_large: false,
+                    }
+                } else {
+                    let old_data = object_data(repo, source_id)?;
+                    let new_data = object_data(repo, id)?;
+                    file_diff_for_modification(Some(old_path), new_path, &old_data, &new_data, true)
+                }
+            }
         };
         diffs.push(file_diff);
     }
@@ -235,11 +283,26 @@ fn object_data(repo: &gix::Repository, id: gix_hash::ObjectId) -> Result<Vec<u8>
     Ok(std::mem::take(&mut object.data))
 }
 
+/// Splits a blob into display lines the way the rest of this crate does —
+/// `\n`-delimited, newline stripped, lossy UTF-8. Used only for the
+/// whole-file hunks of a pure add / pure delete; a modification's lines
+/// come from `imara-diff`'s own tokenizer.
 fn split_lines(data: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(data)
         .lines()
         .map(str::to_string)
         .collect()
+}
+
+/// One `imara-diff` line token → a display `String`: the tokenizer keeps
+/// the line's own `\n` (and any `\r`), which this crate's `DiffLine`s never
+/// carry, so strip a single trailing EOL.
+fn line_token_to_string(token: &[u8]) -> String {
+    let text = String::from_utf8_lossy(token);
+    text.strip_suffix('\n')
+        .map(|rest| rest.strip_suffix('\r').unwrap_or(rest))
+        .unwrap_or(&text)
+        .to_string()
 }
 
 fn file_diff_for_addition(path: String, data: &[u8]) -> FileDiff {
@@ -249,12 +312,26 @@ fn file_diff_for_addition(path: String, data: &[u8]) -> FileDiff {
             new_path: Some(path),
             hunks: Vec::new(),
             is_binary: true,
+            is_rename: false,
+            is_too_large: false,
+        };
+    }
+    if data.len() > MAX_DIFF_BYTES {
+        return FileDiff {
+            old_path: None,
+            new_path: Some(path),
+            hunks: Vec::new(),
+            is_binary: false,
+            is_rename: false,
+            is_too_large: true,
         };
     }
     let lines = split_lines(data);
     let hunk = DiffHunk {
         old_start: 0,
+        old_lines: 0,
         new_start: if lines.is_empty() { 0 } else { 1 },
+        new_lines: lines.len() as u32,
         lines: lines.into_iter().map(DiffLine::Added).collect(),
     };
     FileDiff {
@@ -262,6 +339,8 @@ fn file_diff_for_addition(path: String, data: &[u8]) -> FileDiff {
         new_path: Some(path),
         hunks: vec![hunk],
         is_binary: false,
+        is_rename: false,
+        is_too_large: false,
     }
 }
 
@@ -272,12 +351,26 @@ fn file_diff_for_deletion(path: String, data: &[u8]) -> FileDiff {
             new_path: None,
             hunks: Vec::new(),
             is_binary: true,
+            is_rename: false,
+            is_too_large: false,
+        };
+    }
+    if data.len() > MAX_DIFF_BYTES {
+        return FileDiff {
+            old_path: Some(path),
+            new_path: None,
+            hunks: Vec::new(),
+            is_binary: false,
+            is_rename: false,
+            is_too_large: true,
         };
     }
     let lines = split_lines(data);
     let hunk = DiffHunk {
         old_start: if lines.is_empty() { 0 } else { 1 },
+        old_lines: lines.len() as u32,
         new_start: 0,
+        new_lines: 0,
         lines: lines.into_iter().map(DiffLine::Removed).collect(),
     };
     FileDiff {
@@ -285,83 +378,93 @@ fn file_diff_for_deletion(path: String, data: &[u8]) -> FileDiff {
         new_path: None,
         hunks: vec![hunk],
         is_binary: false,
+        is_rename: false,
+        is_too_large: false,
     }
 }
 
-fn file_diff_for_modification(path: String, old_data: &[u8], new_data: &[u8]) -> FileDiff {
-    if is_binary_data(old_data) || is_binary_data(new_data) {
-        return FileDiff {
-            old_path: Some(path.clone()),
-            new_path: Some(path),
-            hunks: Vec::new(),
-            is_binary: true,
-        };
-    }
-    let old_lines = split_lines(old_data);
-    let new_lines = split_lines(new_data);
-    let lines = diff_lines(&old_lines, &new_lines);
-    let hunk = DiffHunk {
-        old_start: if old_lines.is_empty() { 0 } else { 1 },
-        new_start: if new_lines.is_empty() { 0 } else { 1 },
-        lines,
+/// The line-level diff of one modified (or renamed-with-changes) file.
+/// `old_path` is `None` only when the caller has none to give; `is_rename`
+/// is threaded through from the tree-diff.
+fn file_diff_for_modification(
+    old_path: Option<String>,
+    new_path: String,
+    old_data: &[u8],
+    new_data: &[u8],
+    is_rename: bool,
+) -> FileDiff {
+    let base = |hunks: Vec<DiffHunk>, is_binary: bool, is_too_large: bool| FileDiff {
+        old_path: old_path.clone(),
+        new_path: Some(new_path.clone()),
+        hunks,
+        is_binary,
+        is_rename,
+        is_too_large,
     };
-    FileDiff {
-        old_path: Some(path.clone()),
-        new_path: Some(path),
-        hunks: vec![hunk],
-        is_binary: false,
+
+    if is_binary_data(old_data) || is_binary_data(new_data) {
+        return base(Vec::new(), true, false);
     }
+    if old_data.len() > MAX_DIFF_BYTES || new_data.len() > MAX_DIFF_BYTES {
+        return base(Vec::new(), false, true);
+    }
+    base(histogram_hunks(old_data, new_data), false, false)
 }
 
-/// Aligns `old` and `new` by their longest common subsequence (a plain O(n*m)
-/// dynamic-programming table — see `MAX_DIFF_LINES` for the size at which
-/// this is skipped), then walks the alignment to emit context/removed/added
-/// lines in original order.
-fn diff_lines(old: &[String], new: &[String]) -> Vec<DiffLine> {
-    if old.len() > MAX_DIFF_LINES || new.len() > MAX_DIFF_LINES {
-        let mut lines = Vec::with_capacity(old.len() + new.len());
-        lines.extend(old.iter().cloned().map(DiffLine::Removed));
-        lines.extend(new.iter().cloned().map(DiffLine::Added));
-        return lines;
-    }
+/// `imara-diff` histogram alignment (with Git's slider heuristics), split
+/// into unified-diff hunks with [`DIFF_CONTEXT_LINES`] of context via
+/// `gix-diff`'s `UnifiedDiff` renderer.
+fn histogram_hunks(old_data: &[u8], new_data: &[u8]) -> Vec<DiffHunk> {
+    use gix::diff::blob::unified_diff::{ConsumeHunk, ContextSize, DiffLineKind, HunkHeader};
+    use gix::diff::blob::{diff_with_slider_heuristics, Algorithm, InternedInput, UnifiedDiff};
 
-    let n = old.len();
-    let m = new.len();
-    let mut lcs = vec![vec![0u32; m + 1]; n + 1];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            lcs[i][j] = if old[i] == new[j] {
-                lcs[i + 1][j + 1] + 1
-            } else {
-                lcs[i + 1][j].max(lcs[i][j + 1])
-            };
+    let input = InternedInput::new(old_data, new_data);
+    let diff = diff_with_slider_heuristics(Algorithm::Histogram, &input);
+
+    #[derive(Default)]
+    struct Collector(Vec<DiffHunk>);
+    impl ConsumeHunk for Collector {
+        type Out = Vec<DiffHunk>;
+        fn consume_hunk(
+            &mut self,
+            header: HunkHeader,
+            lines: &[(DiffLineKind, &[u8])],
+        ) -> std::io::Result<()> {
+            let lines = lines
+                .iter()
+                .map(|&(kind, content)| {
+                    let text = line_token_to_string(content);
+                    match kind {
+                        DiffLineKind::Context => DiffLine::Context(text),
+                        DiffLineKind::Add => DiffLine::Added(text),
+                        DiffLineKind::Remove => DiffLine::Removed(text),
+                    }
+                })
+                .collect();
+            self.0.push(DiffHunk {
+                old_start: header.before_hunk_start,
+                old_lines: header.before_hunk_len,
+                new_start: header.after_hunk_start,
+                new_lines: header.after_hunk_len,
+                lines,
+            });
+            Ok(())
+        }
+        fn finish(self) -> Self::Out {
+            self.0
         }
     }
 
-    let mut lines = Vec::with_capacity(n + m);
-    let (mut i, mut j) = (0usize, 0usize);
-    while i < n && j < m {
-        if old[i] == new[j] {
-            lines.push(DiffLine::Context(old[i].clone()));
-            i += 1;
-            j += 1;
-        } else if lcs[i + 1][j] >= lcs[i][j + 1] {
-            lines.push(DiffLine::Removed(old[i].clone()));
-            i += 1;
-        } else {
-            lines.push(DiffLine::Added(new[j].clone()));
-            j += 1;
-        }
-    }
-    while i < n {
-        lines.push(DiffLine::Removed(old[i].clone()));
-        i += 1;
-    }
-    while j < m {
-        lines.push(DiffLine::Added(new[j].clone()));
-        j += 1;
-    }
-    lines
+    UnifiedDiff::new(
+        &diff,
+        &input,
+        Collector::default(),
+        ContextSize::symmetrical(DIFF_CONTEXT_LINES),
+    )
+    .consume()
+    // `Collector::consume_hunk` is infallible — the only `Err` path is a
+    // delegate that returns one, which this one never does.
+    .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -580,5 +683,153 @@ mod tests {
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].new_path.as_deref(), Some("feature.txt"));
         assert_eq!(diffs[0].old_path, None);
+    }
+
+    /// A file with two changes far enough apart that a 3-line context
+    /// window can't bridge them must come back as *two* hunks, each with a
+    /// correct `@@` header — the whole point of moving off the old
+    /// single-hunk `diff_lines`.
+    #[tokio::test]
+    async fn a_modification_with_two_distant_edits_yields_two_windowed_hunks() {
+        let test = TestStore::new("multi-hunk");
+        let locks = LockRegistry::new();
+        create_repo(&test.store, &locks, "alice/demo")
+            .await
+            .unwrap();
+        let repo_dir = test.store.repo_dir("alice/demo");
+
+        let numbered = |a: &str, b: &str| -> Vec<u8> {
+            let mut lines: Vec<String> = (1..=40).map(|n| format!("line {n}")).collect();
+            lines[1] = a.to_string();
+            lines[37] = b.to_string();
+            (lines.join("\n") + "\n").into_bytes()
+        };
+
+        let root = commit_files(
+            &repo_dir,
+            None,
+            &[("f.txt", &numbered("line 2", "line 38"))],
+        );
+        let second = commit_files(
+            &repo_dir,
+            Some(root),
+            &[("f.txt", &numbered("line 2 CHANGED", "line 38 CHANGED"))],
+        );
+
+        let diffs = commit_diff(&test.store, "alice/demo", &second.to_string()).unwrap();
+        let file = diffs
+            .iter()
+            .find(|d| d.new_path.as_deref() == Some("f.txt"))
+            .expect("f.txt diff present");
+        assert!(!file.is_binary && !file.is_too_large && !file.is_rename);
+        assert_eq!(file.hunks.len(), 2, "two separated edits → two hunks");
+
+        // First hunk brackets line 2, second brackets line 38 — the `@@`
+        // offsets place each window where the change is.
+        assert!(
+            file.hunks[0].old_start <= 2 && file.hunks[0].old_start + file.hunks[0].old_lines > 2
+        );
+        assert!(
+            file.hunks[1].old_start <= 38 && file.hunks[1].old_start + file.hunks[1].old_lines > 38
+        );
+        for hunk in &file.hunks {
+            assert!(hunk
+                .lines
+                .iter()
+                .any(|l| matches!(l, DiffLine::Removed(s) if s.starts_with("line "))));
+            assert!(hunk
+                .lines
+                .iter()
+                .any(|l| matches!(l, DiffLine::Added(s) if s.ends_with("CHANGED"))));
+        }
+    }
+
+    /// Moving a file to a new path (with a small content tweak) is one
+    /// `FileDiff` with `is_rename` set and both paths populated — not an
+    /// unrelated delete + add.
+    #[tokio::test]
+    async fn a_renamed_file_is_reported_as_a_single_rename_change() {
+        let test = TestStore::new("rename");
+        let locks = LockRegistry::new();
+        create_repo(&test.store, &locks, "alice/demo")
+            .await
+            .unwrap();
+        let repo_dir = test.store.repo_dir("alice/demo");
+
+        let body: Vec<u8> = (1..=30)
+            .map(|n| format!("shared content line {n}\n"))
+            .collect::<String>()
+            .into_bytes();
+        let mut changed = body.clone();
+        changed.extend_from_slice(b"one extra line\n");
+
+        let root = commit_files(&repo_dir, None, &[("src/old_name.rs", &body)]);
+
+        // Second commit: delete the old path, add the near-identical new one.
+        let repo = gix::open(&repo_dir).unwrap();
+        let parent_tree_id = repo.find_commit(root).unwrap().tree_id().unwrap().detach();
+        let mut editor = repo.edit_tree(parent_tree_id).unwrap();
+        editor.remove("src/old_name.rs").unwrap();
+        let blob = repo.write_blob(&changed).unwrap().detach();
+        editor
+            .upsert("src/new_name.rs", gix_object::tree::EntryKind::Blob, blob)
+            .unwrap();
+        let tree_id = editor.write().unwrap().detach();
+        let sig = gix_actor::Signature {
+            name: "Test Author".into(),
+            email: "author@example.com".into(),
+            time: gix::date::Time::new(1_700_000_200, 0),
+        };
+        let commit = gix_object::Commit {
+            tree: tree_id,
+            parents: [root].into_iter().collect(),
+            author: sig.clone(),
+            committer: sig,
+            encoding: None,
+            message: "rename".into(),
+            extra_headers: Vec::new(),
+        };
+        let second = repo.write_object(commit).unwrap().detach();
+        crate::force_set_ref(&repo, "refs/heads/main", second).unwrap();
+
+        let diffs = commit_diff(&test.store, "alice/demo", &second.to_string()).unwrap();
+        assert_eq!(diffs.len(), 1, "one change, not a delete + an add");
+        let file = &diffs[0];
+        assert!(file.is_rename);
+        assert_eq!(file.old_path.as_deref(), Some("src/old_name.rs"));
+        assert_eq!(file.new_path.as_deref(), Some("src/new_name.rs"));
+        assert!(file
+            .hunks
+            .iter()
+            .flat_map(|h| &h.lines)
+            .any(|l| matches!(l, DiffLine::Added(s) if s == "one extra line")));
+    }
+
+    /// A modified file past the byte budget comes back flagged, with no
+    /// hunks — the caller renders "diff too large" rather than the file.
+    #[tokio::test]
+    async fn an_oversized_modification_is_flagged_and_carries_no_hunks() {
+        let test = TestStore::new("too-large");
+        let locks = LockRegistry::new();
+        create_repo(&test.store, &locks, "alice/demo")
+            .await
+            .unwrap();
+        let repo_dir = test.store.repo_dir("alice/demo");
+
+        let big = |tag: u8| -> Vec<u8> {
+            let mut v = vec![b'x'; super::MAX_DIFF_BYTES + 1024];
+            v[0] = tag;
+            v
+        };
+        let root = commit_files(&repo_dir, None, &[("generated.bin", &big(b'a'))]);
+        let second = commit_files(&repo_dir, Some(root), &[("generated.bin", &big(b'b'))]);
+
+        let diffs = commit_diff(&test.store, "alice/demo", &second.to_string()).unwrap();
+        let file = diffs
+            .iter()
+            .find(|d| d.new_path.as_deref() == Some("generated.bin"))
+            .expect("generated.bin diff present");
+        assert!(file.is_too_large);
+        assert!(file.hunks.is_empty());
     }
 }

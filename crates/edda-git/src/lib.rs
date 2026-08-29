@@ -473,6 +473,19 @@ pub(crate) fn open_repo_dir(
     result
 }
 
+/// The hex commit id at the tip of `branch` in `name`'s repository — used
+/// by the merge path to find a pull request's head commit for its
+/// required-status-check gate. `NotFound` if the branch doesn't exist.
+pub fn resolve_branch_commit(
+    store: &dyn RepoStore,
+    name: &str,
+    branch: &str,
+) -> Result<String, GitError> {
+    let repo = open_repo_dir(store, name)?;
+    let commit = open_and_resolve(&repo, Some(branch))?;
+    Ok(commit.id().to_string())
+}
+
 /// Lists the entries of the directory at `path` (root if empty) as it
 /// existed at `branch`'s tip (or the default branch if `None`). Directories
 /// sort before files, then alphabetically within each group.

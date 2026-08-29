@@ -354,6 +354,31 @@ pub struct CreateBranchProtectionRequest {
     pub push_allowlist_usernames: Vec<String>,
 }
 
+// ─────────────────────────── commit statuses ──────────────────────────
+
+/// One external CI verdict on a commit — `GET/POST
+/// /api/v1/repos/{owner}/{repo}/statuses/{sha}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitStatusDto {
+    pub context: String,
+    /// `pending` | `success` | `failure` | `error`.
+    pub state: String,
+    pub target_url: Option<String>,
+    pub description: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateCommitStatusRequest {
+    pub context: String,
+    pub state: String,
+    #[serde(default)]
+    pub target_url: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 // ─────────────────────────────── issues ───────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

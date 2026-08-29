@@ -141,6 +141,96 @@ pub async fn update_repo_size(
     .map_err(|err| err.to_string())
 }
 
+/// Reconciles a pull request's automatic review requests against its
+/// repository's CODEOWNERS file: whoever owns a path the PR changes is
+/// asked to review it. Same-repository PRs only for now (a fork-sourced
+/// PR's diff needs the imported pull-head, which isn't refreshed until
+/// merge time — a Phase 11 refinement). Best-effort: a missing CODEOWNERS,
+/// an unresolvable owner, or a closed PR are all silent successes.
+pub async fn sync_review_requests(
+    pool: DbPool,
+    store: Arc<dyn RepoStore>,
+    payload: JobPayload,
+) -> Result<(), String> {
+    let JobPayload::SyncReviewRequests { pull_request_id } = payload else {
+        return Err("wrong payload kind routed to the sync_review_requests handler".to_string());
+    };
+    let Some(pr) = edda_db::PullRequestRepo::find_by_id(&pool, pull_request_id)
+        .await
+        .map_err(|err| err.to_string())?
+    else {
+        return Ok(());
+    };
+    if !pr.state.is_open() || pr.source.repository_id != pr.repository_id {
+        return Ok(());
+    }
+    let Some((repository, owner_username)) =
+        edda_db::RepositoryRepo::find_by_id_with_owner_username(&pool, pr.repository_id)
+            .await
+            .map_err(|err| err.to_string())?
+    else {
+        return Ok(());
+    };
+    let identity = format!("{owner_username}/{}", repository.name);
+    let target = pr.target.clone();
+    let source = pr.source.branch.clone();
+
+    // The git reads (CODEOWNERS blob + the PR diff) on the blocking pool.
+    let reviewers = tokio::task::spawn_blocking(move || {
+        let codeowners_text = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"]
+            .iter()
+            .find_map(|path| {
+                edda_git::read_blob(store.as_ref(), &identity, Some(&target), path)
+                    .ok()
+                    .and_then(|blob| blob.content)
+            });
+        let Some(text) = codeowners_text else {
+            return Vec::new();
+        };
+        let owners = edda_domain::CodeOwners::parse(&text);
+        if owners.is_empty() {
+            return Vec::new();
+        }
+        let changed: Vec<String> = edda_git::diff_refs(
+            store.as_ref(),
+            &identity,
+            &format!("refs/heads/{target}"),
+            &format!("refs/heads/{source}"),
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|file| file.new_path.or(file.old_path))
+        .collect();
+        owners.owners_for_paths(&changed)
+    })
+    .await
+    .map_err(|_| "codeowners read task panicked".to_string())?;
+
+    for login in reviewers {
+        if login.contains('/') {
+            continue; // `@org/team` — team review requests are Phase 11
+        }
+        let Some(user) = edda_db::UserRepo::find_by_username(&pool, &login)
+            .await
+            .map_err(|err| err.to_string())?
+        else {
+            continue;
+        };
+        if user.id == pr.author_id {
+            continue;
+        }
+        edda_db::ReviewRequestRepo::insert_if_new(
+            &pool,
+            edda_domain::ReviewRequestId::new(),
+            pr.id,
+            user.id,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
 /// The full delivery attempt: fetch the webhook + its decrypted secret,
 /// sign the already-built payload, re-resolve and re-check the target
 /// (`edda_app::security::ssrf::resolve_and_check` — independently of whatever check

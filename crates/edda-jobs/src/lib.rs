@@ -22,7 +22,7 @@ use std::time::Duration;
 use rand::RngExt;
 use tokio::sync::Semaphore;
 
-use edda_db::{DbPool, EventRepo, JobRepo};
+use edda_db::{DbPool, EventRepo, JobRepo, PullRequestRepo};
 use edda_domain::{
     next_retry_at, DomainEvent, EventId, JobId, JobKind, JobPayload, JobRecord, RepositoryId,
     UserId,
@@ -56,6 +56,10 @@ impl HandlerRegistry {
 }
 
 pub(crate) const DEFAULT_MAX_ATTEMPTS: u32 = 5;
+
+/// The all-zero object id git uses for "no such ref" — a create's `old`
+/// or a delete's `new`.
+pub(crate) const ZERO_HEX: &str = "0000000000000000000000000000000000000000";
 
 pub(crate) fn now_unix() -> i64 {
     std::time::SystemTime::now()
@@ -105,6 +109,21 @@ pub async fn record_push(
         return Ok(());
     }
 
+    // Which open PRs each pushed branch is the source of — read outside
+    // the transaction (idempotent) so it stays short. Non-`refs/heads/*`
+    // refs were already filtered out above.
+    let mut review_sync_targets = Vec::new();
+    for (ref_name, _, new) in &branch_refs {
+        if *new == crate::ZERO_HEX {
+            continue; // a branch delete syncs nothing
+        }
+        let branch = ref_name.strip_prefix("refs/heads/").unwrap_or(ref_name);
+        for pr in PullRequestRepo::list_open_with_source_branch(pool, repository_id, branch).await?
+        {
+            review_sync_targets.push(pr.id);
+        }
+    }
+
     let mut tx = pool.begin().await?;
     for (ref_name, old, new) in &branch_refs {
         EventRepo::append(
@@ -128,6 +147,16 @@ pub async fn record_push(
         DEFAULT_MAX_ATTEMPTS,
     )
     .await?;
+    for pull_request_id in review_sync_targets {
+        JobRepo::enqueue(
+            &mut tx,
+            JobId::new(),
+            &JobPayload::SyncReviewRequests { pull_request_id },
+            now_unix(),
+            DEFAULT_MAX_ATTEMPTS,
+        )
+        .await?;
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -250,6 +279,28 @@ mod tests {
             .await
             .unwrap();
 
+        // An open PR sourced from `feature` — a push to it enqueues a
+        // CODEOWNERS review-request sync for that PR.
+        let pr_id = edda_domain::PullRequestId::new();
+        PullRequestRepo::insert(
+            &pool,
+            pr_id,
+            repo.id,
+            edda_db::NewPullRequest {
+                title: "wip",
+                body: None,
+                author_id: alice,
+                source: &edda_domain::PrRef {
+                    repository_id: repo.id,
+                    branch: "feature".to_string(),
+                },
+                target: "main",
+                draft: false,
+            },
+        )
+        .await
+        .unwrap();
+
         record_push(
             &pool,
             repo.id,
@@ -281,11 +332,15 @@ mod tests {
             .all(|e| matches!(e.event, edda_domain::DomainEvent::BranchPushed { .. })));
 
         let jobs = JobRepo::claim_batch(&pool, now_unix(), 10).await.unwrap();
-        assert_eq!(jobs.len(), 1);
-        assert!(matches!(
-            jobs[0].payload,
+        assert_eq!(jobs.len(), 2, "one UpdateRepoSize + one SyncReviewRequests");
+        assert!(jobs.iter().any(|j| matches!(
+            j.payload,
             JobPayload::UpdateRepoSize { repository_id } if repository_id == repo.id
-        ));
+        )));
+        assert!(jobs.iter().any(|j| matches!(
+            j.payload,
+            JobPayload::SyncReviewRequests { pull_request_id } if pull_request_id == pr_id
+        )));
     }
 
     #[tokio::test]

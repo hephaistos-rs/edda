@@ -209,6 +209,11 @@ fn main() {
                 let store = store.clone();
                 move |payload| jobs::update_repo_size(pool.clone(), store.clone(), payload)
             });
+            handlers.register(edda_domain::JobKind::SyncReviewRequests, {
+                let pool = pool.clone();
+                let store = store.clone();
+                move |payload| jobs::sync_review_requests(pool.clone(), store.clone(), payload)
+            });
             edda_jobs::spawn_poller(
                 pool.clone(),
                 std::sync::Arc::new(handlers),

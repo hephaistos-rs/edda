@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use edda_auth::AuthorizationService;
 use edda_db::{
-    DbPool, EventRepo, NewPullRequest, PrCommentRepo, PrReviewRepo, PullRequestRepo, RepositoryRepo,
+    BranchProtectionRepo, CommitStatusRepo, DbPool, EventRepo, NewPullRequest, PrCommentRepo,
+    PrReviewRepo, PullRequestRepo, RepositoryRepo,
 };
 use edda_domain::{
     parse_head_ref, ActorContext, CloseReason, DiffAnchor, DomainEvent, EventId, MentionSource,
@@ -303,6 +304,46 @@ impl PullRequestService {
         self.authz
             .check_merge_pull_request(actor, &repository, &pr.target, &reviews)
             .await?;
+
+        // Required-status-check gate: when the target branch's protection
+        // rule lists check contexts, the PR's head commit (the tip of its
+        // source branch, in its source repository) must have a green
+        // status for each. External CI reports these via the status API.
+        if let Some(rule) =
+            BranchProtectionRepo::find_matching(&self.pool, repository.id, &pr.target).await?
+        {
+            if !rule.required_status_checks.is_empty() {
+                let head_identity = if pr.source.repository_id == repository.id {
+                    git_identity(owner, name)
+                } else {
+                    let (source_repo, source_owner) =
+                        RepositoryRepo::find_by_id_with_owner_username(
+                            &self.pool,
+                            pr.source.repository_id,
+                        )
+                        .await?
+                        .ok_or(ServiceError::NotFound)?;
+                    git_identity(&source_owner, &source_repo.name)
+                };
+                let head_sha = edda_git::resolve_branch_commit(
+                    self.store.as_ref(),
+                    &head_identity,
+                    &pr.source.branch,
+                )?;
+                // Statuses are reported against the *target* repository
+                // (where the PR and its CI configuration live) keyed by the
+                // head commit sha.
+                let statuses =
+                    CommitStatusRepo::list_for_commit(&self.pool, repository.id, &head_sha).await?;
+                if !edda_domain::required_checks_satisfied(&rule.required_status_checks, &statuses)
+                {
+                    return Err(ServiceError::Conflict(
+                        "the required status checks are not all passing on the head commit"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
 
         let identity = git_identity(owner, name);
         let lock = self.locks.lock_for(&identity);

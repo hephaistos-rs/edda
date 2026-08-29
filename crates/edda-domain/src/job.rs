@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{JobId, RepositoryId, WebhookId};
+use crate::ids::{JobId, PullRequestId, RepositoryId, WebhookId};
 use crate::notification::{NotificationKind, NotificationSubject};
 use crate::webhook::WebhookEvent;
 
@@ -36,6 +36,10 @@ pub enum JobPayload {
     /// — enqueued by the receive path after a push, read by the next
     /// push's quota check.
     UpdateRepoSize { repository_id: RepositoryId },
+    /// Reconcile one pull request's automatic review requests against its
+    /// repository's CODEOWNERS file — enqueued by the receive path when a
+    /// push updates the PR's source branch.
+    SyncReviewRequests { pull_request_id: PullRequestId },
 }
 
 /// A `HashMap`-friendly discriminant for `JobPayload`: the job poller's
@@ -48,6 +52,7 @@ pub enum JobKind {
     CreateNotification,
     SendEmail,
     UpdateRepoSize,
+    SyncReviewRequests,
 }
 
 impl JobPayload {
@@ -57,6 +62,7 @@ impl JobPayload {
             JobPayload::CreateNotification { .. } => JobKind::CreateNotification,
             JobPayload::SendEmail { .. } => JobKind::SendEmail,
             JobPayload::UpdateRepoSize { .. } => JobKind::UpdateRepoSize,
+            JobPayload::SyncReviewRequests { .. } => JobKind::SyncReviewRequests,
         }
     }
 }
@@ -70,6 +76,7 @@ impl JobKind {
             JobKind::CreateNotification => "create_notification",
             JobKind::SendEmail => "send_email",
             JobKind::UpdateRepoSize => "update_repo_size",
+            JobKind::SyncReviewRequests => "sync_review_requests",
         }
     }
 }

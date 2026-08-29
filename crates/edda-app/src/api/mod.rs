@@ -31,6 +31,7 @@ pub mod pulls;
 pub mod releases;
 pub mod repo_browse;
 pub mod repos;
+pub mod statuses;
 pub mod teams;
 pub mod webhooks;
 
@@ -185,6 +186,7 @@ pub fn routes() -> Router<AppState> {
         .merge(releases::routes())
         .merge(webhooks::routes())
         .merge(branch_protection::routes())
+        .merge(statuses::routes())
         .merge(collaborators::routes())
         .merge(deploy_keys::routes())
         .merge(orgs::routes())

@@ -484,6 +484,27 @@ async fn webhooks_branch_protection_and_collaborators_round_trip() {
         200
     );
 
+    // commit status: external CI reports a verdict, then it reads back.
+    let sha = "a".repeat(40);
+    let posted = h
+        .post(&format!("/api/v1/repos/alice/infra/statuses/{sha}"))
+        .json(&json!({ "context": "ci/build", "state": "success", "target_url": "https://ci.example/1" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(posted.status(), 200, "{}", posted.text().await.unwrap());
+    let listed: serde_json::Value = h
+        .get(&format!("/api/v1/repos/alice/infra/statuses/{sha}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed[0]["context"], "ci/build");
+    assert_eq!(listed[0]["state"], "success");
+
     // collaborator add / list / remove
     let bob = UserId::new();
     UserRepo::insert(&h.pool, bob, "bob", "bob@example.com", "x")

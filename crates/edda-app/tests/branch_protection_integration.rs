@@ -436,3 +436,158 @@ async fn a_push_over_the_repository_size_quota_is_rejected() {
     let _ = std::fs::remove_dir_all(&work_dir);
     let _ = std::fs::remove_dir_all(&store_root);
 }
+
+/// A pull request whose target branch requires status checks cannot merge
+/// until the head commit has a `success` status for every required
+/// context — reported through the status API.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_required_status_check_blocks_a_merge_until_it_reports_success() {
+    if !tool_available("git") {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+
+    let pool = edda_db::test_pool().await;
+    let store_root = temp_dir("status-store");
+    let store: Arc<dyn RepoStore> = Arc::new(LocalFsStore::new(store_root.clone()));
+    let locks = Arc::new(LockRegistry::new());
+
+    let alice_id = UserId::new();
+    edda_db::UserRepo::insert(&pool, alice_id, "alice", "alice@example.com", "unused")
+        .await
+        .unwrap();
+    let (alice_token, _) = tokens::create(&pool, alice_id, "ci").await.unwrap();
+
+    edda_git::create_repo(store.as_ref(), &locks, "alice/demo")
+        .await
+        .unwrap();
+    let repository = Repository {
+        id: RepositoryId::new(),
+        owner: RepositoryOwner::User(alice_id),
+        name: "demo".to_string(),
+        description: None,
+        visibility: Visibility::Public,
+        forked_from: None,
+    };
+    RepositoryRepo::insert_with_owner(&pool, &repository, alice_id)
+        .await
+        .unwrap();
+
+    let state = AppState {
+        pool: pool.clone(),
+        store: store.clone(),
+        locks: locks.clone(),
+        authz: AuthorizationService::new(pool.clone()),
+        backend: Backend::new(pool.clone()),
+        config: Default::default(),
+    };
+    let addr = spawn_server(state).await;
+
+    let work_dir = temp_dir("status-work");
+    std::fs::create_dir_all(&work_dir).unwrap();
+    let remote = format!("http://ci:{alice_token}@{addr}/alice/demo.git");
+    run(&work_dir, "git", &["clone", &remote, "repo"]);
+    let repo_dir = work_dir.join("repo");
+    std::fs::write(repo_dir.join("README.md"), b"# demo\n").unwrap();
+    run(&repo_dir, "git", &["add", "README.md"]);
+    run(&repo_dir, "git", &["commit", "-m", "seed main"]);
+    run(
+        &repo_dir,
+        "git",
+        &["push", "origin", "HEAD:refs/heads/main"],
+    );
+    run(&repo_dir, "git", &["checkout", "-b", "feature"]);
+    std::fs::write(repo_dir.join("feature.txt"), b"new\n").unwrap();
+    run(&repo_dir, "git", &["add", "feature.txt"]);
+    run(&repo_dir, "git", &["commit", "-m", "the feature"]);
+    run(
+        &repo_dir,
+        "git",
+        &["push", "origin", "HEAD:refs/heads/feature"],
+    );
+
+    let pr_id = edda_domain::PullRequestId::new();
+    let pr_number = edda_db::PullRequestRepo::insert(
+        &pool,
+        pr_id,
+        repository.id,
+        edda_db::NewPullRequest {
+            title: "Add the feature",
+            body: None,
+            author_id: alice_id,
+            source: &edda_domain::PrRef {
+                repository_id: repository.id,
+                branch: "feature".to_string(),
+            },
+            target: "main",
+            draft: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    BranchProtectionRepo::upsert_by_pattern(
+        &pool,
+        BranchProtectionRuleId::new(),
+        repository.id,
+        "main",
+        &edda_db::BranchProtectionSettings {
+            required_status_checks: vec!["ci/test".to_string()],
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let service = edda_app::services::PullRequestService::new(
+        pool.clone(),
+        store.clone(),
+        locks.clone(),
+        AuthorizationService::new(pool.clone()),
+    );
+
+    // No status yet — the merge is blocked with a clear message.
+    let blocked = service
+        .merge(
+            &edda_domain::ActorContext::User(alice_id),
+            "alice",
+            "demo",
+            pr_number,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&blocked, edda_app::services::ServiceError::Conflict(msg) if msg.contains("status checks")),
+        "expected a status-check conflict, got {blocked:?}"
+    );
+
+    // External CI reports the required context green on the head commit.
+    let head_sha =
+        edda_git::resolve_branch_commit(store.as_ref(), "alice/demo", "feature").unwrap();
+    edda_db::CommitStatusRepo::upsert(
+        &pool,
+        edda_domain::CommitStatusId::new(),
+        repository.id,
+        &head_sha,
+        "ci/test",
+        edda_domain::CommitStatusState::Success,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Now the merge goes through.
+    service
+        .merge(
+            &edda_domain::ActorContext::User(alice_id),
+            "alice",
+            "demo",
+            pr_number,
+        )
+        .await
+        .expect("merge succeeds once the required status is green");
+
+    let _ = std::fs::remove_dir_all(&work_dir);
+    let _ = std::fs::remove_dir_all(&store_root);
+}

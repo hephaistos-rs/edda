@@ -5,6 +5,7 @@
 
 pub mod access;
 pub mod branch_protection;
+pub mod codeowners;
 pub mod commit_status;
 pub mod deploy_key;
 pub mod event;
@@ -36,6 +37,7 @@ pub use access::{
     RepositoryScope, TokenScope,
 };
 pub use branch_protection::{branch_pattern_matches, BranchProtectionRule};
+pub use codeowners::{CodeOwners, CodeOwnersRule};
 pub use commit_status::{required_checks_satisfied, CommitStatus, CommitStatusState};
 pub use deploy_key::DeployKey;
 pub use event::{DomainEvent, DomainEventKind, MentionSource};

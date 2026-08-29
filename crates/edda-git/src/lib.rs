@@ -1,5 +1,6 @@
 pub mod archive;
 pub mod blame;
+pub mod changelog;
 pub mod diff;
 pub mod history;
 pub mod hooks;
@@ -17,6 +18,7 @@ pub mod transfer;
 
 pub use archive::{archive, ArchiveFormat};
 pub use blame::{blame, Blame, BlameHunk};
+pub use changelog::{changelog_entries, changelog_markdown, ChangelogEntry};
 pub use diff::{commit_diff, diff_refs, DiffHunk, DiffLine, FileDiff};
 pub use hooks::{AppliedRef, ReceiveChecks, ReceiveOutcome};
 pub use merge::{
@@ -26,7 +28,7 @@ pub use merge::{
 pub use refs::{force_set_ref, point_head_at, update_refs, RefUpdate, ZERO_ID};
 pub use search::{search_tree, SearchMatch};
 pub use store::repo_storage_bytes;
-pub use tags::{create_tag, list_tags, resolve_tag};
+pub use tags::{create_annotated_tag, create_tag, list_tags, resolve_tag};
 pub use transfer::import_branch_tip;
 
 use std::collections::HashMap;

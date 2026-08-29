@@ -1,9 +1,10 @@
-//! Lightweight tags: `list_tags`/`resolve_tag`/`create_tag`, following the
-//! same shape as this crate's branch functions (`list_branches`,
-//! `open_and_resolve`) — a tag is just a ref under `refs/tags/<name>`
-//! pointing directly at a commit, no annotated-tag object. Used by
-//! `edda-web`'s release-creation flow (a release's `target_commit` is
-//! resolved once via `create_tag`/`resolve_tag`, then stored — see
+//! Tags: `list_tags`/`resolve_tag`/`create_tag` (lightweight —
+//! `refs/tags/<name>` straight to a commit) and `create_annotated_tag`
+//! (writes a real `tag` object, as `ReleaseService` does since Phase 11).
+//! Follows the same shape as this crate's branch functions
+//! (`list_branches`, `open_and_resolve`). Used by `edda-web`'s
+//! release-creation flow (a release's `target_commit` is resolved once via
+//! `create_tag`/`resolve_tag`, then stored — see
 //! `edda_domain::release::Release`'s doc comment for why a release
 //! doesn't just follow its tag live).
 
@@ -106,6 +107,75 @@ pub fn create_tag(
         Ok(target_hex)
     })();
     record_git_op("git.create_tag", start, &result);
+    result
+}
+
+/// Like [`create_tag`], but writes a real annotated `tag` object (with a
+/// tagger and a message) and points `refs/tags/<tag>` at *that*, not
+/// straight at the commit. Returns the resolved **commit** id (not the tag
+/// object id) so the caller stores the same immutable `target_commit` it
+/// would for a lightweight tag.
+pub fn create_annotated_tag(
+    store: &dyn RepoStore,
+    name: &str,
+    tag: &str,
+    target: &str,
+    tagger_name: &str,
+    tagger_email: &str,
+    message: &str,
+) -> Result<String, GitError> {
+    if !is_valid_tag_name(tag) {
+        return Err(GitError::InvalidName(tag.to_string()));
+    }
+    let repo = open_repo_dir(store, name)?;
+
+    let span = tracing::info_span!("git.create_annotated_tag", repo.name = %name, tag = %tag);
+    let _guard = span.enter();
+    let start = std::time::Instant::now();
+    let result = (|| {
+        let ref_path = repo.git_dir().join("refs").join("tags").join(tag);
+        if ref_path.exists() {
+            return Err(GitError::AlreadyExists(format!("tag {tag} in {name}")));
+        }
+
+        let target_id = repo
+            .rev_parse_single(target)
+            .map_err(|err| GitError::Git(err.to_string()))?
+            .detach();
+        repo.find_commit(target_id)
+            .map_err(|_| GitError::Git(format!("\"{target}\" does not resolve to a commit")))?;
+        let target_hex = target_id.to_string();
+
+        let tag_object = gix_object::Tag {
+            target: target_id,
+            target_kind: gix_object::Kind::Commit,
+            name: tag.into(),
+            tagger: Some(gix_actor::Signature {
+                name: tagger_name.into(),
+                email: tagger_email.into(),
+                time: gix::date::Time::now_utc(),
+            }),
+            message: message.into(),
+            pgp_signature: None,
+        };
+        let tag_object_id = repo
+            .write_object(&tag_object)
+            .map_err(|err| GitError::Git(err.to_string()))?
+            .detach();
+
+        crate::refs::update_refs(
+            &repo,
+            &[crate::refs::RefUpdate {
+                name: format!("refs/tags/{tag}"),
+                expected_old: ZERO_ID.to_string(),
+                new: tag_object_id.to_string(),
+            }],
+            "tag: create annotated",
+        )?;
+
+        Ok(target_hex)
+    })();
+    record_git_op("git.create_annotated_tag", start, &result);
     result
 }
 
@@ -230,6 +300,52 @@ mod tests {
         create_tag(&test.store, "alice/demo", "v1", "main").unwrap();
         let err = create_tag(&test.store, "alice/demo", "v1", "main").unwrap_err();
         assert!(matches!(err, GitError::AlreadyExists(_)));
+    }
+
+    #[tokio::test]
+    async fn an_annotated_tag_writes_a_tag_object_and_resolves_to_the_commit() {
+        let test = TestStore::new("annotated");
+        let locks = LockRegistry::new();
+        create_repo(&test.store, &locks, "alice/demo")
+            .await
+            .unwrap();
+        let repo_dir = test.store.repo_dir("alice/demo");
+        let tip = commit_files(&repo_dir, "main", None, &[("README.md", b"hi\n")]);
+
+        let commit = create_annotated_tag(
+            &test.store,
+            "alice/demo",
+            "v1.0.0",
+            "main",
+            "Release Bot",
+            "bot@example.com",
+            "the 1.0 release",
+        )
+        .unwrap();
+        // The returned id is the *commit*, and `resolve_tag` (which peels)
+        // agrees.
+        assert_eq!(commit, tip.to_string());
+        assert_eq!(
+            resolve_tag(&test.store, "alice/demo", "v1.0.0").unwrap(),
+            tip.to_string()
+        );
+
+        // But the ref itself points at a real `tag` object.
+        let repo = gix::open(&repo_dir).unwrap();
+        let tag_ref = repo
+            .find_reference("refs/tags/v1.0.0")
+            .unwrap()
+            .target()
+            .try_id()
+            .unwrap()
+            .to_owned();
+        assert_ne!(tag_ref.to_string(), tip.to_string());
+        let object = repo.find_object(tag_ref).unwrap();
+        assert_eq!(object.kind, gix_object::Kind::Tag);
+        let tag = gix_object::TagRef::from_bytes(&object.data, gix_hash::Kind::Sha1).unwrap();
+        assert_eq!(tag.tagger().unwrap().unwrap().name, "Release Bot");
+        assert_eq!(tag.target(), tip);
+        assert_eq!(tag.name, "v1.0.0");
     }
 
     #[tokio::test]

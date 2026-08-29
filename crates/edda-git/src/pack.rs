@@ -283,7 +283,15 @@ fn extend_queue_from(
                 .map_err(|err| GitError::Git(err.to_string()))?;
             queue.extend(tree.entries.iter().map(|entry| entry.oid.to_owned()));
         }
-        Kind::Blob | Kind::Tag => {}
+        Kind::Tag => {
+            // An annotated tag object points at its target (a commit, or
+            // another tag) — a client that `want`s the tag needs that
+            // closure too, or the fetch unpacks into a broken repo.
+            let tag = gix_object::TagRef::from_bytes(data, gix_hash::Kind::Sha1)
+                .map_err(|err| GitError::Git(err.to_string()))?;
+            queue.push_back(tag.target());
+        }
+        Kind::Blob => {}
     }
     Ok(())
 }

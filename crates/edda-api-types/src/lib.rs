@@ -553,6 +553,11 @@ pub struct CreateReleaseRequest {
     pub draft: bool,
     #[serde(default)]
     pub prerelease: bool,
+    /// When true and `body` is empty, the release body is an
+    /// auto-generated changelog of the commits since the previous
+    /// release's tag.
+    #[serde(default)]
+    pub generate_notes: bool,
 }
 
 /// `POST /api/v1/repos/{owner}/{repo}/releases` answers with the tag it

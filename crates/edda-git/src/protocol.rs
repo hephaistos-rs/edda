@@ -59,8 +59,10 @@ pub const RECEIVE_PACK_CAPABILITIES: &str = "report-status delete-refs ofs-delta
 
 /// HEAD (if it resolves), every local branch, then every tag — everything
 /// a client needs to clone, check out the default branch, and fetch tags.
-/// Edda's tags are lightweight (`refs/tags/<name>` straight to a commit —
-/// see `crate::tags`), so no peeled `^{}` lines are needed.
+/// A lightweight tag advertises one line (`refs/tags/<name>` at its
+/// commit); an annotated tag advertises two — `refs/tags/<name>` at the
+/// tag *object*, then `refs/tags/<name>^{}` at the peeled commit, the
+/// form `git fetch` needs to store the annotation.
 ///
 /// HEAD can be unborn on disk (points at a branch, e.g. "master", that a
 /// push never actually created — see `fix_unborn_head`'s doc comment) even
@@ -69,7 +71,10 @@ pub const RECEIVE_PACK_CAPABILITIES: &str = "report-status delete-refs ofs-delta
 /// to the same branch preference used everywhere else.
 pub fn advertised_refs(repo: &gix::Repository) -> Result<Vec<(ObjectId, String)>, GitError> {
     let mut branches = Vec::new();
-    let mut tags = Vec::new();
+    // Each tag entry: (ref-object id, short name, Some(peeled commit id) iff
+    // annotated). The ref-object id is the tag object for an annotated tag,
+    // the commit for a lightweight one.
+    let mut tags: Vec<(ObjectId, String, Option<ObjectId>)> = Vec::new();
     if let Ok(platform) = repo.references() {
         if let Ok(local) = platform.local_branches() {
             for reference in local.filter_map(Result::ok) {
@@ -80,11 +85,17 @@ pub fn advertised_refs(repo: &gix::Repository) -> Result<Vec<(ObjectId, String)>
         }
         if let Ok(tag_refs) = platform.tags() {
             for mut reference in tag_refs.filter_map(Result::ok) {
-                // A lightweight tag's target *is* the commit id; peel
-                // anyway so a stray annotated tag still advertises its
-                // commit rather than the tag object.
-                if let Ok(id) = reference.peel_to_id() {
-                    tags.push((id.detach(), reference.name().shorten().to_string()));
+                let short = reference.name().shorten().to_string();
+                let Some(direct) = reference.target().try_id().map(|id| id.to_owned()) else {
+                    continue;
+                };
+                let Ok(peeled) = reference.peel_to_id().map(|id| id.detach()) else {
+                    continue;
+                };
+                if direct == peeled {
+                    tags.push((direct, short, None));
+                } else {
+                    tags.push((direct, short, Some(peeled)));
                 }
             }
         }
@@ -109,10 +120,12 @@ pub fn advertised_refs(repo: &gix::Repository) -> Result<Vec<(ObjectId, String)>
             .into_iter()
             .map(|(id, name)| (id, format!("refs/heads/{name}"))),
     );
-    refs.extend(
-        tags.into_iter()
-            .map(|(id, name)| (id, format!("refs/tags/{name}"))),
-    );
+    for (direct, name, peeled) in tags {
+        refs.push((direct, format!("refs/tags/{name}")));
+        if let Some(commit) = peeled {
+            refs.push((commit, format!("refs/tags/{name}^{{}}")));
+        }
+    }
 
     Ok(refs)
 }

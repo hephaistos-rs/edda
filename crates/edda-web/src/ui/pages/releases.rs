@@ -25,6 +25,7 @@ pub fn ReleasesList(owner: String, name: String) -> Element {
     let mut body = use_signal(String::new);
     let mut draft = use_signal(|| false);
     let mut prerelease = use_signal(|| false);
+    let mut generate_notes = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);
     let mut submitting = use_signal(|| false);
 
@@ -42,6 +43,7 @@ pub fn ReleasesList(owner: String, name: String) -> Element {
         let body_value = body.read().clone();
         let draft_value = draft();
         let prerelease_value = prerelease();
+        let generate_notes_value = generate_notes();
         submitting.set(true);
         error.set(None);
         spawn(async move {
@@ -52,6 +54,7 @@ pub fn ReleasesList(owner: String, name: String) -> Element {
                 body: (!body_value.trim().is_empty()).then_some(body_value),
                 draft: draft_value,
                 prerelease: prerelease_value,
+                generate_notes: generate_notes_value,
             };
             let result = api_client::post_ok(&path, &request).await;
             submitting.set(false);
@@ -115,12 +118,18 @@ pub fn ReleasesList(owner: String, name: String) -> Element {
                         "notes"
                         textarea {
                             rows: "4",
-                            class: "border border-line bg-surface px-2.5 py-1.5 font-mono text-xs text-ink focus:border-accent focus:outline-none",
+                            disabled: generate_notes(),
+                            placeholder: if generate_notes() { "auto-generated from the commit log" } else { "" },
+                            class: "border border-line bg-surface px-2.5 py-1.5 font-mono text-xs text-ink focus:border-accent focus:outline-none disabled:opacity-60",
                             value: "{body}",
                             oninput: move |event| body.set(event.value()),
                         }
                     }
                     div { class: "flex gap-4 text-sm text-ink-muted",
+                        label { class: "flex items-center gap-1.5",
+                            input { r#type: "checkbox", checked: generate_notes(), onchange: move |event| generate_notes.set(event.checked()) }
+                            "auto-generate notes"
+                        }
                         label { class: "flex items-center gap-1.5",
                             input { r#type: "checkbox", checked: draft(), onchange: move |event| draft.set(event.checked()) }
                             "draft"

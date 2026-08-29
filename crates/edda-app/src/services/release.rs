@@ -21,6 +21,9 @@ pub struct NewReleaseInput {
     pub body: Option<String>,
     pub draft: bool,
     pub prerelease: bool,
+    /// When set and `body` is empty, the release body is an auto-generated
+    /// changelog of the commits since the previous release's tag.
+    pub generate_notes: bool,
 }
 
 #[derive(Clone)]
@@ -48,6 +51,7 @@ impl ReleaseService {
         name: &str,
         input: NewReleaseInput,
     ) -> Result<String, ServiceError> {
+        let committer = super::acting_user(&self.pool, actor).await?;
         let (repository, author_id) = self.write_checked(actor, owner, name).await?;
         let tag_name = input.tag_name.trim().to_string();
         let title = input.title.trim().to_string();
@@ -63,11 +67,55 @@ impl ReleaseService {
         }
 
         let identity = git_identity(owner, name);
+        // The tag the previous release was cut against — the changelog
+        // range's lower bound. Newest release first, so the first prior
+        // one whose tag still resolves wins.
+        let previous_tag = {
+            let mut previous = None;
+            for release in ReleaseRepo::list_for_repository(&self.pool, repository.id).await? {
+                if release.tag_name == tag_name {
+                    continue;
+                }
+                if edda_git::resolve_tag(self.store.as_ref(), &identity, &release.tag_name).is_ok()
+                {
+                    previous = Some(release.tag_name);
+                    break;
+                }
+            }
+            previous
+        };
+
         let target_commit = match edda_git::resolve_tag(self.store.as_ref(), &identity, &tag_name) {
             Ok(commit) => commit,
-            Err(_) => {
-                edda_git::create_tag(self.store.as_ref(), &identity, &tag_name, &input.target)?
+            Err(_) => edda_git::create_annotated_tag(
+                self.store.as_ref(),
+                &identity,
+                &tag_name,
+                &input.target,
+                &committer.username,
+                &committer.email,
+                if title.is_empty() { &tag_name } else { &title },
+            )?,
+        };
+
+        let generated;
+        let body: Option<&str> = match input
+            .body
+            .as_deref()
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+        {
+            Some(body) => Some(body),
+            None if input.generate_notes => {
+                generated = edda_git::changelog_markdown(
+                    self.store.as_ref(),
+                    &identity,
+                    previous_tag.as_deref(),
+                    &target_commit,
+                )?;
+                (!generated.is_empty()).then_some(generated.as_str())
             }
+            None => None,
         };
 
         let release_id = ReleaseId::new();
@@ -80,7 +128,7 @@ impl ReleaseService {
                 tag_name: &tag_name,
                 target_commit: &target_commit,
                 name: &title,
-                body: input.body.as_deref().filter(|b| !b.trim().is_empty()),
+                body,
                 draft: input.draft,
                 prerelease: input.prerelease,
                 author_id,

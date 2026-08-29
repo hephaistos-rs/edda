@@ -513,6 +513,85 @@ async fn a_pull_request_opens_is_reviewed_and_merges_against_a_real_repository()
         "an IssueClosed event names the fixing PR"
     );
 
+    // ── A release with an auto-generated changelog + an annotated tag ──
+    run(&repo_dir, "git", &["checkout", "main"]);
+    run(&repo_dir, "git", &["pull", "--ff-only", "origin", "main"]);
+    // Two conventional commits since the (nonexistent) previous release —
+    // `generate_notes` should group them.
+    std::fs::write(repo_dir.join("feat.txt"), b"x\n").unwrap();
+    run(&repo_dir, "git", &["add", "feat.txt"]);
+    run(
+        &repo_dir,
+        "git",
+        &["commit", "-m", "feat: shiny new capability"],
+    );
+    std::fs::write(repo_dir.join("fix.txt"), b"y\n").unwrap();
+    run(&repo_dir, "git", &["add", "fix.txt"]);
+    run(&repo_dir, "git", &["commit", "-m", "fix: stop the crash"]);
+    run(&repo_dir, "git", &["push", "origin", "main"]);
+
+    let release_service = edda_app::services::ReleaseService::new(
+        pool.clone(),
+        store.clone(),
+        AuthorizationService::new(pool.clone()),
+    );
+    release_service
+        .create(
+            &ActorContext::User(alice_id),
+            "alice",
+            "demo",
+            edda_app::services::release::NewReleaseInput {
+                tag_name: "v1.0.0".to_string(),
+                target: "main".to_string(),
+                title: "First release".to_string(),
+                body: None,
+                draft: false,
+                prerelease: false,
+                generate_notes: true,
+            },
+        )
+        .await
+        .expect("release creation succeeds");
+
+    let release = edda_db::ReleaseRepo::find_by_repository_and_tag(&pool, repository.id, "v1.0.0")
+        .await
+        .unwrap()
+        .unwrap();
+    let notes = release.body.unwrap_or_default();
+    assert!(
+        notes.contains("### Features") && notes.contains("shiny new capability"),
+        "generated changelog groups the feat commit: {notes}"
+    );
+    assert!(
+        notes.contains("### Bug Fixes") && notes.contains("stop the crash"),
+        "generated changelog groups the fix commit: {notes}"
+    );
+
+    // The tag is annotated — a fresh clone's `git cat-file` sees a `tag`
+    // object, and `ls-remote` advertises the peeled `^{}` line.
+    run(&work_dir, "git", &["clone", &remote, "tagcheck"]);
+    let tagcheck = work_dir.join("tagcheck");
+    run(&tagcheck, "git", &["fetch", "--tags"]);
+    let object_type = Command::new("git")
+        .args(["cat-file", "-t", "v1.0.0"])
+        .current_dir(&tagcheck)
+        .output()
+        .expect("cat-file");
+    assert_eq!(
+        String::from_utf8_lossy(&object_type.stdout).trim(),
+        "tag",
+        "the release tag is an annotated tag object"
+    );
+    let ls_remote = Command::new("git")
+        .args(["ls-remote", "--tags", &remote])
+        .output()
+        .expect("ls-remote");
+    let ls = String::from_utf8_lossy(&ls_remote.stdout);
+    assert!(
+        ls.contains("refs/tags/v1.0.0^{}"),
+        "the annotated tag advertises its peeled commit: {ls}"
+    );
+
     let _ = std::fs::remove_dir_all(&work_dir);
     let _ = std::fs::remove_dir_all(&store_root);
 }

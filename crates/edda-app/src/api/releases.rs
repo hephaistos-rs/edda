@@ -118,6 +118,7 @@ async fn create(
                 body: body.body,
                 draft: body.draft,
                 prerelease: body.prerelease,
+                generate_notes: body.generate_notes,
             },
         )
         .await?;

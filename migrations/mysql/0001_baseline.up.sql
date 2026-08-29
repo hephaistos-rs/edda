@@ -26,8 +26,8 @@ CREATE TABLE users (
     is_admin                    INTEGER NOT NULL DEFAULT 0,
     disabled_at                 BIGINT,
     email_notifications_enabled INTEGER NOT NULL DEFAULT 1,
-    email_verified_at           BIGINT,
-    approved_at                 BIGINT,
+    email_verified_at           BIGINT DEFAULT (UNIX_TIMESTAMP()),
+    approved_at                 BIGINT DEFAULT (UNIX_TIMESTAMP()),
     created_at                  BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP())
 );
 

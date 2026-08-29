@@ -323,6 +323,19 @@ impl Default for SessionConfig {
     }
 }
 
+/// Instance registration + privacy policy (Phase 9, H2/S3). The
+/// `RegistrationPolicy` half (`EDDA_REGISTRATION_MODE`,
+/// `EDDA_ALLOWED_EMAIL_DOMAINS`, `EDDA_REQUIRE_EMAIL_VERIFICATION`) is
+/// consulted by `edda_auth::signup` and the push/create gate;
+/// `require_signin_to_view` (`EDDA_REQUIRE_SIGNIN_VIEW`) makes the whole
+/// instance private — an anonymous request gets 401 everywhere except
+/// the login / health surface.
+#[derive(Debug, Clone, Default)]
+pub struct RegistrationConfig {
+    pub policy: edda_domain::RegistrationPolicy,
+    pub require_signin_to_view: bool,
+}
+
 /// Per-client token-bucket limits for the API surface (never the git or
 /// LFS routes). Two buckets: a general one, and a stricter one applied to
 /// just the auth endpoints (`/api/auth/*`, OAuth/WebAuthn begin+verify).
@@ -370,6 +383,7 @@ pub struct Settings {
     pub secret_keys: SecretKeys,
     pub argon2: Argon2Config,
     pub session: SessionConfig,
+    pub registration: RegistrationConfig,
     pub webauthn: Option<WebauthnConfig>,
     pub oidc: Option<OidcConfig>,
     pub smtp: Option<SmtpConfig>,
@@ -445,6 +459,7 @@ impl Settings {
         let secret_keys = parse_secret_keys(&mut env);
         let argon2 = parse_argon2(&mut env);
         let session = parse_session(&mut env);
+        let registration = parse_registration(&mut env);
         let webauthn = parse_webauthn(&mut env);
         let oidc = parse_oidc(&mut env);
         let smtp = parse_smtp(&mut env);
@@ -514,6 +529,7 @@ impl Settings {
             secret_keys,
             argon2,
             session,
+            registration,
             webauthn,
             oidc,
             smtp,
@@ -596,6 +612,42 @@ fn parse_trusted_proxies(env: &mut Env) -> Vec<ipnet::IpNet> {
         }
     }
     nets
+}
+
+fn parse_registration(env: &mut Env) -> RegistrationConfig {
+    let mode = match env.get("EDDA_REGISTRATION_MODE") {
+        None => edda_domain::RegistrationMode::default(),
+        Some(raw) => match edda_domain::RegistrationMode::parse(&raw) {
+            Some(m) => m,
+            None => {
+                env.fail(
+                    "EDDA_REGISTRATION_MODE",
+                    format!("must be one of open, approval, closed (got {raw:?})"),
+                );
+                edda_domain::RegistrationMode::default()
+            }
+        },
+    };
+    let allowed_email_domains = env
+        .get("EDDA_ALLOWED_EMAIL_DOMAINS")
+        .map(|raw| {
+            raw.split(',')
+                .map(|d| d.trim().trim_start_matches('@').to_ascii_lowercase())
+                .filter(|d| !d.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let require_email_verification = env.parse_or::<bool>("EDDA_REQUIRE_EMAIL_VERIFICATION", false);
+    let require_signin_to_view = env.parse_or::<bool>("EDDA_REQUIRE_SIGNIN_VIEW", false);
+
+    RegistrationConfig {
+        policy: edda_domain::RegistrationPolicy {
+            mode,
+            allowed_email_domains,
+            require_email_verification,
+        },
+        require_signin_to_view,
+    }
 }
 
 fn parse_session(env: &mut Env) -> SessionConfig {
@@ -837,6 +889,10 @@ mod tests {
         "EDDA_ARGON2_PARALLELISM",
         "EDDA_SESSION_ROLLING_TTL_SECONDS",
         "EDDA_SESSION_ABSOLUTE_TTL_SECONDS",
+        "EDDA_REGISTRATION_MODE",
+        "EDDA_ALLOWED_EMAIL_DOMAINS",
+        "EDDA_REQUIRE_EMAIL_VERIFICATION",
+        "EDDA_REQUIRE_SIGNIN_VIEW",
         "EDDA_GIT_MAX_PACK_BYTES",
         "EDDA_LFS_MAX_OBJECT_BYTES",
     ];
@@ -982,5 +1038,39 @@ mod tests {
         scope.set("EDDA_TRUSTED_PROXIES", "not-an-ip");
         let errs = Settings::from_env().expect_err("bad cidr");
         assert!(errs.0.iter().any(|e| e.var == "EDDA_TRUSTED_PROXIES"));
+    }
+
+    #[test]
+    fn registration_and_instance_privacy_knobs_parse() {
+        let mut scope = EnvScope::new();
+
+        // Default: wide open, not private.
+        let s = Settings::from_env().expect("valid");
+        assert_eq!(
+            s.registration.policy.mode,
+            edda_domain::RegistrationMode::Open
+        );
+        assert!(!s.registration.require_signin_to_view);
+        assert!(s.registration.policy.allowed_email_domains.is_empty());
+
+        scope.set("EDDA_REGISTRATION_MODE", "approval");
+        scope.set("EDDA_ALLOWED_EMAIL_DOMAINS", "example.com, @Corp.Example ");
+        scope.set("EDDA_REQUIRE_EMAIL_VERIFICATION", "true");
+        scope.set("EDDA_REQUIRE_SIGNIN_VIEW", "true");
+        let s = Settings::from_env().expect("valid");
+        assert_eq!(
+            s.registration.policy.mode,
+            edda_domain::RegistrationMode::Approval
+        );
+        assert_eq!(
+            s.registration.policy.allowed_email_domains,
+            vec!["example.com".to_string(), "corp.example".to_string()]
+        );
+        assert!(s.registration.policy.require_email_verification);
+        assert!(s.registration.require_signin_to_view);
+
+        scope.set("EDDA_REGISTRATION_MODE", "halfway");
+        let errs = Settings::from_env().expect_err("bad mode");
+        assert!(errs.0.iter().any(|e| e.var == "EDDA_REGISTRATION_MODE"));
     }
 }

@@ -33,7 +33,9 @@ async fn record(pool: &edda_db::DbPool, event_type: &str, actor_id: &str, target
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/admin/users", get(list_users))
+        .route("/api/admin/users/pending", get(list_pending_users))
         .route("/api/admin/users/{id}/admin", post(set_admin))
+        .route("/api/admin/users/{id}/approve", post(approve_user))
         .route("/api/admin/users/{id}/disable", post(disable_user))
         .route("/api/admin/users/{id}/enable", post(enable_user))
         .route("/api/admin/users/{id}", axum::routing::delete(delete_user))
@@ -85,6 +87,58 @@ async fn list_users(State(state): State<AppState>, auth: AuthSession<Backend>) -
                 .collect::<Vec<_>>(),
         )
         .into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+/// The admin approval queue (Phase 9, `Approval` registration mode):
+/// accounts created but not yet activated.
+#[tracing::instrument(name = "admin.users.list_pending", skip_all)]
+async fn list_pending_users(State(state): State<AppState>, auth: AuthSession<Backend>) -> Response {
+    if let Err(err) = require_admin(&auth) {
+        return err.into_response();
+    }
+    match edda_db::UserRepo::list_pending_approval(&state.pool).await {
+        Ok(users) => Json(
+            users
+                .into_iter()
+                .map(AdminUserDto::from)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+/// Activates a pending account (`Approval` registration mode). Once
+/// approved the account can sign in normally.
+#[tracing::instrument(name = "admin.users.approve", skip_all, fields(target.user_id = %id))]
+async fn approve_user(
+    State(state): State<AppState>,
+    auth: AuthSession<Backend>,
+    Path(id): Path<String>,
+) -> Response {
+    let admin = match require_admin(&auth) {
+        Ok(admin) => admin,
+        Err(err) => return err.into_response(),
+    };
+    let user_id = match parse_user_id(&id) {
+        Ok(id) => id,
+        Err(err) => return err.into_response(),
+    };
+    match edda_db::UserRepo::approve(&state.pool, user_id).await {
+        Ok(true) => {
+            record(
+                &state.pool,
+                "admin.user.approve",
+                &admin.id.to_string(),
+                &id,
+            )
+            .await;
+            StatusCode::OK.into_response()
+        }
+        // Unknown id, or already approved — nothing changed.
+        Ok(false) => (StatusCode::NOT_FOUND, "no such pending user").into_response(),
         Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
     }
 }

@@ -71,6 +71,7 @@ id_type!(OAuthIdentityId);
 id_type!(WebauthnCredentialId);
 id_type!(TotpRecoveryCodeId);
 id_type!(PasswordResetTokenId);
+id_type!(EmailVerificationTokenId);
 id_type!(AuditEventId);
 id_type!(PullRequestId);
 id_type!(PrReviewId);

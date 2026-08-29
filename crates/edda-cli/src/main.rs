@@ -179,9 +179,19 @@ async fn create(
     email: &str,
     is_admin: bool,
 ) -> Result<(), String> {
-    let user = edda_auth::signup(pool, username, email, &random_password())
-        .await
-        .map_err(|err| err.to_string())?;
+    // An admin creating an account from the CLI bypasses the instance's
+    // registration policy entirely: the default policy (open, no email
+    // verification) makes the account immediately active and verified.
+    let outcome = edda_auth::signup(
+        pool,
+        &edda_domain::RegistrationPolicy::default(),
+        username,
+        email,
+        &random_password(),
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+    let user = outcome.user;
     if is_admin {
         UserRepo::set_admin(pool, user.id, true)
             .await

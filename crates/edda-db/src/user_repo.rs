@@ -21,6 +21,32 @@ pub enum InsertUserError {
     Db(#[from] DbError),
 }
 
+/// The account-lifecycle timestamps the authentication and push/create
+/// gates consult — see [`UserRepo::account_status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountStatus {
+    /// Set once an admin disables the account (`NULL` = enabled).
+    pub disabled_at: Option<i64>,
+    /// Set once the account's email address is confirmed, or immediately
+    /// at signup when the policy doesn't require verification.
+    pub email_verified_at: Option<i64>,
+    /// Set once the account is active — immediately for `Open`/`Closed`
+    /// registration, on admin approval for `Approval`.
+    pub approved_at: Option<i64>,
+}
+
+impl AccountStatus {
+    pub fn is_disabled(&self) -> bool {
+        self.disabled_at.is_some()
+    }
+    pub fn is_email_verified(&self) -> bool {
+        self.email_verified_at.is_some()
+    }
+    pub fn is_approved(&self) -> bool {
+        self.approved_at.is_some()
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DeleteUserError {
     /// The account still directly owns one or more repositories. Since the
@@ -402,6 +428,136 @@ impl UserRepo {
             .execute(&mut *h.conn())
             .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    /// The three lifecycle timestamps the auth path checks — kept off the
+    /// core `User` entity for the same reason `email_notifications_enabled`
+    /// is (that type is a struct literal at many stable call sites; these
+    /// fields have exactly two consumers, the login gate and the
+    /// push/create gate). `None` for an unknown id.
+    pub async fn account_status<'c>(
+        db: impl DbConn<'c>,
+        id: UserId,
+    ) -> Result<Option<AccountStatus>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let id_text = id.to_string();
+        let sql = match h.backend() {
+            Backend::Postgres => {
+                "SELECT disabled_at, email_verified_at, approved_at FROM users WHERE id = $1"
+            }
+            Backend::Sqlite | Backend::MySql => {
+                "SELECT disabled_at, email_verified_at, approved_at FROM users WHERE id = ?"
+            }
+        };
+        let row = sqlx::query(sql)
+            .bind(&id_text)
+            .fetch_optional(&mut *h.conn())
+            .await?;
+        row.map(|row| {
+            Ok(AccountStatus {
+                disabled_at: get_opt_i64(&row, "disabled_at")?,
+                email_verified_at: get_opt_i64(&row, "email_verified_at")?,
+                approved_at: get_opt_i64(&row, "approved_at")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Stamps `approved_at` / `email_verified_at` right after signup,
+    /// according to the active `RegistrationPolicy`. `None` leaves the
+    /// column NULL (pending). One statement rather than widening `insert`
+    /// (which has many stable call sites).
+    pub async fn stamp_signup_status<'c>(
+        db: impl DbConn<'c>,
+        id: UserId,
+        approved_at: Option<i64>,
+        email_verified_at: Option<i64>,
+    ) -> Result<(), DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let id_text = id.to_string();
+        let sql = match h.backend() {
+            Backend::Postgres => {
+                "UPDATE users SET approved_at = $1, email_verified_at = $2 WHERE id = $3"
+            }
+            Backend::Sqlite | Backend::MySql => {
+                "UPDATE users SET approved_at = ?, email_verified_at = ? WHERE id = ?"
+            }
+        };
+        sqlx::query(sql)
+            .bind(approved_at)
+            .bind(email_verified_at)
+            .bind(&id_text)
+            .execute(&mut *h.conn())
+            .await?;
+        Ok(())
+    }
+
+    /// Marks the account's email confirmed (`email_verification::consume`).
+    /// `Ok(false)` if there was nothing to do (unknown id, or already
+    /// verified).
+    pub async fn mark_email_verified<'c>(db: impl DbConn<'c>, id: UserId) -> Result<bool, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let now = crate::now_unix();
+        let id_text = id.to_string();
+        let sql = match h.backend() {
+            Backend::Postgres => {
+                "UPDATE users SET email_verified_at = $1 WHERE id = $2 AND email_verified_at IS NULL"
+            }
+            Backend::Sqlite | Backend::MySql => {
+                "UPDATE users SET email_verified_at = ? WHERE id = ? AND email_verified_at IS NULL"
+            }
+        };
+        let result = sqlx::query(sql)
+            .bind(now)
+            .bind(&id_text)
+            .execute(&mut *h.conn())
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Admin approval-queue action: activates a pending account.
+    /// `Ok(false)` for an unknown id or one already approved.
+    pub async fn approve<'c>(db: impl DbConn<'c>, id: UserId) -> Result<bool, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let now = crate::now_unix();
+        let id_text = id.to_string();
+        let sql = match h.backend() {
+            Backend::Postgres => {
+                "UPDATE users SET approved_at = $1 WHERE id = $2 AND approved_at IS NULL"
+            }
+            Backend::Sqlite | Backend::MySql => {
+                "UPDATE users SET approved_at = ? WHERE id = ? AND approved_at IS NULL"
+            }
+        };
+        let result = sqlx::query(sql)
+            .bind(now)
+            .bind(&id_text)
+            .execute(&mut *h.conn())
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Every account still awaiting admin approval, newest first — the
+    /// admin approval queue.
+    pub async fn list_pending_approval<'c>(db: impl DbConn<'c>) -> Result<Vec<User>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let rows = sqlx::query(
+            "SELECT id, username, email, is_admin, disabled_at FROM users \
+             WHERE approved_at IS NULL ORDER BY id DESC",
+        )
+        .fetch_all(&mut *h.conn())
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(row_to_user(
+                    get_string(&row, "id")?,
+                    get_string(&row, "username")?,
+                    get_string(&row, "email")?,
+                    get_bool(&row, "is_admin")?,
+                    get_opt_i64(&row, "disabled_at")?,
+                ))
+            })
+            .collect()
     }
 
     pub async fn set_email_notifications_enabled<'c>(

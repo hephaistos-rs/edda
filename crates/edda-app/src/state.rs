@@ -44,6 +44,14 @@ pub struct RuntimeConfig {
     /// Consumed by `security::origin`.
     pub trusted_origins: Vec<String>,
     pub rate_limit: RateLimitConfig,
+    /// Instance registration policy (Phase 9, H2/S3) — signup mode, email
+    /// domain allowlist, and whether a new account needs email
+    /// verification before it may push / create. `Default` is wide open.
+    pub registration: edda_domain::RegistrationPolicy,
+    /// `EDDA_REQUIRE_SIGNIN_VIEW` — when `true`, an anonymous request is
+    /// refused (401) everywhere except the login / health surface, making
+    /// the whole instance private. `false` by default.
+    pub require_signin_to_view: bool,
     /// Streamed-body size ceilings for the git/LFS transfer paths
     /// (`EDDA_GIT_MAX_PACK_BYTES` / `EDDA_LFS_MAX_OBJECT_BYTES`). `Default`
     /// is 2 GiB / 4 GiB — a real cap even in tests that don't tune it.

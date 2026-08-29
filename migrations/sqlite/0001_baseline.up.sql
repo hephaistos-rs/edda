@@ -35,13 +35,17 @@ CREATE TABLE users (
     is_admin                    INTEGER NOT NULL DEFAULT 0,
     disabled_at                 INTEGER,
     email_notifications_enabled INTEGER NOT NULL DEFAULT 1,
-    -- NULL until the account's email address is confirmed (Phase 9). When
-    -- the active `RegistrationPolicy` doesn't require verification this is
-    -- stamped at signup; otherwise the email-verification flow sets it.
-    email_verified_at           INTEGER,
-    -- NULL while an account awaits admin approval (Phase 9 `Approval`
-    -- registration mode). `Open`/`Closed` modes stamp it at creation.
-    approved_at                 INTEGER,
+    -- When the account's email address was confirmed (Phase 9). Defaults
+    -- to "now" so an account is verified unless something holds it back;
+    -- `edda_auth::signup` explicitly NULLs it when the active
+    -- `RegistrationPolicy` requires verification, and the
+    -- email-verification flow later stamps it.
+    email_verified_at           INTEGER DEFAULT (unixepoch()),
+    -- When the account became active. Defaults to "now" (an account is
+    -- approved unless held back); `edda_auth::signup` NULLs it in
+    -- `Approval` registration mode, and the admin approval queue stamps
+    -- it. `NULL` = awaiting admin approval.
+    approved_at                 INTEGER DEFAULT (unixepoch()),
     created_at                  INTEGER NOT NULL DEFAULT (unixepoch())
 ) STRICT;
 

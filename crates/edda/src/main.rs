@@ -164,6 +164,8 @@ fn main() {
                     external_url: settings.http.external_url.clone(),
                     trusted_origins: settings.http.trusted_origins.clone(),
                     rate_limit: settings.rate_limit.clone(),
+                    registration: settings.registration.policy.clone(),
+                    require_signin_to_view: settings.registration.require_signin_to_view,
                     git_limits: settings.git.limits,
                     session: settings.session,
                 },

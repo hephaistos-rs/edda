@@ -74,6 +74,8 @@ pub fn routes() -> Router<AppState> {
             "/api/auth/password-reset/consume",
             post(consume_password_reset),
         )
+        .route("/api/auth/verify-email", post(verify_email))
+        .route("/api/auth/verify-email/resend", post(resend_verification))
 }
 
 /// Same `X-Forwarded-Proto`/`Host`-based reconstruction `edda_app::lfs`'s
@@ -160,6 +162,78 @@ async fn consume_password_reset(
     }
 }
 
+#[derive(Deserialize)]
+struct VerifyEmailBody {
+    token: String,
+}
+
+/// Confirms an account's email address from the link in the
+/// verification email. Public (no session needed — the token *is* the
+/// credential).
+#[tracing::instrument(name = "authentication.verify_email", skip_all)]
+async fn verify_email(
+    State(state): State<AppState>,
+    Json(body): Json<VerifyEmailBody>,
+) -> Response {
+    match edda_auth::email_verification::consume(&state.pool, &body.token).await {
+        Ok(user_id) => {
+            record(&state.pool, "auth.email_verified", &user_id.to_string()).await;
+            StatusCode::OK.into_response()
+        }
+        Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
+    }
+}
+
+/// Re-sends the verification email for the signed-in account (the link
+/// expired, or the first email was lost). No-ops silently for an
+/// already-verified account.
+#[tracing::instrument(name = "authentication.verify_email.resend", skip_all)]
+async fn resend_verification(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    auth: AuthSession<Backend>,
+) -> Response {
+    let Some(session_user) = auth.user else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let user = session_user.user;
+    match edda_auth::email_verification::request(&state.pool, user.id).await {
+        Ok(Some((_, token))) => {
+            send_verification_email(&state.pool, &headers, &user.email, &token).await;
+            StatusCode::OK.into_response()
+        }
+        // Already verified / nothing to do — still a 200 so the client
+        // can't use this to probe verification state.
+        Ok(None) => StatusCode::OK.into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+/// Enqueues the "confirm your email" message via the job queue, the same
+/// path `request_password_reset` uses for its email.
+async fn send_verification_email(
+    pool: &edda_db::DbPool,
+    headers: &HeaderMap,
+    to_email: &str,
+    raw_token: &str,
+) {
+    let link = format!("{}/verify-email?token={raw_token}", base_url(headers));
+    let body_text = format!(
+        "Welcome to Edda! Confirm this email address to finish setting up your account.\n\n\
+         Confirm: {link}\n\n\
+         This link expires in 24 hours."
+    );
+    let _ = edda_jobs::enqueue(
+        pool,
+        edda_domain::JobPayload::SendEmail {
+            to_email: to_email.to_string(),
+            subject: "Confirm your Edda email address".to_string(),
+            body_text,
+        },
+    )
+    .await;
+}
+
 /// The over-the-wire shape of a logged-in identity. Deliberately its own
 /// type, not a re-export of `edda_domain::User` — `edda-app` is a
 /// server-only crate, so anything it exposes has to be independently
@@ -202,16 +276,61 @@ struct SignupBody {
     password: String,
 }
 
+/// A signup that couldn't start a session because the account is
+/// `Approval`-mode and still waiting for an administrator.
+#[derive(Serialize)]
+struct SignupPendingDto {
+    pending_approval: bool,
+    message: &'static str,
+}
+
 async fn signup(
     State(state): State<AppState>,
+    headers: HeaderMap,
     mut auth: AuthSession<Backend>,
     Json(body): Json<SignupBody>,
 ) -> Response {
-    let user =
-        match edda_auth::signup(&state.pool, &body.username, &body.email, &body.password).await {
-            Ok(user) => user,
-            Err(err) => return (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
-        };
+    let outcome = match edda_auth::signup(
+        &state.pool,
+        &state.config.registration,
+        &body.username,
+        &body.email,
+        &body.password,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            let code = match err {
+                edda_auth::SignupError::RegistrationClosed
+                | edda_auth::SignupError::EmailDomainNotAllowed => StatusCode::FORBIDDEN,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            return (code, err.to_string()).into_response();
+        }
+    };
+    let user = outcome.user;
+    record(&state.pool, "auth.signup", &user.id.to_string()).await;
+
+    // Email verification link, if the policy requires one — delivered via
+    // the job queue like the password-reset email.
+    if let Some(token) = &outcome.verification_token {
+        send_verification_email(&state.pool, &headers, &user.email, token).await;
+    }
+
+    // `Approval` registration mode: the account exists but isn't active,
+    // so no session is started — the client shows a "pending approval"
+    // message instead.
+    if outcome.pending_approval {
+        return (
+            StatusCode::ACCEPTED,
+            Json(SignupPendingDto {
+                pending_approval: true,
+                message: "your account was created and is awaiting administrator approval",
+            }),
+        )
+            .into_response();
+    }
 
     // Newly created — the account has no repositories yet, so there is no
     // owner grant to seed here.
@@ -308,6 +427,18 @@ async fn login(
     let _ = edda_auth::login_throttle::record_success(&state.pool, &email, &client_ip).await;
 
     let user = session_user.user.clone();
+
+    // Phase 9: a correct password isn't sufficient on its own — an
+    // account still awaiting administrator approval (`Approval`
+    // registration mode) may not establish a session. Checked only now,
+    // after the password verified, so revealing "pending approval" isn't
+    // an account-enumeration oracle.
+    if let Ok(Some(status)) = edda_db::UserRepo::account_status(&state.pool, user.id).await {
+        if let Err(err) = edda_auth::require_can_authenticate(&status) {
+            record(&state.pool, "auth.login.rejected", &user.id.to_string()).await;
+            return (StatusCode::FORBIDDEN, err.to_string()).into_response();
+        }
+    }
 
     // Password verified — but if this account has an *activated* TOTP
     // credential, or at least one registered WebAuthn credential, the

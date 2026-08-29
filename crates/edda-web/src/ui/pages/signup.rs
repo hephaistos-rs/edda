@@ -10,19 +10,34 @@ struct SignupBody<'a> {
     password: &'a str,
 }
 
-/// `Ok(())` on success, `Err(message)` otherwise. `gloo-net` only compiles
-/// for wasm32 (it calls the browser `fetch` API) — this component's code is
-/// shared with the server build for SSR, so the real call is wasm32-only,
-/// with a stub for the server target that this form's submit handler never
-/// actually reaches there (SSR doesn't fire `onsubmit`).
+/// What a successful signup did: `Active` means a session is established
+/// (navigate home); `PendingApproval` means the instance runs
+/// `Approval`-mode registration and an admin must approve the account
+/// before it can sign in.
+enum SignupResult {
+    Active,
+    PendingApproval,
+}
+
+/// `Ok(result)` on success, `Err(message)` otherwise. `gloo-net` only
+/// compiles for wasm32 (it calls the browser `fetch` API) — this
+/// component's code is shared with the server build for SSR, so the real
+/// call is wasm32-only, with a stub for the server target that this
+/// form's submit handler never actually reaches there (SSR doesn't fire
+/// `onsubmit`).
 #[cfg(target_arch = "wasm32")]
-async fn request_signup(body: &SignupBody<'_>) -> Result<(), String> {
+async fn request_signup(body: &SignupBody<'_>) -> Result<SignupResult, String> {
     let request = gloo_net::http::Request::post("/api/auth/signup")
         .json(body)
         .map_err(|err| err.to_string())?;
     let response = request.send().await.map_err(|err| err.to_string())?;
     if response.ok() {
-        Ok(())
+        // 202 Accepted = created but pending admin approval (no session).
+        if response.status() == 202 {
+            Ok(SignupResult::PendingApproval)
+        } else {
+            Ok(SignupResult::Active)
+        }
     } else {
         Err(response
             .text()
@@ -32,7 +47,7 @@ async fn request_signup(body: &SignupBody<'_>) -> Result<(), String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn request_signup(_body: &SignupBody<'_>) -> Result<(), String> {
+async fn request_signup(_body: &SignupBody<'_>) -> Result<SignupResult, String> {
     Err("not available during server rendering".to_string())
 }
 
@@ -44,6 +59,7 @@ pub fn Signup() -> Element {
     let mut password = use_signal(String::new);
     let mut confirm = use_signal(String::new);
     let mut error = use_signal(|| Option::<String>::None);
+    let mut pending_notice = use_signal(|| false);
     let mut submitting = use_signal(|| false);
 
     let on_submit = move |event: FormEvent| {
@@ -68,9 +84,10 @@ pub fn Signup() -> Element {
 
             submitting.set(false);
             match outcome {
-                Ok(()) => {
+                Ok(SignupResult::Active) => {
                     navigator.push(Route::Home {});
                 }
+                Ok(SignupResult::PendingApproval) => pending_notice.set(true),
                 Err(message) => error.set(Some(message)),
             }
         });
@@ -125,6 +142,11 @@ pub fn Signup() -> Element {
                 }
                 if let Some(message) = error() {
                     p { class: "font-mono text-xs text-status-conflict", "{message}" }
+                }
+                if pending_notice() {
+                    p { class: "font-mono text-xs text-ink-muted",
+                        "your account was created and is awaiting administrator approval — you'll be able to sign in once it's approved."
+                    }
                 }
                 button {
                     r#type: "submit",

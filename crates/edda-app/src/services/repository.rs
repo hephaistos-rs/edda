@@ -31,6 +31,10 @@ pub struct RepositoryService {
     store: Arc<dyn RepoStore>,
     locks: Arc<LockRegistry>,
     authz: AuthorizationService,
+    /// Phase 9: consulted by `create` so an account whose email is still
+    /// unverified can't create repositories when the instance requires
+    /// verification.
+    registration: edda_domain::RegistrationPolicy,
 }
 
 impl RepositoryService {
@@ -39,12 +43,14 @@ impl RepositoryService {
         store: Arc<dyn RepoStore>,
         locks: Arc<LockRegistry>,
         authz: AuthorizationService,
+        registration: edda_domain::RegistrationPolicy,
     ) -> Self {
         Self {
             pool,
             store,
             locks,
             authz,
+            registration,
         }
     }
 
@@ -55,6 +61,7 @@ impl RepositoryService {
             state.store.clone(),
             state.locks.clone(),
             state.authz.clone(),
+            state.config.registration.clone(),
         )
     }
 
@@ -71,6 +78,13 @@ impl RepositoryService {
             return Err(ServiceError::Validation(
                 "a repository needs a name".to_string(),
             ));
+        }
+        // Phase 9: block an unverified account from creating repositories
+        // when the instance's registration policy requires verification.
+        if let Some(status) = edda_db::UserRepo::account_status(&self.pool, user.id).await? {
+            if edda_auth::require_verified_for_write(&status, &self.registration).is_err() {
+                return Err(ServiceError::Forbidden);
+            }
         }
 
         let (owner_username, repo_owner, owner_team_id) = match &spec.owner {

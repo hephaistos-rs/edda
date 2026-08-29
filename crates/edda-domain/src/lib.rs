@@ -16,6 +16,7 @@ pub mod notification;
 pub mod oauth_identity;
 pub mod organization;
 pub mod pull_request;
+pub mod registration;
 pub mod release;
 pub mod repository;
 pub mod ssh_key;
@@ -35,11 +36,11 @@ pub use branch_protection::BranchProtectionRule;
 pub use deploy_key::DeployKey;
 pub use event::{DomainEvent, DomainEventKind, MentionSource};
 pub use ids::{
-    AccessTokenId, AuditEventId, BranchProtectionRuleId, DeployKeyId, EventId, IssueCommentId,
-    IssueId, JobId, LabelId, LfsLockId, MilestoneId, NotificationId, OAuthIdentityId,
-    OrganizationId, PasswordResetTokenId, PrCommentId, PrReviewId, PullRequestId, ReleaseAssetId,
-    ReleaseId, RepositoryId, SshKeyId, TeamId, TotpRecoveryCodeId, UserId, WebauthnCredentialId,
-    WebhookDeliveryId, WebhookId,
+    AccessTokenId, AuditEventId, BranchProtectionRuleId, DeployKeyId, EmailVerificationTokenId,
+    EventId, IssueCommentId, IssueId, JobId, LabelId, LfsLockId, MilestoneId, NotificationId,
+    OAuthIdentityId, OrganizationId, PasswordResetTokenId, PrCommentId, PrReviewId, PullRequestId,
+    ReleaseAssetId, ReleaseId, RepositoryId, SshKeyId, TeamId, TotpRecoveryCodeId, UserId,
+    WebauthnCredentialId, WebhookDeliveryId, WebhookId,
 };
 pub use issue::{
     labels_to_unapply_for_scope, scope_of, Issue, IssueComment, IssueState, Label, Milestone,
@@ -55,6 +56,7 @@ pub use pull_request::{
     latest_reviews, parse_head_ref, CloseReason, DiffAnchor, MergeStrategy, PrComment, PrRef,
     PrReview, PrState, PullRequest, ReviewState,
 };
+pub use registration::{RegistrationMode, RegistrationPolicy};
 pub use release::{Release, ReleaseAsset};
 pub use repository::{Repository, RepositoryOwner, Visibility};
 pub use ssh_key::SshKey;

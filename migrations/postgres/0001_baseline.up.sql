@@ -18,8 +18,8 @@ CREATE TABLE users (
     is_admin                    INTEGER NOT NULL DEFAULT 0,
     disabled_at                 BIGINT,
     email_notifications_enabled INTEGER NOT NULL DEFAULT 1,
-    email_verified_at           BIGINT,
-    approved_at                 BIGINT,
+    email_verified_at           BIGINT DEFAULT (extract(epoch from now())::bigint),
+    approved_at                 BIGINT DEFAULT (extract(epoch from now())::bigint),
     created_at                  BIGINT NOT NULL DEFAULT (extract(epoch from now())::bigint)
 );
 

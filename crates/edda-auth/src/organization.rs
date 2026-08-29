@@ -123,9 +123,15 @@ mod tests {
         create_organization(&pool, "acme", None, alice)
             .await
             .expect("create organization");
-        let err = crate::signup::signup(&pool, "acme", "someone@example.com", "password")
-            .await
-            .unwrap_err();
+        let err = crate::signup::signup(
+            &pool,
+            &edda_domain::RegistrationPolicy::default(),
+            "acme",
+            "someone@example.com",
+            "password",
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, crate::SignupError::UsernameTaken));
 
         // A genuinely free name still works for both.

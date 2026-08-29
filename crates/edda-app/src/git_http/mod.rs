@@ -185,6 +185,16 @@ pub(crate) async fn require_read_access(
     owner: &str,
     repository: &Repository,
 ) -> Result<(), Response> {
+    // Instance-private mode (Phase 9, `EDDA_REQUIRE_SIGNIN_VIEW`): no
+    // anonymous access to any repository over git-HTTP, public included.
+    if state.config.require_signin_to_view {
+        let actor = resolve_actor(state, auth, headers).await;
+        if matches!(actor, ActorContext::Anonymous) {
+            return Err(unauthorized_response(
+                "this instance requires sign-in to read any repository",
+            ));
+        }
+    }
     if !repository.is_private() {
         return Ok(());
     }
@@ -214,6 +224,19 @@ pub(crate) async fn require_write_access(
             "this token's scope does not permit pushing",
         )
             .into_response());
+    }
+    // Phase 9: when the instance requires email verification, an account
+    // whose address is still unconfirmed may not push.
+    if let Some(user_id) = actor.user_id() {
+        if let Ok(Some(status)) = edda_db::UserRepo::account_status(&state.pool, user_id).await {
+            if edda_auth::require_verified_for_write(&status, &state.config.registration).is_err() {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "verify your email address before pushing",
+                )
+                    .into_response());
+            }
+        }
     }
     match state.authz.check_write(&actor, repository).await {
         Ok(()) => Ok(()),

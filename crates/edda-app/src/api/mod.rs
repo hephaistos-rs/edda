@@ -150,6 +150,14 @@ impl FromRequestParts<AppState> for Actor {
             return Err(ServiceError::Forbidden.into_response());
         }
 
+        // Instance-private mode (Phase 9, `EDDA_REQUIRE_SIGNIN_VIEW`): an
+        // anonymous caller may not touch `/api/v1` at all. Auth-adjacent
+        // endpoints (`/api/auth/*`, OAuth, WebAuthn) live on a different
+        // sub-router and never resolve an `Actor`, so login still works.
+        if state.config.require_signin_to_view && matches!(context, ActorContext::Anonymous) {
+            return Err(ServiceError::Unauthorized.into_response());
+        }
+
         Ok(Actor(context))
     }
 }

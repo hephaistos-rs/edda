@@ -23,10 +23,15 @@ pub struct TeamGrantRow {
     pub added_at: i64,
 }
 
-fn subject_type_db_str(subject: AccessSubject) -> &'static str {
+/// Which typed subject column a grant to `subject` writes to / keys on.
+/// Since the Phase 9 baseline `repo_access` stores its grantee as a pair
+/// of nullable foreign-key columns (`subject_user_id` / `subject_team_id`,
+/// exactly one set) rather than the old polymorphic `(subject_type,
+/// subject_id)` text pair.
+fn subject_column(subject: AccessSubject) -> &'static str {
     match subject {
-        AccessSubject::User(_) => "user",
-        AccessSubject::Team(_) => "team",
+        AccessSubject::User(_) => "subject_user_id",
+        AccessSubject::Team(_) => "subject_team_id",
     }
 }
 
@@ -61,27 +66,26 @@ impl RepoAccessRepo {
     ) -> Result<(), DbError> {
         let mut h = crate::conn::open(db).await?;
         let repository_id_text = repository_id.to_string();
-        let subject_type = subject_type_db_str(subject);
-        let subject_id_text = subject_id(subject).to_string();
+        let column = subject_column(subject);
+        let subject_id_text = subject_id(subject);
         let role = role.as_db_str();
         let added_at = crate::now_unix();
         // Three genuinely different "insert, ignore if it already
         // exists" dialects — not a portability shortcut, this is the
         // actual syntax each backend requires.
         let sql = match h.backend() {
-            Backend::Sqlite => {
-                "INSERT OR IGNORE INTO repo_access (repository_id, subject_type, subject_id, role, added_at) VALUES (?, ?, ?, ?, ?)"
-            }
-            Backend::Postgres => {
-                "INSERT INTO repo_access (repository_id, subject_type, subject_id, role, added_at) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING"
-            }
-            Backend::MySql => {
-                "INSERT IGNORE INTO repo_access (repository_id, subject_type, subject_id, role, added_at) VALUES (?, ?, ?, ?, ?)"
-            }
+            Backend::Sqlite => format!(
+                "INSERT OR IGNORE INTO repo_access (repository_id, {column}, role, added_at) VALUES (?, ?, ?, ?)"
+            ),
+            Backend::Postgres => format!(
+                "INSERT INTO repo_access (repository_id, {column}, role, added_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING"
+            ),
+            Backend::MySql => format!(
+                "INSERT IGNORE INTO repo_access (repository_id, {column}, role, added_at) VALUES (?, ?, ?, ?)"
+            ),
         };
-        sqlx::query(sql)
+        sqlx::query(&sql)
             .bind(&repository_id_text)
-            .bind(subject_type)
             .bind(&subject_id_text)
             .bind(role)
             .bind(added_at)
@@ -97,19 +101,18 @@ impl RepoAccessRepo {
     ) -> Result<Option<RepoAccess>, DbError> {
         let mut h = crate::conn::open(db).await?;
         let repository_id_text = repository_id.to_string();
-        let subject_type = subject_type_db_str(subject);
-        let subject_id_text = subject_id(subject).to_string();
+        let column = subject_column(subject);
+        let subject_id_text = subject_id(subject);
         let sql = match h.backend() {
             Backend::Postgres => {
-                "SELECT role FROM repo_access WHERE repository_id = $1 AND subject_type = $2 AND subject_id = $3"
+                format!("SELECT role FROM repo_access WHERE repository_id = $1 AND {column} = $2")
             }
             Backend::Sqlite | Backend::MySql => {
-                "SELECT role FROM repo_access WHERE repository_id = ? AND subject_type = ? AND subject_id = ?"
+                format!("SELECT role FROM repo_access WHERE repository_id = ? AND {column} = ?")
             }
         };
-        let row = sqlx::query(sql)
+        let row = sqlx::query(&sql)
             .bind(&repository_id_text)
-            .bind(subject_type)
             .bind(&subject_id_text)
             .fetch_optional(&mut *h.conn())
             .await?;
@@ -140,10 +143,10 @@ impl RepoAccessRepo {
         let user_id_text = user_id.to_string();
         let sql = match h.backend() {
             Backend::Postgres => {
-                "SELECT repository_id, role FROM repo_access WHERE subject_type = 'user' AND subject_id = $1"
+                "SELECT repository_id, role FROM repo_access WHERE subject_user_id = $1"
             }
             Backend::Sqlite | Backend::MySql => {
-                "SELECT repository_id, role FROM repo_access WHERE subject_type = 'user' AND subject_id = ?"
+                "SELECT repository_id, role FROM repo_access WHERE subject_user_id = ?"
             }
         };
         let rows = sqlx::query(sql)
@@ -178,13 +181,13 @@ impl RepoAccessRepo {
         let sql = match h.backend() {
             Backend::Postgres => {
                 r#"SELECT a.role FROM repo_access a
-                   JOIN team_members m ON m.team_id = a.subject_id
-                   WHERE a.repository_id = $1 AND a.subject_type = 'team' AND m.user_id = $2"#
+                   JOIN team_members m ON m.team_id = a.subject_team_id
+                   WHERE a.repository_id = $1 AND m.user_id = $2"#
             }
             Backend::Sqlite | Backend::MySql => {
                 r#"SELECT a.role FROM repo_access a
-                   JOIN team_members m ON m.team_id = a.subject_id
-                   WHERE a.repository_id = ? AND a.subject_type = 'team' AND m.user_id = ?"#
+                   JOIN team_members m ON m.team_id = a.subject_team_id
+                   WHERE a.repository_id = ? AND m.user_id = ?"#
             }
         };
         let rows = sqlx::query(sql)
@@ -209,12 +212,12 @@ impl RepoAccessRepo {
         let sql = match h.backend() {
             Backend::Postgres => {
                 r#"SELECT u.id as user_id, u.username, u.email, u.is_admin, u.disabled_at, a.role, a.added_at
-                   FROM repo_access a JOIN users u ON u.id = a.subject_id AND a.subject_type = 'user'
+                   FROM repo_access a JOIN users u ON u.id = a.subject_user_id
                    WHERE a.repository_id = $1 ORDER BY a.added_at"#
             }
             Backend::Sqlite | Backend::MySql => {
                 r#"SELECT u.id as user_id, u.username, u.email, u.is_admin, u.disabled_at, a.role, a.added_at
-                   FROM repo_access a JOIN users u ON u.id = a.subject_id AND a.subject_type = 'user'
+                   FROM repo_access a JOIN users u ON u.id = a.subject_user_id
                    WHERE a.repository_id = ? ORDER BY a.added_at"#
             }
         };
@@ -254,12 +257,12 @@ impl RepoAccessRepo {
         let sql = match h.backend() {
             Backend::Postgres => {
                 r#"SELECT t.id as team_id, t.name as team_name, a.role, a.added_at
-                   FROM repo_access a JOIN teams t ON t.id = a.subject_id AND a.subject_type = 'team'
+                   FROM repo_access a JOIN teams t ON t.id = a.subject_team_id
                    WHERE a.repository_id = $1 ORDER BY a.added_at"#
             }
             Backend::Sqlite | Backend::MySql => {
                 r#"SELECT t.id as team_id, t.name as team_name, a.role, a.added_at
-                   FROM repo_access a JOIN teams t ON t.id = a.subject_id AND a.subject_type = 'team'
+                   FROM repo_access a JOIN teams t ON t.id = a.subject_team_id
                    WHERE a.repository_id = ? ORDER BY a.added_at"#
             }
         };
@@ -295,19 +298,18 @@ impl RepoAccessRepo {
     ) -> Result<bool, DbError> {
         let mut h = crate::conn::open(db).await?;
         let repository_id_text = repository_id.to_string();
-        let subject_type = subject_type_db_str(subject);
-        let subject_id_text = subject_id(subject).to_string();
+        let column = subject_column(subject);
+        let subject_id_text = subject_id(subject);
         let sql = match h.backend() {
-            Backend::Postgres => {
-                "DELETE FROM repo_access WHERE repository_id = $1 AND subject_type = $2 AND subject_id = $3 AND role != 'owner'"
-            }
-            Backend::Sqlite | Backend::MySql => {
-                "DELETE FROM repo_access WHERE repository_id = ? AND subject_type = ? AND subject_id = ? AND role != 'owner'"
-            }
+            Backend::Postgres => format!(
+                "DELETE FROM repo_access WHERE repository_id = $1 AND {column} = $2 AND role != 'owner'"
+            ),
+            Backend::Sqlite | Backend::MySql => format!(
+                "DELETE FROM repo_access WHERE repository_id = ? AND {column} = ? AND role != 'owner'"
+            ),
         };
-        let result = sqlx::query(sql)
+        let result = sqlx::query(&sql)
             .bind(&repository_id_text)
-            .bind(subject_type)
             .bind(&subject_id_text)
             .execute(&mut *h.conn())
             .await?;

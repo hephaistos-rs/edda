@@ -68,15 +68,22 @@ compatibility layers for.
   for the others.
 - **Migrations**: `migrations/sqlite/`, `migrations/postgres/`,
   `migrations/mysql/` — three independent, complete chains, all embedded
-  at compile time, the right one selected at runtime. A schema change
-  must update all three, verified against a real instance of each — never
-  add a migration to only one backend, and never copy one backend's SQL
-  into another's directory unexamined (dialects genuinely differ: no
-  `STRICT` outside SQLite, no partial/filtered indexes on MySQL/MariaDB —
-  use the generated-column workaround already established in
-  `migrations/mysql/*repo_access*` — MySQL's wire protocol reports `TEXT`
-  the same way it reports `BLOB` through `sqlx::Any`, so MySQL text
-  columns that need to decode as `String` use bounded `VARCHAR` instead).
+  at compile time, the right one selected at runtime. Each begins with a
+  single `0001_baseline.{up,down}.sql` (the Phase 9 one-time reset that
+  collapsed the original 25-migration history — a deliberate, documented,
+  greenfield-only discontinuity; a database created before it must be
+  recreated). New work resumes as incremental `0002_*`, `0003_*`, … from
+  there. A schema change must update all three backends, verified against
+  a real instance of each — never add a migration to only one backend,
+  and never copy one backend's SQL into another's directory unexamined
+  (dialects genuinely differ: no `STRICT` outside SQLite, no
+  partial/filtered indexes on MySQL/MariaDB — use the generated-column
+  workaround already established in `migrations/mysql/0001_baseline` —
+  MySQL's wire protocol reports `TEXT` the same way it reports `BLOB`
+  through `sqlx::Any`, so MySQL text columns that need to decode as
+  `String` use bounded `VARCHAR` instead). `crates/edda-db/tests/
+  schema_parity.rs` mechanically checks that all three chains produce the
+  same logical schema.
 - **Don't design a feature against one backend and retrofit the others
   later.** For any new persistence work: determine the portable
   behavior, identify genuine backend differences, isolate those

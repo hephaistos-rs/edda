@@ -269,9 +269,9 @@ async fn delete(pool: &edda_db::DbPool, username: &str) -> Result<(), String> {
         .map_err(|err| err.to_string())?;
     println!("deleted user {username}");
     println!(
-        "note: repositories this account owned are NOT deleted — ownership transfer or \
-         deletion of those repositories is a separate, deliberate action, not a side effect \
-         of removing the account"
+        "note: an account that still owns repositories cannot be deleted — transferring or \
+         deleting those repositories first is a separate, deliberate action, not a side \
+         effect of removing the account"
     );
     Ok(())
 }

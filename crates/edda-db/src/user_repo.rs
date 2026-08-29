@@ -21,6 +21,21 @@ pub enum InsertUserError {
     Db(#[from] DbError),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum DeleteUserError {
+    /// The account still directly owns one or more repositories. Since the
+    /// Phase 9 baseline `repositories.owner_user_id` restricts deletes,
+    /// those repositories must be transferred or deleted first.
+    #[error(
+        "this account still owns {count} repositor{plural} — transfer or delete {them} first",
+        plural = if *count == 1 { "y" } else { "ies" },
+        them = if *count == 1 { "it" } else { "them" },
+    )]
+    OwnsRepositories { count: i64 },
+    #[error(transparent)]
+    Db(#[from] DbError),
+}
+
 #[allow(clippy::too_many_arguments)]
 fn row_to_user_row(
     id: String,
@@ -299,15 +314,22 @@ impl UserRepo {
     /// Permanently deletes an account and everything that cascades from it
     /// (access tokens, SSH keys, OAuth identities, TOTP/WebAuthn
     /// credentials, repo-access grants — every FK referencing `users(id)`
-    /// in this crate's migrations is `ON DELETE CASCADE`). Does **not**
-    /// delete repositories the account owns — an owned repository has no
-    /// `ON DELETE CASCADE` from `users` (ownership transfer/deletion is a
-    /// deliberate, separate operation, not a side effect of removing the
-    /// account), so those rows are left in place; `edda-cli user delete`
-    /// surfaces that as an explicit warning rather than silently orphaning
-    /// them.
-    pub async fn delete<'c>(db: impl DbConn<'c>, id: UserId) -> Result<bool, DbError> {
+    /// in the baseline schema is `ON DELETE CASCADE`). Does **not** delete
+    /// repositories the account owns: since the Phase 9 baseline
+    /// `repositories.owner_user_id` is a real *restricting* foreign key,
+    /// so an account that still owns repositories cannot be deleted at
+    /// all. This method makes that a clear typed error
+    /// (`DeleteUserError::OwnsRepositories`) rather than a raw foreign-key
+    /// violation — ownership transfer or repository deletion is a
+    /// deliberate, separate operation.
+    pub async fn delete<'c>(db: impl DbConn<'c>, id: UserId) -> Result<bool, DeleteUserError> {
         let mut h = crate::conn::open(db).await?;
+
+        let owned = crate::RepositoryRepo::count_owned_by_user(&mut h, id).await?;
+        if owned > 0 {
+            return Err(DeleteUserError::OwnsRepositories { count: owned });
+        }
+
         let id_text = id.to_string();
         let sql = match h.backend() {
             Backend::Postgres => "DELETE FROM users WHERE id = $1",
@@ -316,7 +338,8 @@ impl UserRepo {
         let result = sqlx::query(sql)
             .bind(&id_text)
             .execute(&mut *h.conn())
-            .await?;
+            .await
+            .map_err(DbError::from)?;
         Ok(result.rows_affected() > 0)
     }
 

@@ -113,6 +113,11 @@ jobs:
       - name: Grant the test user database-creation rights (mysql)
         if: matrix.backend == 'mysql'
         run: mariadb -h 127.0.0.1 -uroot -prootpassword < scripts/ci/mariadb-grant.sql
+      # Runs the whole suite on this leg's backend — including
+      # `edda-db`'s `schema_parity` test (introspects the live schema and
+      # asserts it matches the one canonical logical schema, so a change
+      # that lands in only one of the three `0001_baseline` files fails
+      # here) and `baseline_roundtrip` (`up`→`down`→`up`).
       - name: cargo test
         env:
           # A GitHub expression that resolves to '' would still export the

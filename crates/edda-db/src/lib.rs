@@ -81,7 +81,7 @@ pub use secret_rotation::{SecretRotationRepo, StoredSecret};
 pub use ssh_key_repo::SshKeyRepo;
 pub use team_repo::{InsertTeamError, TeamMemberRepo, TeamRepo};
 pub use totp_repo::TotpRepo;
-pub use user_repo::UserRepo;
+pub use user_repo::{DeleteUserError, UserRepo};
 pub use webauthn_repo::WebauthnRepo;
 pub use webhook_repo::{WebhookDeliveryRepo, WebhookRepo};
 

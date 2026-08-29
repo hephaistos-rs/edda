@@ -196,6 +196,12 @@ async fn delete_user(
             StatusCode::OK.into_response()
         }
         Ok(false) => (StatusCode::NOT_FOUND, "no such user").into_response(),
+        // The account still owns repositories — a precondition failure the
+        // caller can act on (transfer/delete those first), not a server
+        // error.
+        Err(err @ edda_db::DeleteUserError::OwnsRepositories { .. }) => {
+            (StatusCode::CONFLICT, err.to_string()).into_response()
+        }
         Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
     }
 }

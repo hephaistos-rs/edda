@@ -10,32 +10,23 @@ pub enum InsertRepositoryError {
     Db(#[from] DbError),
 }
 
-fn row_to_repository(
-    id: String,
-    owner_type: String,
-    owner_id: String,
-    name: String,
-    description: Option<String>,
-    visibility: String,
-    forked_from: Option<String>,
-) -> Repository {
-    let owner = match owner_type.as_str() {
-        "user" => RepositoryOwner::User(owner_id.parse().expect("stored owner id is a valid UUID")),
-        "organization" => RepositoryOwner::Organization(
-            owner_id.parse().expect("stored owner id is a valid UUID"),
-        ),
-        other => {
-            unreachable!("unexpected repositories.owner_type value {other:?} — schema/domain drift")
+/// Reconstructs the domain `RepositoryOwner` from the `repositories`
+/// row's typed FK pair. Since the Phase 9 baseline, ownership is
+/// `owner_user_id` / `owner_org_id` — two nullable columns with a
+/// database `CHECK` that exactly one is set — not the old polymorphic
+/// `(owner_type TEXT, owner_id TEXT)` pair.
+fn row_to_owner(owner_user_id: Option<String>, owner_org_id: Option<String>) -> RepositoryOwner {
+    match (owner_user_id, owner_org_id) {
+        (Some(user_id), None) => {
+            RepositoryOwner::User(user_id.parse().expect("stored owner_user_id is a valid UUID"))
         }
-    };
-    Repository {
-        id: id.parse().expect("stored repository id is a valid UUID"),
-        owner,
-        name,
-        description,
-        visibility: Visibility::from_db_str(&visibility)
-            .expect("stored repositories.visibility is one of the CHECK'd values"),
-        forked_from: forked_from.map(|id| id.parse().expect("stored forked_from is a valid UUID")),
+        (None, Some(org_id)) => RepositoryOwner::Organization(
+            org_id.parse().expect("stored owner_org_id is a valid UUID"),
+        ),
+        (user, org) => unreachable!(
+            "repositories row has {} owner columns set — the one-owner CHECK should make this impossible (user={user:?}, org={org:?})",
+            user.is_some() as u8 + org.is_some() as u8
+        ),
     }
 }
 
@@ -47,30 +38,16 @@ impl RepositoryRepo {
         repository: &Repository,
     ) -> Result<(), InsertRepositoryError> {
         let mut h = crate::conn::open(db).await?;
-        let id = repository.id.to_string();
-        let owner_type = repository.owner.owner_type_db_str();
-        let owner_id = repository.owner.owner_id().to_string();
-        let visibility = repository.visibility.as_db_str();
-        let forked_from = repository.forked_from.map(|id| id.to_string());
-        let created_at = crate::now_unix();
-
-        let sql = match h.backend() {
-            Backend::Postgres => {
-                "INSERT INTO repositories (id, owner_type, owner_id, name, description, visibility, forked_from, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
-            }
-            Backend::Sqlite | Backend::MySql => {
-                "INSERT INTO repositories (id, owner_type, owner_id, name, description, visibility, forked_from, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-            }
-        };
-        match sqlx::query(sql)
-            .bind(&id)
-            .bind(owner_type)
-            .bind(&owner_id)
+        let backend = h.backend();
+        match sqlx::query(insert_repository_sql(backend))
+            .bind(repository.id.to_string())
+            .bind(repository.owner.as_user().map(|id| id.to_string()))
+            .bind(repository.owner.as_organization().map(|id| id.to_string()))
             .bind(&repository.name)
             .bind(&repository.description)
-            .bind(visibility)
-            .bind(&forked_from)
-            .bind(created_at)
+            .bind(repository.visibility.as_db_str())
+            .bind(repository.forked_from.map(|id| id.to_string()))
+            .bind(crate::now_unix())
             .execute(&mut *h.conn())
             .await
             .map_err(DbError::from)
@@ -97,69 +74,7 @@ impl RepositoryRepo {
         repository: &Repository,
         owner_user_id: UserId,
     ) -> Result<(), InsertRepositoryError> {
-        let mut h = crate::conn::open(db).await?;
-        let backend = h.backend();
-        let id = repository.id.to_string();
-        let owner_type = repository.owner.owner_type_db_str();
-        let owner_id = repository.owner.owner_id().to_string();
-        let visibility = repository.visibility.as_db_str();
-        let forked_from = repository.forked_from.map(|id| id.to_string());
-        let created_at = crate::now_unix();
-
-        let mut tx = h.begin().await?;
-
-        let insert_sql = match backend {
-            Backend::Postgres => {
-                "INSERT INTO repositories (id, owner_type, owner_id, name, description, visibility, forked_from, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
-            }
-            Backend::Sqlite | Backend::MySql => {
-                "INSERT INTO repositories (id, owner_type, owner_id, name, description, visibility, forked_from, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-            }
-        };
-        match sqlx::query(insert_sql)
-            .bind(&id)
-            .bind(owner_type)
-            .bind(&owner_id)
-            .bind(&repository.name)
-            .bind(&repository.description)
-            .bind(visibility)
-            .bind(&forked_from)
-            .bind(created_at)
-            .execute(&mut *tx)
-            .await
-            .map_err(DbError::from)
-        {
-            Ok(_) => {}
-            Err(DbError::UniqueViolation) => {
-                return Err(InsertRepositoryError::AlreadyExists(
-                    repository.name.clone(),
-                ));
-            }
-            Err(err) => return Err(InsertRepositoryError::Db(err)),
-        }
-
-        let owner_user_id_text = owner_user_id.to_string();
-        let role = edda_domain::RepoRole::Owner.as_db_str();
-        let granted_at = crate::now_unix();
-        let grant_sql = match backend {
-            Backend::Postgres => {
-                "INSERT INTO repo_access (repository_id, subject_type, subject_id, role, added_at) VALUES ($1, 'user', $2, $3, $4)"
-            }
-            Backend::Sqlite | Backend::MySql => {
-                "INSERT INTO repo_access (repository_id, subject_type, subject_id, role, added_at) VALUES (?, 'user', ?, ?, ?)"
-            }
-        };
-        sqlx::query(grant_sql)
-            .bind(&id)
-            .bind(&owner_user_id_text)
-            .bind(role)
-            .bind(granted_at)
-            .execute(&mut *tx)
-            .await
-            .map_err(DbError::from)?;
-
-        tx.commit().await.map_err(DbError::from)?;
-        Ok(())
+        Self::insert_with_owner_grant(db, repository, OwnerGrant::User(owner_user_id)).await
     }
 
     /// The organization-owned counterpart of `insert_with_owner`: grants
@@ -173,34 +88,28 @@ impl RepositoryRepo {
         repository: &Repository,
         owner_team_id: TeamId,
     ) -> Result<(), InsertRepositoryError> {
+        Self::insert_with_owner_grant(db, repository, OwnerGrant::Team(owner_team_id)).await
+    }
+
+    async fn insert_with_owner_grant<'c>(
+        db: impl DbConn<'c>,
+        repository: &Repository,
+        grant: OwnerGrant,
+    ) -> Result<(), InsertRepositoryError> {
         let mut h = crate::conn::open(db).await?;
         let backend = h.backend();
         let id = repository.id.to_string();
-        let owner_type = repository.owner.owner_type_db_str();
-        let owner_id = repository.owner.owner_id().to_string();
-        let visibility = repository.visibility.as_db_str();
-        let forked_from = repository.forked_from.map(|id| id.to_string());
-        let created_at = crate::now_unix();
-
         let mut tx = h.begin().await?;
 
-        let insert_sql = match backend {
-            Backend::Postgres => {
-                "INSERT INTO repositories (id, owner_type, owner_id, name, description, visibility, forked_from, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
-            }
-            Backend::Sqlite | Backend::MySql => {
-                "INSERT INTO repositories (id, owner_type, owner_id, name, description, visibility, forked_from, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-            }
-        };
-        match sqlx::query(insert_sql)
+        match sqlx::query(insert_repository_sql(backend))
             .bind(&id)
-            .bind(owner_type)
-            .bind(&owner_id)
+            .bind(repository.owner.as_user().map(|id| id.to_string()))
+            .bind(repository.owner.as_organization().map(|id| id.to_string()))
             .bind(&repository.name)
             .bind(&repository.description)
-            .bind(visibility)
-            .bind(&forked_from)
-            .bind(created_at)
+            .bind(repository.visibility.as_db_str())
+            .bind(repository.forked_from.map(|id| id.to_string()))
+            .bind(crate::now_unix())
             .execute(&mut *tx)
             .await
             .map_err(DbError::from)
@@ -214,20 +123,23 @@ impl RepositoryRepo {
             Err(err) => return Err(InsertRepositoryError::Db(err)),
         }
 
-        let owner_team_id_text = owner_team_id.to_string();
         let role = edda_domain::RepoRole::Owner.as_db_str();
         let granted_at = crate::now_unix();
-        let grant_sql = match backend {
-            Backend::Postgres => {
-                "INSERT INTO repo_access (repository_id, subject_type, subject_id, role, added_at) VALUES ($1, 'team', $2, $3, $4)"
-            }
-            Backend::Sqlite | Backend::MySql => {
-                "INSERT INTO repo_access (repository_id, subject_type, subject_id, role, added_at) VALUES (?, 'team', ?, ?, ?)"
-            }
+        let (subject_column, subject_id) = match grant {
+            OwnerGrant::User(user_id) => ("subject_user_id", user_id.to_string()),
+            OwnerGrant::Team(team_id) => ("subject_team_id", team_id.to_string()),
         };
-        sqlx::query(grant_sql)
+        let grant_sql = match backend {
+            Backend::Postgres => format!(
+                "INSERT INTO repo_access (repository_id, {subject_column}, role, added_at) VALUES ($1, $2, $3, $4)"
+            ),
+            Backend::Sqlite | Backend::MySql => format!(
+                "INSERT INTO repo_access (repository_id, {subject_column}, role, added_at) VALUES (?, ?, ?, ?)"
+            ),
+        };
+        sqlx::query(&grant_sql)
             .bind(&id)
-            .bind(&owner_team_id_text)
+            .bind(&subject_id)
             .bind(role)
             .bind(granted_at)
             .execute(&mut *tx)
@@ -244,20 +156,21 @@ impl RepositoryRepo {
         name: &str,
     ) -> Result<Option<Repository>, DbError> {
         let mut h = crate::conn::open(db).await?;
-        let owner_type = owner.owner_type_db_str();
+        // Which typed owner column this lookup keys on.
+        let owner_column = match owner {
+            RepositoryOwner::User(_) => "owner_user_id",
+            RepositoryOwner::Organization(_) => "owner_org_id",
+        };
         let owner_id = owner.owner_id().to_string();
         let sql = match h.backend() {
-            Backend::Postgres => {
-                r#"SELECT id, owner_type, owner_id, name, description, visibility, forked_from
-                   FROM repositories WHERE owner_type = $1 AND owner_id = $2 AND name = $3"#
-            }
-            Backend::Sqlite | Backend::MySql => {
-                r#"SELECT id, owner_type, owner_id, name, description, visibility, forked_from
-                   FROM repositories WHERE owner_type = ? AND owner_id = ? AND name = ?"#
-            }
+            Backend::Postgres => format!(
+                "SELECT {REPO_COLS} FROM repositories WHERE {owner_column} = $1 AND name = $2"
+            ),
+            Backend::Sqlite | Backend::MySql => format!(
+                "SELECT {REPO_COLS} FROM repositories WHERE {owner_column} = ? AND name = ?"
+            ),
         };
-        let row = sqlx::query(sql)
-            .bind(owner_type)
+        let row = sqlx::query(&sql)
             .bind(&owner_id)
             .bind(name)
             .fetch_optional(&mut *h.conn())
@@ -310,13 +223,13 @@ impl RepositoryRepo {
         let id_text = id.to_string();
         let sql = match h.backend() {
             Backend::Postgres => {
-                "SELECT id, owner_type, owner_id, name, description, visibility, forked_from FROM repositories WHERE id = $1"
+                format!("SELECT {REPO_COLS} FROM repositories WHERE id = $1")
             }
             Backend::Sqlite | Backend::MySql => {
-                "SELECT id, owner_type, owner_id, name, description, visibility, forked_from FROM repositories WHERE id = ?"
+                format!("SELECT {REPO_COLS} FROM repositories WHERE id = ?")
             }
         };
-        let row = sqlx::query(sql)
+        let row = sqlx::query(&sql)
             .bind(&id_text)
             .fetch_optional(&mut *h.conn())
             .await?;
@@ -336,23 +249,13 @@ impl RepositoryRepo {
         let id_text = id.to_string();
         let sql = match h.backend() {
             Backend::Postgres => {
-                r#"SELECT r.id, r.owner_type, r.owner_id, r.name, r.description, r.visibility, r.forked_from,
-                          COALESCE(u.username, o.name) as owner_username
-                   FROM repositories r
-                   LEFT JOIN users u ON u.id = r.owner_id AND r.owner_type = 'user'
-                   LEFT JOIN organizations o ON o.id = r.owner_id AND r.owner_type = 'organization'
-                   WHERE r.id = $1"#
+                format!("{REPO_OWNER_JOIN_SELECT} WHERE r.id = $1")
             }
             Backend::Sqlite | Backend::MySql => {
-                r#"SELECT r.id, r.owner_type, r.owner_id, r.name, r.description, r.visibility, r.forked_from,
-                          COALESCE(u.username, o.name) as owner_username
-                   FROM repositories r
-                   LEFT JOIN users u ON u.id = r.owner_id AND r.owner_type = 'user'
-                   LEFT JOIN organizations o ON o.id = r.owner_id AND r.owner_type = 'organization'
-                   WHERE r.id = ?"#
+                format!("{REPO_OWNER_JOIN_SELECT} WHERE r.id = ?")
             }
         };
-        let row = sqlx::query(sql)
+        let row = sqlx::query(&sql)
             .bind(&id_text)
             .fetch_optional(&mut *h.conn())
             .await?;
@@ -370,9 +273,9 @@ impl RepositoryRepo {
     /// instance's current expected scale.
     pub async fn list_all<'c>(db: impl DbConn<'c>) -> Result<Vec<Repository>, DbError> {
         let mut h = crate::conn::open(db).await?;
-        let rows = sqlx::query(
-            "SELECT id, owner_type, owner_id, name, description, visibility, forked_from FROM repositories ORDER BY owner_id, name",
-        )
+        let rows = sqlx::query(&format!(
+            "SELECT {REPO_COLS} FROM repositories ORDER BY COALESCE(owner_user_id, owner_org_id), name"
+        ))
         .fetch_all(&mut *h.conn())
         .await?;
         rows.into_iter().map(row_to_repository_row).collect()
@@ -380,7 +283,7 @@ impl RepositoryRepo {
 
     /// Every repository, alongside its owner's display name (a username or
     /// an organization name — exactly one `LEFT JOIN` below matches per
-    /// row, since `owner_type` picks which) — the join `list_all`
+    /// row, since exactly one owner column is set) — the join `list_all`
     /// deliberately doesn't do (nothing else needs it): a repository
     /// listing DTO needs the `{owner}/{name}` display form, and resolving
     /// that per-row here avoids an N+1 owner-name lookup in `edda-web`'s
@@ -389,14 +292,9 @@ impl RepositoryRepo {
         db: impl DbConn<'c>,
     ) -> Result<Vec<(Repository, String)>, DbError> {
         let mut h = crate::conn::open(db).await?;
-        let rows = sqlx::query(
-            r#"SELECT r.id, r.owner_type, r.owner_id, r.name, r.description, r.visibility, r.forked_from,
-                      COALESCE(u.username, o.name) as owner_username
-               FROM repositories r
-               LEFT JOIN users u ON u.id = r.owner_id AND r.owner_type = 'user'
-               LEFT JOIN organizations o ON o.id = r.owner_id AND r.owner_type = 'organization'
-               ORDER BY owner_username, r.name"#,
-        )
+        let rows = sqlx::query(&format!(
+            "{REPO_OWNER_JOIN_SELECT} ORDER BY owner_username, r.name"
+        ))
         .fetch_all(&mut *h.conn())
         .await?;
         rows.into_iter()
@@ -463,16 +361,76 @@ impl RepositoryRepo {
             .await?;
         Ok(())
     }
+
+    /// How many repositories `user_id` directly owns (via
+    /// `owner_user_id`). The `edda-cli user delete` / admin delete-user
+    /// paths call this to give a clear "still owns N repositories" error
+    /// instead of surfacing a raw foreign-key violation — since the Phase
+    /// 9 baseline `repositories.owner_user_id` is a real restricting
+    /// foreign key, so deleting an owner while repositories remain fails.
+    pub async fn count_owned_by_user<'c>(
+        db: impl DbConn<'c>,
+        user_id: UserId,
+    ) -> Result<i64, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let user_id_text = user_id.to_string();
+        let sql = match h.backend() {
+            Backend::Postgres => "SELECT COUNT(*) AS n FROM repositories WHERE owner_user_id = $1",
+            Backend::Sqlite | Backend::MySql => {
+                "SELECT COUNT(*) AS n FROM repositories WHERE owner_user_id = ?"
+            }
+        };
+        let row = sqlx::query(sql)
+            .bind(&user_id_text)
+            .fetch_one(&mut *h.conn())
+            .await?;
+        Ok(crate::get_i64(&row, "n")?)
+    }
+}
+
+enum OwnerGrant {
+    User(UserId),
+    Team(TeamId),
+}
+
+/// The `repositories` column list every `SELECT` that reconstructs a
+/// `Repository` reads, in the order `row_to_repository_row` expects.
+const REPO_COLS: &str =
+    "id, owner_user_id, owner_org_id, name, description, visibility, forked_from";
+
+/// The `SELECT` that also resolves the owner's display name — exactly one
+/// `LEFT JOIN` matches per row (one owner column is always NULL).
+const REPO_OWNER_JOIN_SELECT: &str = r#"SELECT r.id, r.owner_user_id, r.owner_org_id, r.name, r.description, r.visibility, r.forked_from,
+          COALESCE(u.username, o.name) AS owner_username
+   FROM repositories r
+   LEFT JOIN users u ON u.id = r.owner_user_id
+   LEFT JOIN organizations o ON o.id = r.owner_org_id"#;
+
+fn insert_repository_sql(backend: Backend) -> &'static str {
+    match backend {
+        Backend::Postgres => {
+            "INSERT INTO repositories (id, owner_user_id, owner_org_id, name, description, visibility, forked_from, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+        }
+        Backend::Sqlite | Backend::MySql => {
+            "INSERT INTO repositories (id, owner_user_id, owner_org_id, name, description, visibility, forked_from, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        }
+    }
 }
 
 fn row_to_repository_row(row: sqlx::any::AnyRow) -> Result<Repository, DbError> {
-    Ok(row_to_repository(
-        get_string(&row, "id")?,
-        get_string(&row, "owner_type")?,
-        get_string(&row, "owner_id")?,
-        get_string(&row, "name")?,
-        get_opt_string(&row, "description")?,
-        get_string(&row, "visibility")?,
-        get_opt_string(&row, "forked_from")?,
-    ))
+    Ok(Repository {
+        id: get_string(&row, "id")?
+            .parse()
+            .expect("stored repository id is a valid UUID"),
+        owner: row_to_owner(
+            get_opt_string(&row, "owner_user_id")?,
+            get_opt_string(&row, "owner_org_id")?,
+        ),
+        name: get_string(&row, "name")?,
+        description: get_opt_string(&row, "description")?,
+        visibility: Visibility::from_db_str(&get_string(&row, "visibility")?)
+            .expect("stored repositories.visibility is one of the CHECK'd values"),
+        forked_from: get_opt_string(&row, "forked_from")?
+            .map(|id| id.parse().expect("stored forked_from is a valid UUID")),
+    })
 }

@@ -47,6 +47,28 @@ impl RepositoryOwner {
             RepositoryOwner::Organization(id) => id.as_uuid(),
         }
     }
+
+    /// The `repositories.owner_user_id` value for this owner — `Some` for
+    /// a user-owned repository, `None` for an organization-owned one.
+    /// Since Phase 9 the persisted form is a pair of typed, nullable
+    /// foreign-key columns (`owner_user_id` / `owner_org_id`), exactly one
+    /// set, rather than the old polymorphic `(owner_type, owner_id)` text
+    /// pair — see the `0001_baseline` migration.
+    pub fn as_user(self) -> Option<UserId> {
+        match self {
+            RepositoryOwner::User(id) => Some(id),
+            RepositoryOwner::Organization(_) => None,
+        }
+    }
+
+    /// The `repositories.owner_org_id` value for this owner — the
+    /// organization counterpart of [`RepositoryOwner::as_user`].
+    pub fn as_organization(self) -> Option<OrganizationId> {
+        match self {
+            RepositoryOwner::Organization(id) => Some(id),
+            RepositoryOwner::User(_) => None,
+        }
+    }
 }
 
 /// A repository's identity of record — the persisted metadata `edda-db`

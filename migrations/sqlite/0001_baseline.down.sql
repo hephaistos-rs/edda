@@ -1,0 +1,41 @@
+-- Reverses `0001_baseline.up.sql`. `edda_db::run_migrations` disables
+-- `PRAGMA foreign_keys` for the whole SQLite migration run, so drop
+-- order doesn't matter for FK enforcement; child-before-parent anyway
+-- for readability.
+DROP TABLE IF EXISTS events;
+DROP TABLE IF EXISTS notifications;
+DROP TABLE IF EXISTS webhook_deliveries;
+DROP TABLE IF EXISTS webhooks;
+DROP TABLE IF EXISTS release_assets;
+DROP TABLE IF EXISTS releases;
+DROP TABLE IF EXISTS jobs;
+DROP TABLE IF EXISTS branch_protection_rules;
+DROP TABLE IF EXISTS issue_labels;
+DROP TABLE IF EXISTS labels;
+DROP TABLE IF EXISTS issue_comments;
+DROP TABLE IF EXISTS issues;
+DROP TABLE IF EXISTS milestones;
+DROP TABLE IF EXISTS pr_comments;
+DROP TABLE IF EXISTS pr_reviews;
+DROP TABLE IF EXISTS pull_requests;
+DROP TABLE IF EXISTS lfs_locks;
+DROP TABLE IF EXISTS lfs_objects;
+DROP TABLE IF EXISTS audit_events;
+DROP TABLE IF EXISTS login_attempts;
+DROP TABLE IF EXISTS email_verification_tokens;
+DROP TABLE IF EXISTS password_reset_tokens;
+DROP TABLE IF EXISTS webauthn_credentials;
+DROP TABLE IF EXISTS totp_recovery_codes;
+DROP TABLE IF EXISTS totp_secrets;
+DROP TABLE IF EXISTS oauth_identities;
+DROP TABLE IF EXISTS deploy_keys;
+DROP TABLE IF EXISTS ssh_keys;
+DROP TABLE IF EXISTS access_tokens;
+DROP TABLE IF EXISTS repo_number_counters;
+DROP TABLE IF EXISTS repo_access;
+DROP TABLE IF EXISTS repositories;
+DROP TABLE IF EXISTS team_unit_permissions;
+DROP TABLE IF EXISTS team_members;
+DROP TABLE IF EXISTS teams;
+DROP TABLE IF EXISTS organizations;
+DROP TABLE IF EXISTS users;

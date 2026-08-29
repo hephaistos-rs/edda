@@ -224,6 +224,8 @@ pub enum PrStateDto {
     Merged {
         merged_at: i64,
         merge_commit: String,
+        /// `merge` / `squash` / `rebase` / `fast_forward`.
+        strategy: String,
     },
     Closed {
         closed_at: i64,
@@ -307,10 +309,22 @@ pub struct CreatedNumberDto {
     pub number: i64,
 }
 
+/// `POST /api/v1/repos/{owner}/{repo}/pulls/{number}/merge` — the body is
+/// optional; an absent one (or absent `strategy`) means a merge commit.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeRequest {
+    /// `merge` (default) / `squash` / `rebase` / `fast_forward`.
+    #[serde(default)]
+    pub strategy: Option<String>,
+}
+
 /// `POST /api/v1/repos/{owner}/{repo}/pulls/{number}/merge`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MergedPullDto {
     pub merge_commit: String,
+    /// The strategy that was actually used (echoes the request, or
+    /// `merge` when none was given).
+    pub strategy: String,
 }
 
 // ────────────────────────── branch protection ─────────────────────────

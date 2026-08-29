@@ -1,9 +1,17 @@
 use dioxus::prelude::*;
 
 use edda_api_types::{
-    AddCommentRequest, CreatePullRequest, MergedPullDto, PrStateDto, PullRequestDetailDto,
-    PullRequestDto, SubmitReviewRequest,
+    AddCommentRequest, CreatePullRequest, MergeRequest, MergedPullDto, PrStateDto,
+    PullRequestDetailDto, PullRequestDto, SubmitReviewRequest,
 };
+
+/// `(value, label)` for the merge-strategy picker.
+const MERGE_STRATEGIES: [(&str, &str); 4] = [
+    ("merge", "merge commit"),
+    ("squash", "squash and merge"),
+    ("rebase", "rebase and merge"),
+    ("fast_forward", "fast-forward only"),
+];
 
 use crate::api_client::{self, ApiResult};
 use crate::Route;
@@ -229,6 +237,7 @@ pub fn PullDetail(owner: String, name: String, number: i64) -> Element {
     let mut comment_body = use_signal(String::new);
     let mut action_error = use_signal(|| Option::<String>::None);
     let mut busy = use_signal(|| false);
+    let mut merge_strategy = use_signal(|| "merge".to_string());
 
     let pr_base = pulls_path(&owner, &name);
 
@@ -281,10 +290,13 @@ pub fn PullDetail(owner: String, name: String, number: i64) -> Element {
     let merge_base = pr_base.clone();
     let on_merge = move |_| {
         let path = format!("{merge_base}/{number}/merge");
+        let request = MergeRequest {
+            strategy: Some(merge_strategy.read().clone()),
+        };
         busy.set(true);
         action_error.set(None);
         spawn(async move {
-            match api_client::post_empty::<MergedPullDto>(&path).await {
+            match api_client::post_json::<_, MergedPullDto>(&path, &request).await {
                 Ok(_) => detail.restart(),
                 Err(err) => action_error.set(Some(err.to_string())),
             }
@@ -387,6 +399,15 @@ pub fn PullDetail(owner: String, name: String, number: i64) -> Element {
                                         move |_| submit_review(base.clone(), number, "changes_requested", busy, action_error, detail)
                                     },
                                     "request changes"
+                                }
+                                select {
+                                    class: "border border-line bg-surface px-2 py-1.5 font-mono text-sm text-ink disabled:opacity-60",
+                                    disabled: busy(),
+                                    value: "{merge_strategy}",
+                                    onchange: move |event| merge_strategy.set(event.value()),
+                                    for (value, label) in MERGE_STRATEGIES {
+                                        option { value: "{value}", "{label}" }
+                                    }
                                 }
                                 button {
                                     r#type: "button", disabled: busy() || !data.can_merge,

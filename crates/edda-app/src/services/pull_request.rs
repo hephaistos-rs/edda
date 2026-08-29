@@ -15,7 +15,7 @@ use edda_domain::{
     ReviewState,
 };
 use edda_git::store::RepoStore;
-use edda_git::{merge_branches, merge_ref_into_branch, LockRegistry, MergeOutcome};
+use edda_git::{LockRegistry, MergeOutcome};
 
 use super::{git_identity, mentions, now_unix, ServiceError};
 use crate::AppState;
@@ -288,6 +288,7 @@ impl PullRequestService {
         owner: &str,
         name: &str,
         number: i64,
+        strategy: MergeStrategy,
     ) -> Result<MergeOutcome, ServiceError> {
         let committer = super::acting_user(&self.pool, actor).await?;
         let repository = self.authz.repository_by_name(owner, name).await?;
@@ -349,21 +350,17 @@ impl PullRequestService {
         let lock = self.locks.lock_for(&identity);
         let _guard = lock.lock().await;
 
-        let outcome = if pr.source.repository_id == repository.id {
-            merge_branches(
-                self.store.as_ref(),
-                &identity,
-                &pr.source.branch,
-                &pr.target,
-                &committer.username,
-                &committer.email,
-                &format!("Merge pull request #{number} from {}", pr.source.branch),
-            )?
+        // Resolve the incoming side to a ref in the *target* repo. Same-repo
+        // PRs merge straight from `refs/heads/{source}`; a fork-sourced PR
+        // re-imports the fork's current tip (it may have moved since the PR
+        // opened) into the internal pull-head ref and merges from that — the
+        // fork is never written to.
+        let (source_ref, source_label) = if pr.source.repository_id == repository.id {
+            (
+                format!("refs/heads/{}", pr.source.branch),
+                pr.source.branch.clone(),
+            )
         } else {
-            // Cross-repository: refresh the imported source tip (the fork
-            // may have moved since the PR opened), then merge from that
-            // internal pull-head ref. The merge writes only into the
-            // target — the fork is never touched.
             let (source_repo, source_owner) =
                 RepositoryRepo::find_by_id_with_owner_username(&self.pool, pr.source.repository_id)
                     .await?
@@ -377,25 +374,38 @@ impl PullRequestService {
                 &identity,
                 &head_ref,
             )?;
-            merge_ref_into_branch(
-                self.store.as_ref(),
-                &identity,
-                &head_ref,
-                &format!("{source_owner}:{}", pr.source.branch),
-                &pr.target,
-                &committer.username,
-                &committer.email,
-                &format!(
-                    "Merge pull request #{number} from {source_owner}:{}",
-                    pr.source.branch
-                ),
-            )?
+            (head_ref, format!("{source_owner}:{}", pr.source.branch))
         };
+
+        // Squash merges want the PR's own title/body as the commit message;
+        // the merge-commit strategy wants the conventional summary line;
+        // rebase and fast-forward reuse the incoming commits' messages.
+        let message = match strategy {
+            MergeStrategy::Squash => {
+                match pr.body.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+                    Some(body) => format!("{} (#{number})\n\n{body}", pr.title),
+                    None => format!("{} (#{number})", pr.title),
+                }
+            }
+            _ => format!("Merge pull request #{number} from {source_label}"),
+        };
+
+        let outcome = edda_git::merge_pull_request(
+            self.store.as_ref(),
+            &identity,
+            &source_ref,
+            &source_label,
+            &pr.target,
+            strategy,
+            &committer.username,
+            &committer.email,
+            &message,
+        )?;
 
         let merged_state = PrState::Merged {
             merged_at: now_unix(),
             merge_commit: outcome.merge_commit.clone(),
-            strategy: MergeStrategy::Merge,
+            strategy,
         };
 
         let mut tx = self.pool.begin().await?;
@@ -419,6 +429,7 @@ impl PullRequestService {
                     .detail(serde_json::json!({
                         "number": number,
                         "merge_commit": outcome.merge_commit,
+                        "strategy": strategy.as_db_str(),
                     })),
             )
             .await;

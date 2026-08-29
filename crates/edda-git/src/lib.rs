@@ -19,7 +19,10 @@ pub use archive::{archive, ArchiveFormat};
 pub use blame::{blame, Blame, BlameHunk};
 pub use diff::{commit_diff, diff_refs, DiffHunk, DiffLine, FileDiff};
 pub use hooks::{AppliedRef, ReceiveChecks, ReceiveOutcome};
-pub use merge::{merge_branches, merge_ref_into_branch, MergeOutcome};
+pub use merge::{
+    fast_forward_branch_to_ref, merge_branches, merge_pull_request, merge_ref_into_branch,
+    rebase_ref_onto_branch, squash_ref_into_branch, MergeOutcome,
+};
 pub use refs::{force_set_ref, point_head_at, update_refs, RefUpdate, ZERO_ID};
 pub use search::{search_tree, SearchMatch};
 pub use store::repo_storage_bytes;
@@ -104,6 +107,10 @@ pub enum GitError {
     /// conflicts — the merge was not completed, no objects it wrote are
     /// reachable from any ref, and the target branch was not moved.
     Conflict(usize),
+    /// A fast-forward-only merge was requested but the target branch
+    /// cannot reach the source by fast-forward (its history has diverged).
+    /// Nothing was written and no branch was moved.
+    NotFastForward,
 }
 
 impl fmt::Display for GitError {
@@ -118,6 +125,9 @@ impl fmt::Display for GitError {
             GitError::Git(err) => write!(f, "{err}"),
             GitError::Conflict(count) => {
                 write!(f, "the merge has {count} unresolved conflict(s)")
+            }
+            GitError::NotFastForward => {
+                write!(f, "the target branch cannot fast-forward to the source")
             }
         }
     }

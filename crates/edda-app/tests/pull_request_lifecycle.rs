@@ -264,7 +264,13 @@ async fn a_pull_request_opens_is_reviewed_and_merges_against_a_real_repository()
         AuthorizationService::new(pool.clone()),
     );
     let outcome = service
-        .merge(&ActorContext::User(alice_id), "alice", "demo", pr_number)
+        .merge(
+            &ActorContext::User(alice_id),
+            "alice",
+            "demo",
+            pr_number,
+            edda_domain::MergeStrategy::Merge,
+        )
         .await
         .expect("merge succeeds — no conflicts between these two branches");
 
@@ -325,6 +331,100 @@ async fn a_pull_request_opens_is_reviewed_and_merges_against_a_real_repository()
     assert_eq!(parent_count, 2, "the merge commit has exactly two parents");
     assert!(verify_dir.join("README.md").exists());
     assert!(verify_dir.join("feature.txt").exists());
+
+    // ── A second PR, merged with the squash strategy ──────────────────
+    // A fresh branch off the (now-merged) `main`, one commit, opened as
+    // PR #2 and squash-merged.
+    run(&repo_dir, "git", &["checkout", "main"]);
+    run(&repo_dir, "git", &["pull", "--ff-only", "origin", "main"]);
+    run(&repo_dir, "git", &["checkout", "-b", "cleanup"]);
+    std::fs::write(repo_dir.join("cleanup.txt"), b"tidy\n").expect("write file");
+    run(&repo_dir, "git", &["add", "cleanup.txt"]);
+    run(&repo_dir, "git", &["commit", "-m", "tidy up"]);
+    run(
+        &repo_dir,
+        "git",
+        &["push", "origin", "HEAD:refs/heads/cleanup"],
+    );
+
+    let pr2_id = PullRequestId::new();
+    let pr2_number = PullRequestRepo::insert(
+        &pool,
+        pr2_id,
+        repository.id,
+        edda_db::NewPullRequest {
+            title: "Tidy up",
+            body: Some("Some cleanup."),
+            author_id: bob_id,
+            source: &PrRef {
+                repository_id: repository.id,
+                branch: "cleanup".to_string(),
+            },
+            target: "main",
+            draft: false,
+        },
+    )
+    .await
+    .expect("open the second pull request");
+    assert_eq!(pr2_number, 2);
+    PrReviewRepo::insert(
+        &pool,
+        edda_domain::PrReviewId::new(),
+        pr2_id,
+        bob_id,
+        ReviewState::Approved,
+        None,
+    )
+    .await
+    .expect("approve the second pull request");
+
+    let squash_outcome = service
+        .merge(
+            &ActorContext::User(alice_id),
+            "alice",
+            "demo",
+            pr2_number,
+            MergeStrategy::Squash,
+        )
+        .await
+        .expect("squash merge succeeds");
+
+    let pr2 = PullRequestRepo::find_by_id(&pool, pr2_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(
+            pr2.state,
+            PrState::Merged {
+                strategy: MergeStrategy::Squash,
+                ..
+            }
+        ),
+        "PR #2 recorded as squash-merged, got {:?}",
+        pr2.state
+    );
+
+    // The squash commit has exactly one parent (the previous `main` tip).
+    run(&work_dir, "git", &["clone", &remote, "verify2"]);
+    let verify2_dir = work_dir.join("verify2");
+    let squash_log = Command::new("git")
+        .args(["log", "-1", "--format=%H %P"])
+        .current_dir(&verify2_dir)
+        .output()
+        .expect("read squash log");
+    let squash_line = String::from_utf8_lossy(&squash_log.stdout);
+    let mut squash_parts = squash_line.split_whitespace();
+    assert_eq!(
+        squash_parts.next().expect("squash head id"),
+        squash_outcome.merge_commit
+    );
+    assert_eq!(
+        squash_parts.count(),
+        1,
+        "the squash commit has exactly one parent"
+    );
+    assert!(verify2_dir.join("cleanup.txt").exists());
 
     let _ = std::fs::remove_dir_all(&work_dir);
     let _ = std::fs::remove_dir_all(&store_root);

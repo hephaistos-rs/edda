@@ -7,12 +7,14 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use edda_api_types::{
-    AddCommentRequest, CreatePullRequest, CreatedNumberDto, FileDiffDto, MergedPullDto,
-    PrCommentDto, PrReviewDto, PrStateDto, PullRequestDetailDto, PullRequestDto,
+    AddCommentRequest, CreatePullRequest, CreatedNumberDto, FileDiffDto, MergeRequest,
+    MergedPullDto, PrCommentDto, PrReviewDto, PrStateDto, PullRequestDetailDto, PullRequestDto,
     SubmitReviewRequest,
 };
 use edda_db::DbPool;
-use edda_domain::{ActorContext, DiffAnchor, PrState, PullRequest, RepositoryId, UserId};
+use edda_domain::{
+    ActorContext, DiffAnchor, MergeStrategy, PrState, PullRequest, RepositoryId, UserId,
+};
 
 use super::repo_browse::file_diff_dto;
 use super::{git_read, read_repo, Actor};
@@ -57,10 +59,11 @@ fn pr_state_dto(state: &PrState) -> PrStateDto {
         PrState::Merged {
             merged_at,
             merge_commit,
-            ..
+            strategy,
         } => PrStateDto::Merged {
             merged_at: *merged_at,
             merge_commit: merge_commit.clone(),
+            strategy: strategy.as_db_str().to_string(),
         },
         PrState::Closed { closed_at, reason } => PrStateDto::Closed {
             closed_at: *closed_at,
@@ -228,13 +231,21 @@ async fn merge(
     State(state): State<AppState>,
     actor: Actor,
     Path((owner, repo, number)): Path<(String, String, i64)>,
+    body: Option<Json<MergeRequest>>,
 ) -> Result<Json<MergedPullDto>, ServiceError> {
     actor.require_user()?;
+    let requested = body.map(|Json(b)| b).unwrap_or_default();
+    let strategy = match requested.strategy.as_deref() {
+        None | Some("") => MergeStrategy::Merge,
+        Some(s) => MergeStrategy::from_db_str(s)
+            .ok_or_else(|| ServiceError::Validation(format!("unknown merge strategy {s:?}")))?,
+    };
     let outcome = PullRequestService::from_state(&state)
-        .merge(actor.context(), &owner, &repo, number)
+        .merge(actor.context(), &owner, &repo, number, strategy)
         .await?;
     Ok(Json(MergedPullDto {
         merge_commit: outcome.merge_commit,
+        strategy: strategy.as_db_str().to_string(),
     }))
 }
 

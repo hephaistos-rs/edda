@@ -553,6 +553,7 @@ async fn a_required_status_check_blocks_a_merge_until_it_reports_success() {
             "alice",
             "demo",
             pr_number,
+            edda_domain::MergeStrategy::Merge,
         )
         .await
         .unwrap_err();
@@ -584,6 +585,7 @@ async fn a_required_status_check_blocks_a_merge_until_it_reports_success() {
             "alice",
             "demo",
             pr_number,
+            edda_domain::MergeStrategy::Merge,
         )
         .await
         .expect("merge succeeds once the required status is green");

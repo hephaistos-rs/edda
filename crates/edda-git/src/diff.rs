@@ -164,7 +164,7 @@ pub fn diff_refs(
     result
 }
 
-fn resolve_commit_id(
+pub(crate) fn resolve_commit_id(
     repo: &gix::Repository,
     ref_name: &str,
 ) -> Result<gix_hash::ObjectId, GitError> {

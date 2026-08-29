@@ -8,7 +8,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use edda_api_types::{EmailNotificationsRequest, NotificationDto};
-use edda_domain::{Notification, NotificationId, NotificationSubject};
+use edda_domain::{Notification, NotificationId};
 
 use super::Actor;
 use crate::services::{NotificationService, ServiceError};
@@ -26,15 +26,11 @@ pub fn routes() -> Router<AppState> {
 }
 
 fn notification_dto(notification: &Notification) -> NotificationDto {
-    let (subject_type, subject_id) = match notification.subject {
-        NotificationSubject::PullRequest(id) => ("pull_request", id.to_string()),
-        NotificationSubject::Issue(id) => ("issue", id.to_string()),
-    };
     NotificationDto {
         id: notification.id.to_string(),
         kind: notification.kind.as_db_str().to_string(),
-        subject_type: subject_type.to_string(),
-        subject_id,
+        subject_type: notification.subject.subject_type_db_str().to_string(),
+        subject_id: notification.subject.subject_id().to_string(),
         read: !notification.is_unread(),
         created_at: notification.created_at,
     }

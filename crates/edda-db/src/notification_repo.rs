@@ -2,7 +2,7 @@
 
 use edda_domain::{
     IssueId, Notification, NotificationId, NotificationKind, NotificationSubject, PullRequestId,
-    UserId,
+    ReleaseId, UserId,
 };
 
 use crate::{get_i64, get_opt_i64, get_string, Backend, DbConn, DbError};
@@ -25,6 +25,11 @@ fn row_to_subject(subject_type: &str, subject_id: &str) -> NotificationSubject {
             subject_id
                 .parse::<IssueId>()
                 .expect("stored issue id is a valid UUID"),
+        ),
+        "release" => NotificationSubject::Release(
+            subject_id
+                .parse::<ReleaseId>()
+                .expect("stored release id is a valid UUID"),
         ),
         other => unreachable!("unknown notification subject_type {other:?} in the database"),
     }

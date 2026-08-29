@@ -4,11 +4,10 @@
 //! workspace's authorization decisions, not here) decides whether a given
 //! merge attempt is allowed.
 //!
-//! **Minimal slice, by design, not a discovered limitation**:
-//! only the merge-commit strategy exists
-//! (`MergeStrategy` is a one-variant enum today, not a stringly-typed
-//! column, so a squash/rebase fast-follow is an additive match arm, not a
-//! migration).
+//! Every merge strategy a real git host offers — merge commit, squash,
+//! rebase, and fast-forward-only — is a variant of [`MergeStrategy`]
+//! (Phase 11); `edda_git::merge` has one function per variant and
+//! `PullRequestService::merge` picks the one the caller asked for.
 //!
 //! Cross-repository (fork-sourced) pull requests **are** supported as of
 //! Phase 5: `source.repository_id` may differ from
@@ -22,23 +21,42 @@
 use crate::ids::{PrCommentId, PrReviewId, PullRequestId, RepositoryId, UserId};
 
 /// How a merged pull request's changes were combined into the target
-/// branch. Deliberately a real enum, not a `String` column, even with a
-/// single variant today — see this module's doc comment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// branch. `Merge` is the default (and was the only variant before
+/// Phase 11).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MergeStrategy {
+    /// A merge commit with two parents — `target`'s tip, then `source`'s.
+    /// Always creates a commit, even when a fast-forward was possible.
+    #[default]
     Merge,
+    /// One commit on `target` whose tree is the merge result and whose
+    /// single parent is `target`'s tip: the source branch's individual
+    /// commits do not enter `target`'s history.
+    Squash,
+    /// The commits unique to `source` are replayed one-by-one onto
+    /// `target`'s tip; no merge commit.
+    Rebase,
+    /// Permitted only when `target` can reach `source` by fast-forward
+    /// (no merge needed); `target` simply moves to `source`'s tip.
+    FastForwardOnly,
 }
 
 impl MergeStrategy {
     pub const fn as_db_str(self) -> &'static str {
         match self {
             MergeStrategy::Merge => "merge",
+            MergeStrategy::Squash => "squash",
+            MergeStrategy::Rebase => "rebase",
+            MergeStrategy::FastForwardOnly => "fast_forward",
         }
     }
 
     pub fn from_db_str(value: &str) -> Option<Self> {
         match value {
             "merge" => Some(MergeStrategy::Merge),
+            "squash" => Some(MergeStrategy::Squash),
+            "rebase" => Some(MergeStrategy::Rebase),
+            "fast_forward" => Some(MergeStrategy::FastForwardOnly),
             _ => None,
         }
     }
@@ -284,11 +302,19 @@ mod tests {
 
     #[test]
     fn merge_strategy_round_trips_through_its_db_string() {
-        assert_eq!(
-            MergeStrategy::from_db_str(MergeStrategy::Merge.as_db_str()),
-            Some(MergeStrategy::Merge)
-        );
-        assert_eq!(MergeStrategy::from_db_str("squash"), None);
+        for strategy in [
+            MergeStrategy::Merge,
+            MergeStrategy::Squash,
+            MergeStrategy::Rebase,
+            MergeStrategy::FastForwardOnly,
+        ] {
+            assert_eq!(
+                MergeStrategy::from_db_str(strategy.as_db_str()),
+                Some(strategy)
+            );
+        }
+        assert_eq!(MergeStrategy::default(), MergeStrategy::Merge);
+        assert_eq!(MergeStrategy::from_db_str("rocket"), None);
     }
 
     #[test]

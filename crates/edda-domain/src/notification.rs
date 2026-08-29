@@ -5,14 +5,23 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{IssueId, NotificationId, PullRequestId, UserId};
+use crate::ids::{IssueId, NotificationId, PullRequestId, ReleaseId, UserId};
 
+/// Every reason Edda raises an in-app notification. Grown additively as
+/// each collaboration surface is wired (Phase 11 added everything past
+/// `IssueAssigned`); the `notifications.kind` column carries no value
+/// `CHECK` (dropped in migration `0004`), so this enum's `from_db_str` is
+/// the single validated gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationKind {
     Mention,
     PrReviewRequested,
     IssueAssigned,
+    PrMerged,
+    PrClosed,
+    IssueClosed,
+    ReleasePublished,
 }
 
 impl NotificationKind {
@@ -21,6 +30,10 @@ impl NotificationKind {
             NotificationKind::Mention => "mention",
             NotificationKind::PrReviewRequested => "pr_review_requested",
             NotificationKind::IssueAssigned => "issue_assigned",
+            NotificationKind::PrMerged => "pr_merged",
+            NotificationKind::PrClosed => "pr_closed",
+            NotificationKind::IssueClosed => "issue_closed",
+            NotificationKind::ReleasePublished => "release_published",
         }
     }
 
@@ -29,6 +42,10 @@ impl NotificationKind {
             "mention" => Some(NotificationKind::Mention),
             "pr_review_requested" => Some(NotificationKind::PrReviewRequested),
             "issue_assigned" => Some(NotificationKind::IssueAssigned),
+            "pr_merged" => Some(NotificationKind::PrMerged),
+            "pr_closed" => Some(NotificationKind::PrClosed),
+            "issue_closed" => Some(NotificationKind::IssueClosed),
+            "release_published" => Some(NotificationKind::ReleasePublished),
             _ => None,
         }
     }
@@ -38,6 +55,7 @@ impl NotificationKind {
 pub enum NotificationSubject {
     PullRequest(PullRequestId),
     Issue(IssueId),
+    Release(ReleaseId),
 }
 
 impl NotificationSubject {
@@ -47,6 +65,7 @@ impl NotificationSubject {
         match self {
             NotificationSubject::PullRequest(_) => "pull_request",
             NotificationSubject::Issue(_) => "issue",
+            NotificationSubject::Release(_) => "release",
         }
     }
 
@@ -54,6 +73,7 @@ impl NotificationSubject {
         match self {
             NotificationSubject::PullRequest(id) => id.as_uuid(),
             NotificationSubject::Issue(id) => id.as_uuid(),
+            NotificationSubject::Release(id) => id.as_uuid(),
         }
     }
 }
@@ -84,9 +104,14 @@ mod tests {
             NotificationKind::Mention,
             NotificationKind::PrReviewRequested,
             NotificationKind::IssueAssigned,
+            NotificationKind::PrMerged,
+            NotificationKind::PrClosed,
+            NotificationKind::IssueClosed,
+            NotificationKind::ReleasePublished,
         ] {
             assert_eq!(NotificationKind::from_db_str(kind.as_db_str()), Some(kind));
         }
+        assert_eq!(NotificationKind::from_db_str("nope"), None);
     }
 
     #[test]

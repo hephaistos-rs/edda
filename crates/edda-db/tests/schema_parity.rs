@@ -441,6 +441,17 @@ TABLE events
   pk id
   index idx_events_aggregate (aggregate_type, aggregate_id)
   index idx_events_unprocessed <dialect-specific>
+TABLE issue_assignees
+  col assigned_at NOT NULL
+  col assigned_by_id NULL
+  col issue_id NOT NULL
+  col user_id NOT NULL
+  pk issue_id
+  pk user_id
+  index idx_issue_assignees_user (user_id)
+  fk assigned_by_id -> users
+  fk issue_id -> issues
+  fk user_id -> users
 TABLE issue_comments
   col author_id NOT NULL
   col body NOT NULL
@@ -772,6 +783,17 @@ TABLE users
   col password_hash NOT NULL
   col username NOT NULL
   pk id
+TABLE watches
+  col created_at NOT NULL
+  col id NOT NULL
+  col level NOT NULL
+  col subject_id NOT NULL
+  col subject_type NOT NULL
+  col user_id NOT NULL
+  pk id
+  index idx_watches_subject (subject_type, subject_id)
+  index idx_watches_user_subject UNIQUE (user_id, subject_type, subject_id)
+  fk user_id -> users
 TABLE webauthn_credentials
   col created_at NOT NULL
   col id NOT NULL

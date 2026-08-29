@@ -19,36 +19,56 @@ use crate::ids::{RepositoryId, WebhookDeliveryId, WebhookId};
 /// enum-representation rule (small/closed → `TEXT`+`CHECK`,
 /// set-valued/extensible → `JSON`) — a webhook's event subscription is
 /// exactly the set-valued case that rule calls out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WebhookEvent {
     PullRequestOpened,
+    PullRequestClosed,
+    PullRequestReopened,
+    PullRequestReviewSubmitted,
     PullRequestMerged,
     IssueOpened,
+    IssueClosed,
     IssueCommented,
+    ReleasePublished,
     Push,
 }
 
 impl WebhookEvent {
+    /// Every variant — used by the delivery fan-out to iterate the full
+    /// set and by the API to validate a subscription request.
+    pub const ALL: [WebhookEvent; 10] = [
+        WebhookEvent::PullRequestOpened,
+        WebhookEvent::PullRequestClosed,
+        WebhookEvent::PullRequestReopened,
+        WebhookEvent::PullRequestReviewSubmitted,
+        WebhookEvent::PullRequestMerged,
+        WebhookEvent::IssueOpened,
+        WebhookEvent::IssueClosed,
+        WebhookEvent::IssueCommented,
+        WebhookEvent::ReleasePublished,
+        WebhookEvent::Push,
+    ];
+
     pub const fn as_wire_str(self) -> &'static str {
         match self {
             WebhookEvent::PullRequestOpened => "pull_request.opened",
+            WebhookEvent::PullRequestClosed => "pull_request.closed",
+            WebhookEvent::PullRequestReopened => "pull_request.reopened",
+            WebhookEvent::PullRequestReviewSubmitted => "pull_request.review_submitted",
             WebhookEvent::PullRequestMerged => "pull_request.merged",
             WebhookEvent::IssueOpened => "issue.opened",
+            WebhookEvent::IssueClosed => "issue.closed",
             WebhookEvent::IssueCommented => "issue.commented",
+            WebhookEvent::ReleasePublished => "release.published",
             WebhookEvent::Push => "push",
         }
     }
 
     pub fn from_wire_str(value: &str) -> Option<Self> {
-        match value {
-            "pull_request.opened" => Some(WebhookEvent::PullRequestOpened),
-            "pull_request.merged" => Some(WebhookEvent::PullRequestMerged),
-            "issue.opened" => Some(WebhookEvent::IssueOpened),
-            "issue.commented" => Some(WebhookEvent::IssueCommented),
-            "push" => Some(WebhookEvent::Push),
-            _ => None,
-        }
+        WebhookEvent::ALL
+            .into_iter()
+            .find(|event| event.as_wire_str() == value)
     }
 }
 
@@ -161,13 +181,7 @@ mod tests {
 
     #[test]
     fn webhook_event_round_trips_through_its_wire_string() {
-        for event in [
-            WebhookEvent::PullRequestOpened,
-            WebhookEvent::PullRequestMerged,
-            WebhookEvent::IssueOpened,
-            WebhookEvent::IssueCommented,
-            WebhookEvent::Push,
-        ] {
+        for event in WebhookEvent::ALL {
             assert_eq!(
                 WebhookEvent::from_wire_str(event.as_wire_str()),
                 Some(event)

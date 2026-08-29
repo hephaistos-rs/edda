@@ -7,6 +7,7 @@ pub mod access;
 pub mod branch_protection;
 pub mod codeowners;
 pub mod commit_status;
+pub mod crossref;
 pub mod deploy_key;
 pub mod event;
 pub mod ids;
@@ -28,6 +29,7 @@ pub mod team;
 pub mod token;
 pub mod user;
 pub mod validation;
+pub mod watch;
 pub mod webhook;
 
 pub use access::{
@@ -39,6 +41,7 @@ pub use access::{
 pub use branch_protection::{branch_pattern_matches, BranchProtectionRule};
 pub use codeowners::{CodeOwners, CodeOwnersRule};
 pub use commit_status::{required_checks_satisfied, CommitStatus, CommitStatusState};
+pub use crossref::{parse_closing_references, parse_cross_references, CrossReference};
 pub use deploy_key::DeployKey;
 pub use event::{DomainEvent, DomainEventKind, MentionSource};
 pub use ids::{
@@ -46,7 +49,7 @@ pub use ids::{
     EmailVerificationTokenId, EventId, IssueCommentId, IssueId, JobId, LabelId, LfsLockId,
     MilestoneId, NotificationId, OAuthIdentityId, OrganizationId, PasswordResetTokenId,
     PrCommentId, PrReviewId, PullRequestId, ReleaseAssetId, ReleaseId, RepositoryId,
-    ReviewRequestId, SshKeyId, TeamId, TotpRecoveryCodeId, UserId, WebauthnCredentialId,
+    ReviewRequestId, SshKeyId, TeamId, TotpRecoveryCodeId, UserId, WatchId, WebauthnCredentialId,
     WebhookDeliveryId, WebhookId,
 };
 pub use issue::{
@@ -74,4 +77,5 @@ pub use team::{
 };
 pub use token::AccessToken;
 pub use user::User;
+pub use watch::{Watch, WatchLevel, WatchSubject};
 pub use webhook::{is_blocked_ip, Webhook, WebhookDelivery, WebhookEvent};

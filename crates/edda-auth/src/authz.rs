@@ -162,7 +162,7 @@ impl AuthorizationService {
     ) -> Result<(), AuthzError> {
         let access = self.access_for(actor, repository).await?;
         let protection =
-            BranchProtectionRepo::find_for_branch(&self.pool, repository.id, target_branch)
+            BranchProtectionRepo::find_matching(&self.pool, repository.id, target_branch)
                 .await
                 .map_err(|_| AuthzError::NotFound)?;
         can_merge_pull_request(
@@ -219,7 +219,7 @@ impl AuthorizationService {
             .map_err(|_| AuthzError::NotFound)?;
         Ok(rules
             .into_iter()
-            .map(|rule| format!("refs/heads/{}", rule.branch))
+            .map(|rule| format!("refs/heads/{}", rule.pattern))
             .collect())
     }
 }

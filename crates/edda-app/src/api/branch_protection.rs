@@ -6,10 +6,11 @@ use axum::routing::get;
 use axum::{Json, Router};
 
 use edda_api_types::{BranchProtectionDto, CreateBranchProtectionRequest};
+use edda_db::BranchProtectionSettings;
 use edda_domain::BranchProtectionRuleId;
 
-use super::{read_repo, Actor};
-use crate::services::{BranchProtectionService, ServiceError};
+use super::Actor;
+use crate::services::{BranchProtectionService, ServiceError, SetBranchProtectionInput};
 use crate::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -29,16 +30,22 @@ async fn list(
     actor: Actor,
     Path((owner, repo)): Path<(String, String)>,
 ) -> Result<Json<Vec<BranchProtectionDto>>, ServiceError> {
-    let repository = read_repo(&state, actor.context(), &owner, &repo).await?;
-    let rules =
-        edda_db::BranchProtectionRepo::list_for_repository(&state.pool, repository.id).await?;
+    let views = BranchProtectionService::from_state(&state)
+        .list(actor.context(), &owner, &repo)
+        .await?;
     Ok(Json(
-        rules
+        views
             .into_iter()
-            .map(|rule| BranchProtectionDto {
-                id: rule.id.to_string(),
-                branch: rule.branch,
-                required_approvals: rule.required_approvals,
+            .map(|view| BranchProtectionDto {
+                id: view.rule.id.to_string(),
+                branch: view.rule.pattern,
+                required_approvals: view.rule.required_approvals,
+                require_linear_history: view.rule.require_linear_history,
+                require_signed_commits: view.rule.require_signed_commits,
+                dismiss_stale_reviews: view.rule.dismiss_stale_reviews,
+                require_up_to_date: view.rule.require_up_to_date,
+                required_status_checks: view.rule.required_status_checks,
+                push_allowlist_usernames: view.push_allowlist_usernames,
             })
             .collect(),
     ))
@@ -56,8 +63,18 @@ async fn set(
             actor.context(),
             &owner,
             &repo,
-            &body.branch,
-            body.required_approvals,
+            SetBranchProtectionInput {
+                pattern: body.branch,
+                settings: BranchProtectionSettings {
+                    required_approvals: body.required_approvals,
+                    require_linear_history: body.require_linear_history,
+                    require_signed_commits: body.require_signed_commits,
+                    dismiss_stale_reviews: body.dismiss_stale_reviews,
+                    require_up_to_date: body.require_up_to_date,
+                    required_status_checks: body.required_status_checks,
+                },
+                push_allowlist_usernames: body.push_allowlist_usernames,
+            },
         )
         .await?;
     Ok(Json(()))

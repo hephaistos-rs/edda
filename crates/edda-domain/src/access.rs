@@ -548,10 +548,10 @@ mod tests {
         let user = UserId::new();
         let writer = access(repository.id, user, RepoRole::Write);
         let rule = crate::branch_protection::BranchProtectionRule {
-            id: crate::ids::BranchProtectionRuleId::new(),
             repository_id: repository.id,
-            branch: "main".to_string(),
+            pattern: "main".to_string(),
             required_approvals: 1,
+            ..Default::default()
         };
 
         let err = can_merge_pull_request(
@@ -580,10 +580,10 @@ mod tests {
         let user = UserId::new();
         let writer = access(repository.id, user, RepoRole::Write);
         let rule = crate::branch_protection::BranchProtectionRule {
-            id: crate::ids::BranchProtectionRuleId::new(),
             repository_id: repository.id,
-            branch: "main".to_string(),
+            pattern: "main".to_string(),
             required_approvals: 1,
+            ..Default::default()
         };
         let reviewer = UserId::new();
         let reviews = vec![

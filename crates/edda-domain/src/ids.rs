@@ -81,6 +81,8 @@ id_type!(IssueCommentId);
 id_type!(LabelId);
 id_type!(MilestoneId);
 id_type!(BranchProtectionRuleId);
+id_type!(CommitStatusId);
+id_type!(ReviewRequestId);
 id_type!(ReleaseId);
 id_type!(ReleaseAssetId);
 id_type!(WebhookId);

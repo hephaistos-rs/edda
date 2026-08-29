@@ -28,7 +28,9 @@ pub mod repository;
 pub mod team;
 pub mod webhook;
 
-pub use branch_protection::BranchProtectionService;
+pub use branch_protection::{
+    BranchProtectionService, BranchProtectionView, SetBranchProtectionInput,
+};
 pub use collaborator::CollaboratorService;
 pub use deploy_key::DeployKeyService;
 pub use issue::IssueService;
@@ -129,19 +131,6 @@ impl From<edda_db::label_repo::InsertLabelError> for ServiceError {
                 ServiceError::Conflict("a label with that name already exists".to_string())
             }
             edda_db::label_repo::InsertLabelError::Db(err) => ServiceError::Db(err),
-        }
-    }
-}
-
-impl From<edda_db::branch_protection_repo::InsertBranchProtectionError> for ServiceError {
-    fn from(err: edda_db::branch_protection_repo::InsertBranchProtectionError) -> Self {
-        match err {
-            edda_db::branch_protection_repo::InsertBranchProtectionError::AlreadyExists(_) => {
-                ServiceError::Conflict("that branch is already protected".to_string())
-            }
-            edda_db::branch_protection_repo::InsertBranchProtectionError::Db(err) => {
-                ServiceError::Db(err)
-            }
         }
     }
 }

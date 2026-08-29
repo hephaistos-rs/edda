@@ -318,8 +318,21 @@ pub struct MergedPullDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchProtectionDto {
     pub id: String,
+    /// A branch-name glob (`main`, `release/*`). Field kept as `branch`
+    /// for wire stability even though it is matched as a pattern.
     pub branch: String,
     pub required_approvals: i64,
+    pub require_linear_history: bool,
+    pub require_signed_commits: bool,
+    pub dismiss_stale_reviews: bool,
+    pub require_up_to_date: bool,
+    /// External CI check contexts that must each be green before a PR
+    /// targeting a matched branch may merge.
+    pub required_status_checks: Vec<String>,
+    /// Usernames allowed to push directly to a matched branch despite the
+    /// rule (team allowlist entries are surfaced separately once the
+    /// Phase 11 UI lands).
+    pub push_allowlist_usernames: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -327,6 +340,18 @@ pub struct CreateBranchProtectionRequest {
     pub branch: String,
     #[serde(default)]
     pub required_approvals: i64,
+    #[serde(default)]
+    pub require_linear_history: bool,
+    #[serde(default)]
+    pub require_signed_commits: bool,
+    #[serde(default)]
+    pub dismiss_stale_reviews: bool,
+    #[serde(default)]
+    pub require_up_to_date: bool,
+    #[serde(default)]
+    pub required_status_checks: Vec<String>,
+    #[serde(default)]
+    pub push_allowlist_usernames: Vec<String>,
 }
 
 // ─────────────────────────────── issues ───────────────────────────────

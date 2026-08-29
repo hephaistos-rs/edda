@@ -145,12 +145,15 @@ async fn a_protected_branch_rejects_a_direct_push_from_a_non_admin_collaborator(
     // Protect `main`, requiring 1 approval — its mere existence is what
     // blocks a direct push (see `edda_domain::branch_protection`'s
     // module doc comment).
-    BranchProtectionRepo::insert(
+    BranchProtectionRepo::upsert_by_pattern(
         &pool,
         BranchProtectionRuleId::new(),
         repository.id,
         "main",
-        1,
+        &edda_db::BranchProtectionSettings {
+            required_approvals: 1,
+            ..Default::default()
+        },
     )
     .await
     .expect("insert branch protection rule");

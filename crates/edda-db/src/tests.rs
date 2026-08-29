@@ -1275,42 +1275,239 @@ async fn an_issue_can_be_created_labeled_commented_on_and_closed() {
 
 #[tokio::test]
 async fn a_branch_protection_rule_round_trips_and_can_be_deleted() {
+    use crate::BranchProtectionSettings;
     let pool = crate::test_pool().await;
     let alice = insert_user(&pool, "alice").await;
+    let bob = insert_user(&pool, "bob").await;
     let repository = repo(alice, "demo", Visibility::Public);
     RepositoryRepo::insert(&pool, &repository).await.unwrap();
 
-    let rule_id = edda_domain::BranchProtectionRuleId::new();
-    BranchProtectionRepo::insert(&pool, rule_id, repository.id, "main", 2)
+    // A glob pattern with the full set of policy flags and one allowlisted
+    // pusher.
+    let rule_id = BranchProtectionRepo::upsert_by_pattern(
+        &pool,
+        edda_domain::BranchProtectionRuleId::new(),
+        repository.id,
+        "release/*",
+        &BranchProtectionSettings {
+            required_approvals: 2,
+            require_linear_history: true,
+            require_signed_commits: false,
+            dismiss_stale_reviews: true,
+            require_up_to_date: false,
+            required_status_checks: vec!["ci/build".to_string()],
+        },
+    )
+    .await
+    .unwrap();
+    BranchProtectionRepo::replace_allowlist(&pool, rule_id, &[AccessSubject::User(bob)])
         .await
         .unwrap();
 
-    let found = BranchProtectionRepo::find_for_branch(&pool, repository.id, "main")
+    // The pattern matches by glob, not string equality.
+    let found = BranchProtectionRepo::find_matching(&pool, repository.id, "release/1.2")
         .await
         .unwrap()
         .unwrap();
     assert_eq!(found.required_approvals, 2);
+    assert!(found.require_linear_history);
+    assert!(found.dismiss_stale_reviews);
+    assert_eq!(found.required_status_checks, vec!["ci/build".to_string()]);
     assert!(
-        BranchProtectionRepo::find_for_branch(&pool, repository.id, "develop")
+        BranchProtectionRepo::find_matching(&pool, repository.id, "develop")
             .await
             .unwrap()
             .is_none()
     );
 
-    let rules = BranchProtectionRepo::list_for_repository(&pool, repository.id)
-        .await
-        .unwrap();
-    assert_eq!(rules.len(), 1);
+    let with_allowlist =
+        BranchProtectionRepo::list_for_repository_with_allowlist(&pool, repository.id)
+            .await
+            .unwrap();
+    assert_eq!(with_allowlist.len(), 1);
+    assert_eq!(
+        with_allowlist[0].push_allowlist,
+        vec![AccessSubject::User(bob)]
+    );
+
+    // A second upsert for the same pattern overwrites rather than
+    // conflicting.
+    let same_id = BranchProtectionRepo::upsert_by_pattern(
+        &pool,
+        edda_domain::BranchProtectionRuleId::new(),
+        repository.id,
+        "release/*",
+        &BranchProtectionSettings {
+            required_approvals: 3,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(same_id, rule_id);
+    assert_eq!(
+        BranchProtectionRepo::find_matching(&pool, repository.id, "release/9")
+            .await
+            .unwrap()
+            .unwrap()
+            .required_approvals,
+        3
+    );
 
     assert!(BranchProtectionRepo::delete(&pool, repository.id, rule_id)
         .await
         .unwrap());
     assert!(
-        BranchProtectionRepo::find_for_branch(&pool, repository.id, "main")
+        BranchProtectionRepo::find_matching(&pool, repository.id, "release/1.2")
             .await
             .unwrap()
             .is_none()
     );
+    // The allowlist row went with it (ON DELETE CASCADE).
+    assert!(BranchProtectionRepo::allowlist_for_rule(&pool, rule_id)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn repo_size_upserts_and_reads_back() {
+    use crate::RepoSizeRepo;
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let repository = repo(alice, "sized", Visibility::Public);
+    RepositoryRepo::insert(&pool, &repository).await.unwrap();
+
+    assert!(RepoSizeRepo::get(&pool, repository.id)
+        .await
+        .unwrap()
+        .is_none());
+
+    RepoSizeRepo::upsert(&pool, repository.id, 1_000, 250)
+        .await
+        .unwrap();
+    let size = RepoSizeRepo::get(&pool, repository.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(size.git_bytes, 1_000);
+    assert_eq!(size.lfs_bytes, 250);
+    assert_eq!(size.total_bytes(), 1_250);
+
+    RepoSizeRepo::upsert(&pool, repository.id, 2_000, 500)
+        .await
+        .unwrap();
+    assert_eq!(
+        RepoSizeRepo::get(&pool, repository.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .total_bytes(),
+        2_500
+    );
+}
+
+#[tokio::test]
+async fn a_commit_status_upserts_by_context_and_lists_for_a_commit() {
+    use crate::CommitStatusRepo;
+    use edda_domain::CommitStatusState;
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let repository = repo(alice, "ci", Visibility::Public);
+    RepositoryRepo::insert(&pool, &repository).await.unwrap();
+    let sha = "a".repeat(40);
+
+    let id = CommitStatusRepo::upsert(
+        &pool,
+        edda_domain::CommitStatusId::new(),
+        repository.id,
+        &sha,
+        "ci/build",
+        CommitStatusState::Pending,
+        Some("https://ci.example/1"),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Re-reporting the same context overwrites, keeping one row.
+    let same = CommitStatusRepo::upsert(
+        &pool,
+        edda_domain::CommitStatusId::new(),
+        repository.id,
+        &sha,
+        "ci/build",
+        CommitStatusState::Success,
+        Some("https://ci.example/1"),
+        Some("passed"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(same, id);
+
+    CommitStatusRepo::upsert(
+        &pool,
+        edda_domain::CommitStatusId::new(),
+        repository.id,
+        &sha,
+        "lint",
+        CommitStatusState::Failure,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let statuses = CommitStatusRepo::list_for_commit(&pool, repository.id, &sha)
+        .await
+        .unwrap();
+    assert_eq!(statuses.len(), 2);
+    let build = statuses.iter().find(|s| s.context == "ci/build").unwrap();
+    assert_eq!(build.state, CommitStatusState::Success);
+    assert_eq!(build.description.as_deref(), Some("passed"));
+}
+
+#[tokio::test]
+async fn a_review_request_is_idempotent_and_scoped_to_one_reviewer() {
+    use crate::ReviewRequestRepo;
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let bob = insert_user(&pool, "bob").await;
+    let repository = repo(alice, "demo", Visibility::Public);
+    RepositoryRepo::insert(&pool, &repository).await.unwrap();
+    let pr_id = edda_domain::PullRequestId::new();
+    open_pr(&pool, repository.id, pr_id, "Add feature", "feature", alice).await;
+
+    assert!(ReviewRequestRepo::insert_if_new(
+        &pool,
+        edda_domain::ReviewRequestId::new(),
+        pr_id,
+        bob,
+    )
+    .await
+    .unwrap());
+    // A repeat request for the same reviewer is a no-op.
+    assert!(!ReviewRequestRepo::insert_if_new(
+        &pool,
+        edda_domain::ReviewRequestId::new(),
+        pr_id,
+        bob,
+    )
+    .await
+    .unwrap());
+
+    let requests = ReviewRequestRepo::list_for_pull_request(&pool, pr_id)
+        .await
+        .unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].reviewer_id, bob);
+
+    assert!(ReviewRequestRepo::delete(&pool, pr_id, bob).await.unwrap());
+    assert!(!ReviewRequestRepo::delete(&pool, pr_id, bob).await.unwrap());
+    assert!(ReviewRequestRepo::list_for_pull_request(&pool, pr_id)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]

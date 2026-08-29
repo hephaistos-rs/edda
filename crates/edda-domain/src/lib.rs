@@ -5,6 +5,7 @@
 
 pub mod access;
 pub mod branch_protection;
+pub mod commit_status;
 pub mod deploy_key;
 pub mod event;
 pub mod ids;
@@ -18,7 +19,9 @@ pub mod organization;
 pub mod pull_request;
 pub mod registration;
 pub mod release;
+pub mod repo_size;
 pub mod repository;
+pub mod review_request;
 pub mod ssh_key;
 pub mod team;
 pub mod token;
@@ -32,15 +35,17 @@ pub use access::{
     require_instance_admin, AccessSubject, ActorContext, AuthzError, RepoAccess, RepoRole,
     RepositoryScope, TokenScope,
 };
-pub use branch_protection::BranchProtectionRule;
+pub use branch_protection::{branch_pattern_matches, BranchProtectionRule};
+pub use commit_status::{required_checks_satisfied, CommitStatus, CommitStatusState};
 pub use deploy_key::DeployKey;
 pub use event::{DomainEvent, DomainEventKind, MentionSource};
 pub use ids::{
-    AccessTokenId, AuditEventId, BranchProtectionRuleId, DeployKeyId, EmailVerificationTokenId,
-    EventId, IssueCommentId, IssueId, JobId, LabelId, LfsLockId, MilestoneId, NotificationId,
-    OAuthIdentityId, OrganizationId, PasswordResetTokenId, PrCommentId, PrReviewId, PullRequestId,
-    ReleaseAssetId, ReleaseId, RepositoryId, SshKeyId, TeamId, TotpRecoveryCodeId, UserId,
-    WebauthnCredentialId, WebhookDeliveryId, WebhookId,
+    AccessTokenId, AuditEventId, BranchProtectionRuleId, CommitStatusId, DeployKeyId,
+    EmailVerificationTokenId, EventId, IssueCommentId, IssueId, JobId, LabelId, LfsLockId,
+    MilestoneId, NotificationId, OAuthIdentityId, OrganizationId, PasswordResetTokenId,
+    PrCommentId, PrReviewId, PullRequestId, ReleaseAssetId, ReleaseId, RepositoryId,
+    ReviewRequestId, SshKeyId, TeamId, TotpRecoveryCodeId, UserId, WebauthnCredentialId,
+    WebhookDeliveryId, WebhookId,
 };
 pub use issue::{
     labels_to_unapply_for_scope, scope_of, Issue, IssueComment, IssueState, Label, Milestone,
@@ -58,7 +63,9 @@ pub use pull_request::{
 };
 pub use registration::{RegistrationMode, RegistrationPolicy};
 pub use release::{Release, ReleaseAsset};
+pub use repo_size::{push_would_exceed_quota, RepoSize};
 pub use repository::{Repository, RepositoryOwner, Visibility};
+pub use review_request::ReviewRequest;
 pub use ssh_key::SshKey;
 pub use team::{
     effective_repo_role, Team, TeamMember, TeamPermission, TeamUnit, TeamUnitPermission,

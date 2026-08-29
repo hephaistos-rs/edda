@@ -369,13 +369,43 @@ TABLE audit_events
   index idx_audit_events_actor (actor_id)
   index idx_audit_events_occurred_at (occurred_at)
   fk actor_id -> users
+TABLE branch_protection_push_allowlist
+  col added_at NOT NULL
+  col rule_id NOT NULL
+  col subject_team_id NULL
+  col subject_user_id NULL
+  index idx_bp_allowlist_rule (rule_id)
+  index idx_bp_allowlist_team UNIQUE (rule_id, subject_team_id)
+  index idx_bp_allowlist_user UNIQUE (rule_id, subject_user_id)
+  fk rule_id -> branch_protection_rules
+  fk subject_team_id -> teams
+  fk subject_user_id -> users
 TABLE branch_protection_rules
   col branch NOT NULL
+  col dismiss_stale_reviews NOT NULL
   col id NOT NULL
   col repository_id NOT NULL
+  col require_linear_history NOT NULL
+  col require_signed_commits NOT NULL
+  col require_up_to_date NOT NULL
   col required_approvals NOT NULL
+  col required_status_checks NOT NULL
   pk id
   index idx_branch_protection_repo_branch UNIQUE (repository_id, branch)
+  fk repository_id -> repositories
+TABLE commit_statuses
+  col commit_sha NOT NULL
+  col context NOT NULL
+  col created_at NOT NULL
+  col description NULL
+  col id NOT NULL
+  col repository_id NOT NULL
+  col state NOT NULL
+  col target_url NULL
+  col updated_at NOT NULL
+  pk id
+  index idx_commit_statuses_commit (repository_id, commit_sha)
+  index idx_commit_statuses_key UNIQUE (repository_id, commit_sha, context)
   fk repository_id -> repositories
 TABLE deploy_keys
   col created_at NOT NULL
@@ -641,6 +671,13 @@ TABLE repo_number_counters
   col repository_id NOT NULL
   pk repository_id
   fk repository_id -> repositories
+TABLE repo_sizes
+  col computed_at NOT NULL
+  col git_bytes NOT NULL
+  col lfs_bytes NOT NULL
+  col repository_id NOT NULL
+  pk repository_id
+  fk repository_id -> repositories
 TABLE repositories
   col created_at NOT NULL
   col description NULL
@@ -658,6 +695,17 @@ TABLE repositories
   index idx_repositories_user_owner_name UNIQUE (owner_user_id, name)
   fk owner_org_id -> organizations
   fk owner_user_id -> users
+TABLE review_requests
+  col created_at NOT NULL
+  col id NOT NULL
+  col pull_request_id NOT NULL
+  col reviewer_id NOT NULL
+  pk id
+  index idx_review_requests_pr (pull_request_id)
+  index idx_review_requests_pr_reviewer UNIQUE (pull_request_id, reviewer_id)
+  index idx_review_requests_reviewer (reviewer_id)
+  fk pull_request_id -> pull_requests
+  fk reviewer_id -> users
 TABLE ssh_keys
   col created_at NOT NULL
   col fingerprint NOT NULL

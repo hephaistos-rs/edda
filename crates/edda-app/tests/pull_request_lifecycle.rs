@@ -426,6 +426,93 @@ async fn a_pull_request_opens_is_reviewed_and_merges_against_a_real_repository()
     );
     assert!(verify2_dir.join("cleanup.txt").exists());
 
+    // ── A third PR whose body closes an issue on merge ────────────────
+    let issue_id = edda_domain::IssueId::new();
+    let issue_number = edda_db::IssueRepo::insert(
+        &pool,
+        issue_id,
+        repository.id,
+        "Broken thing",
+        Some("it is broken"),
+        bob_id,
+    )
+    .await
+    .expect("open an issue to be auto-closed");
+
+    run(&repo_dir, "git", &["checkout", "main"]);
+    run(&repo_dir, "git", &["pull", "--ff-only", "origin", "main"]);
+    run(&repo_dir, "git", &["checkout", "-b", "the-fix"]);
+    std::fs::write(repo_dir.join("fix.txt"), b"fixed\n").expect("write file");
+    run(&repo_dir, "git", &["add", "fix.txt"]);
+    run(&repo_dir, "git", &["commit", "-m", "fix it"]);
+    run(
+        &repo_dir,
+        "git",
+        &["push", "origin", "HEAD:refs/heads/the-fix"],
+    );
+
+    let fix_pr_id = PullRequestId::new();
+    let fix_pr_number = PullRequestRepo::insert(
+        &pool,
+        fix_pr_id,
+        repository.id,
+        edda_db::NewPullRequest {
+            title: "The fix",
+            body: Some(&format!("Closes #{issue_number}")),
+            author_id: bob_id,
+            source: &PrRef {
+                repository_id: repository.id,
+                branch: "the-fix".to_string(),
+            },
+            target: "main",
+            draft: false,
+        },
+    )
+    .await
+    .expect("open the fixing pull request");
+    PrReviewRepo::insert(
+        &pool,
+        edda_domain::PrReviewId::new(),
+        fix_pr_id,
+        bob_id,
+        ReviewState::Approved,
+        None,
+    )
+    .await
+    .expect("approve the fixing pull request");
+
+    service
+        .merge(
+            &ActorContext::User(alice_id),
+            "alice",
+            "demo",
+            fix_pr_number,
+            MergeStrategy::Merge,
+        )
+        .await
+        .expect("merge the fixing pull request");
+
+    let closed_issue = edda_db::IssueRepo::find_by_id(&pool, issue_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !closed_issue.state.is_open(),
+        "the referenced issue is closed by the merge, got {:?}",
+        closed_issue.state
+    );
+    let outbox = edda_db::EventRepo::fetch_unprocessed(&pool, 100)
+        .await
+        .unwrap();
+    assert!(
+        outbox.iter().any(|record| matches!(
+            record.event,
+            edda_domain::DomainEvent::IssueClosed { issue_id: closed, via_pull_request: Some(pr), .. }
+                if closed == issue_id && pr == fix_pr_id
+        )),
+        "an IssueClosed event names the fixing PR"
+    );
+
     let _ = std::fs::remove_dir_all(&work_dir);
     let _ = std::fs::remove_dir_all(&store_root);
 }

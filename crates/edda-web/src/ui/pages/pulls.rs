@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 use edda_api_types::{
     AddCommentRequest, CreatePullRequest, MergeRequest, MergedPullDto, PrStateDto,
-    PullRequestDetailDto, PullRequestDto, SubmitReviewRequest,
+    PullRequestDetailDto, PullRequestDto, SubmitReviewRequest, UsernameRequest,
 };
 
 /// `(value, label)` for the merge-strategy picker.
@@ -238,6 +238,7 @@ pub fn PullDetail(owner: String, name: String, number: i64) -> Element {
     let mut action_error = use_signal(|| Option::<String>::None);
     let mut busy = use_signal(|| false);
     let mut merge_strategy = use_signal(|| "merge".to_string());
+    let mut reviewer_input = use_signal(String::new);
 
     let pr_base = pulls_path(&owner, &name);
 
@@ -318,6 +319,63 @@ pub fn PullDetail(owner: String, name: String, number: i64) -> Element {
         });
     };
 
+    let draft_base = pr_base.clone();
+    let mut on_draft_toggle = move |to_draft: bool| {
+        let verb = if to_draft { "draft" } else { "ready" };
+        let path = format!("{draft_base}/{number}/{verb}");
+        busy.set(true);
+        action_error.set(None);
+        spawn(async move {
+            match api_client::post_empty_ok(&path).await {
+                Ok(()) => detail.restart(),
+                Err(err) => action_error.set(Some(err.to_string())),
+            }
+            busy.set(false);
+        });
+    };
+
+    let request_review_base = pr_base.clone();
+    let on_request_review = move |event: FormEvent| {
+        event.prevent_default();
+        let username = reviewer_input.read().trim().to_string();
+        if username.is_empty() {
+            return;
+        }
+        let path = format!("{request_review_base}/{number}/requested-reviewers");
+        busy.set(true);
+        action_error.set(None);
+        spawn(async move {
+            match api_client::post_ok(&path, &UsernameRequest { username }).await {
+                Ok(()) => {
+                    reviewer_input.set(String::new());
+                    detail.restart();
+                }
+                Err(err) => action_error.set(Some(err.to_string())),
+            }
+            busy.set(false);
+        });
+    };
+
+    fn cancel_review_request(
+        base: String,
+        number: i64,
+        username: String,
+        mut busy: Signal<bool>,
+        mut action_error: Signal<Option<String>>,
+        mut detail: Resource<ApiResult<PullRequestDetailDto>>,
+    ) {
+        busy.set(true);
+        action_error.set(None);
+        spawn(async move {
+            let path = format!("{base}/{number}/requested-reviewers/{username}");
+            match api_client::delete_ok(&path).await {
+                Ok(()) => detail.restart(),
+                Err(err) => action_error.set(Some(err.to_string())),
+            }
+            busy.set(false);
+        });
+    }
+
     rsx! {
         main { class: "mx-auto max-w-3xl px-4 py-8",
             match &*detail.read() {
@@ -332,6 +390,39 @@ pub fn PullDetail(owner: String, name: String, number: i64) -> Element {
                         }
                         if let Some(html) = &pr.body_html {
                             div { class: "mt-4 border border-line p-4 text-sm text-ink", dangerous_inner_html: "{html}" }
+                        }
+
+                        h2 { class: "mt-8 font-mono text-sm font-semibold text-ink", "Reviewers" }
+                        div { class: "mt-2 flex flex-wrap items-center gap-2",
+                            for username in data.requested_reviewers.clone() {
+                                button {
+                                    r#type: "button", disabled: busy(),
+                                    class: "border border-line px-2 py-0.5 font-mono text-xs text-ink-muted hover:text-status-conflict disabled:opacity-60",
+                                    title: "withdraw review request",
+                                    onclick: {
+                                        let base = pr_base.clone();
+                                        let username = username.clone();
+                                        move |_| cancel_review_request(base.clone(), number, username.clone(), busy, action_error, detail)
+                                    },
+                                    "{username} (pending) ×"
+                                }
+                            }
+                            if data.requested_reviewers.is_empty() {
+                                span { class: "font-mono text-xs text-ink-muted", "no pending requests" }
+                            }
+                        }
+                        form { class: "mt-2 flex gap-2", onsubmit: on_request_review,
+                            input {
+                                r#type: "text", placeholder: "username",
+                                class: "border border-line bg-surface px-2 py-1 font-mono text-xs text-ink focus:border-accent focus:outline-none",
+                                value: "{reviewer_input}",
+                                oninput: move |event| reviewer_input.set(event.value()),
+                            }
+                            button {
+                                r#type: "submit", disabled: busy(),
+                                class: "border border-line px-3 py-1 font-mono text-xs text-ink-muted hover:text-ink disabled:opacity-60",
+                                "request review"
+                            }
                         }
 
                         h2 { class: "mt-8 font-mono text-sm font-semibold text-ink", "Reviews" }
@@ -415,6 +506,21 @@ pub fn PullDetail(owner: String, name: String, number: i64) -> Element {
                                     class: "border border-accent bg-accent px-3 py-1.5 font-mono text-sm text-accent-ink disabled:opacity-60",
                                     onclick: on_merge,
                                     "merge"
+                                }
+                                if matches!(pr.state, PrStateDto::Draft) {
+                                    button {
+                                        r#type: "button", disabled: busy(),
+                                        class: "border border-line px-3 py-1.5 font-mono text-sm text-ink-muted hover:text-ink disabled:opacity-60",
+                                        onclick: move |_| on_draft_toggle(false),
+                                        "mark ready"
+                                    }
+                                } else {
+                                    button {
+                                        r#type: "button", disabled: busy(),
+                                        class: "border border-line px-3 py-1.5 font-mono text-sm text-ink-muted hover:text-ink disabled:opacity-60",
+                                        onclick: move |_| on_draft_toggle(true),
+                                        "convert to draft"
+                                    }
                                 }
                                 button {
                                     r#type: "button", disabled: busy(),

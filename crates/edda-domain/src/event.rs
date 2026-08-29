@@ -64,6 +64,30 @@ pub enum DomainEvent {
         new: String,
         pusher_id: Option<UserId>,
     },
+    /// A user was added as an assignee of an issue.
+    IssueAssigned {
+        issue_id: IssueId,
+        repository_id: RepositoryId,
+        assignee_id: UserId,
+        assigned_by_id: UserId,
+    },
+    /// A user was asked to review a pull request (manually, or from a
+    /// CODEOWNERS match — the event is the same).
+    ReviewRequested {
+        pull_request_id: PullRequestId,
+        repository_id: RepositoryId,
+        reviewer_id: UserId,
+        requested_by_id: UserId,
+    },
+    /// An issue was closed. `via_pull_request` is `Some` when a merging
+    /// pull request's `closes #N` reference did it (rather than a manual
+    /// close).
+    IssueClosed {
+        issue_id: IssueId,
+        repository_id: RepositoryId,
+        closed_by_id: UserId,
+        via_pull_request: Option<PullRequestId>,
+    },
 }
 
 /// The discriminant of [`DomainEvent`] — stored in the `events.kind`
@@ -75,6 +99,9 @@ pub enum DomainEventKind {
     PullRequestMerged,
     UserMentioned,
     BranchPushed,
+    IssueAssigned,
+    ReviewRequested,
+    IssueClosed,
 }
 
 impl DomainEventKind {
@@ -84,6 +111,9 @@ impl DomainEventKind {
             DomainEventKind::PullRequestMerged => "pull_request_merged",
             DomainEventKind::UserMentioned => "user_mentioned",
             DomainEventKind::BranchPushed => "branch_pushed",
+            DomainEventKind::IssueAssigned => "issue_assigned",
+            DomainEventKind::ReviewRequested => "review_requested",
+            DomainEventKind::IssueClosed => "issue_closed",
         }
     }
 
@@ -93,6 +123,9 @@ impl DomainEventKind {
             "pull_request_merged" => Some(DomainEventKind::PullRequestMerged),
             "user_mentioned" => Some(DomainEventKind::UserMentioned),
             "branch_pushed" => Some(DomainEventKind::BranchPushed),
+            "issue_assigned" => Some(DomainEventKind::IssueAssigned),
+            "review_requested" => Some(DomainEventKind::ReviewRequested),
+            "issue_closed" => Some(DomainEventKind::IssueClosed),
             _ => None,
         }
     }
@@ -106,6 +139,9 @@ impl DomainEvent {
             DomainEvent::PullRequestMerged { .. } => DomainEventKind::PullRequestMerged,
             DomainEvent::UserMentioned { .. } => DomainEventKind::UserMentioned,
             DomainEvent::BranchPushed { .. } => DomainEventKind::BranchPushed,
+            DomainEvent::IssueAssigned { .. } => DomainEventKind::IssueAssigned,
+            DomainEvent::ReviewRequested { .. } => DomainEventKind::ReviewRequested,
+            DomainEvent::IssueClosed { .. } => DomainEventKind::IssueClosed,
         }
     }
 
@@ -114,8 +150,11 @@ impl DomainEvent {
     #[must_use]
     pub const fn aggregate_type(&self) -> &'static str {
         match self {
-            DomainEvent::PullRequestMerged { .. } => "pull_request",
+            DomainEvent::PullRequestMerged { .. } | DomainEvent::ReviewRequested { .. } => {
+                "pull_request"
+            }
             DomainEvent::BranchPushed { .. } => "repository",
+            DomainEvent::IssueAssigned { .. } | DomainEvent::IssueClosed { .. } => "issue",
             DomainEvent::UserMentioned { source, .. } => match source {
                 MentionSource::PullRequestComment { .. } => "pull_request",
                 MentionSource::IssueComment { .. } => "issue",
@@ -131,8 +170,13 @@ impl DomainEvent {
         match self {
             DomainEvent::PullRequestMerged {
                 pull_request_id, ..
+            }
+            | DomainEvent::ReviewRequested {
+                pull_request_id, ..
             } => pull_request_id.as_uuid(),
             DomainEvent::BranchPushed { repository_id, .. } => repository_id.as_uuid(),
+            DomainEvent::IssueAssigned { issue_id, .. }
+            | DomainEvent::IssueClosed { issue_id, .. } => issue_id.as_uuid(),
             DomainEvent::UserMentioned { source, .. } => match source {
                 MentionSource::PullRequestComment { pull_request_id } => pull_request_id.as_uuid(),
                 MentionSource::IssueComment { issue_id } => issue_id.as_uuid(),
@@ -171,8 +215,43 @@ mod tests {
             DomainEventKind::PullRequestMerged,
             DomainEventKind::UserMentioned,
             DomainEventKind::BranchPushed,
+            DomainEventKind::IssueAssigned,
+            DomainEventKind::ReviewRequested,
+            DomainEventKind::IssueClosed,
         ] {
             assert_eq!(DomainEventKind::from_db_str(kind.as_db_str()), Some(kind));
+        }
+    }
+
+    #[test]
+    fn the_phase_11_events_round_trip_and_locate_their_aggregate() {
+        let issue_id = IssueId::new();
+        let assigned = DomainEvent::IssueAssigned {
+            issue_id,
+            repository_id: RepositoryId::new(),
+            assignee_id: UserId::new(),
+            assigned_by_id: UserId::new(),
+        };
+        assert_eq!(assigned.aggregate_type(), "issue");
+        assert_eq!(assigned.aggregate_id(), issue_id.as_uuid());
+
+        let pr_id = PullRequestId::new();
+        let requested = DomainEvent::ReviewRequested {
+            pull_request_id: pr_id,
+            repository_id: RepositoryId::new(),
+            reviewer_id: UserId::new(),
+            requested_by_id: UserId::new(),
+        };
+        assert_eq!(requested.aggregate_type(), "pull_request");
+        assert_eq!(requested.aggregate_id(), pr_id.as_uuid());
+
+        for event in [assigned, requested] {
+            let json = serde_json::to_string(&event).unwrap();
+            assert_eq!(serde_json::from_str::<DomainEvent>(&json).unwrap(), event);
+            assert_eq!(
+                serde_json::to_value(&event).unwrap()["kind"],
+                event.kind().as_db_str()
+            );
         }
     }
 

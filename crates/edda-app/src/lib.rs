@@ -12,6 +12,7 @@ mod lfs;
 mod oauth_routes;
 mod rate_limit;
 mod release_assets;
+pub mod render;
 pub mod security;
 pub mod services;
 mod ssh_key_routes;

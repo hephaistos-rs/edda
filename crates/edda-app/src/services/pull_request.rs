@@ -6,13 +6,13 @@ use std::sync::Arc;
 
 use edda_auth::AuthorizationService;
 use edda_db::{
-    BranchProtectionRepo, CommitStatusRepo, DbPool, EventRepo, NewPullRequest, PrCommentRepo,
-    PrReviewRepo, PullRequestRepo, RepositoryRepo,
+    BranchProtectionRepo, CommitStatusRepo, DbPool, EventRepo, IssueRepo, NewPullRequest,
+    PrCommentRepo, PrReviewRepo, PullRequestRepo, RepositoryRepo, ReviewRequestRepo,
 };
 use edda_domain::{
-    parse_head_ref, ActorContext, CloseReason, DiffAnchor, DomainEvent, EventId, MentionSource,
-    MergeStrategy, PrCommentId, PrRef, PrReviewId, PrState, PullRequest, PullRequestId, Repository,
-    ReviewState,
+    parse_closing_references, parse_head_ref, ActorContext, CloseReason, DiffAnchor, DomainEvent,
+    EventId, IssueState, MentionSource, MergeStrategy, PrCommentId, PrRef, PrReviewId, PrState,
+    PullRequest, PullRequestId, Repository, ReviewState,
 };
 use edda_git::store::RepoStore;
 use edda_git::{LockRegistry, MergeOutcome};
@@ -200,10 +200,116 @@ impl PullRequestService {
             body.as_deref().filter(|b| !b.trim().is_empty()),
         )
         .await?;
+        // A submitted review satisfies any outstanding request for this
+        // reviewer.
+        ReviewRequestRepo::delete(&self.pool, pr.id, reviewer_id).await?;
         Ok(())
     }
 
-    /// Close an open pull request (without merging). Write access.
+    /// Request a review from a user (manually — a CODEOWNERS match takes
+    /// the same `review_requests` path). Write access. Idempotent; emits
+    /// `ReviewRequested` in the same transaction as the row insert.
+    pub async fn request_review(
+        &self,
+        actor: &ActorContext,
+        owner: &str,
+        name: &str,
+        number: i64,
+        reviewer_username: &str,
+    ) -> Result<(), ServiceError> {
+        let (repository, actor_id) = self.write_checked(actor, owner, name).await?;
+        let pr = self.load_pr(repository.id, number).await?;
+        let reviewer = edda_db::UserRepo::find_by_username(&self.pool, reviewer_username)
+            .await?
+            .ok_or(ServiceError::NotFound)?;
+
+        let mut tx = self.pool.begin().await?;
+        let newly_requested = ReviewRequestRepo::insert_if_new(
+            &mut tx,
+            edda_domain::ReviewRequestId::new(),
+            pr.id,
+            reviewer.id,
+        )
+        .await?;
+        if newly_requested {
+            EventRepo::append(
+                &mut tx,
+                EventId::new(),
+                &DomainEvent::ReviewRequested {
+                    pull_request_id: pr.id,
+                    repository_id: repository.id,
+                    reviewer_id: reviewer.id,
+                    requested_by_id: actor_id,
+                },
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Withdraw a pending review request. Write access.
+    pub async fn cancel_review_request(
+        &self,
+        actor: &ActorContext,
+        owner: &str,
+        name: &str,
+        number: i64,
+        reviewer_username: &str,
+    ) -> Result<(), ServiceError> {
+        let (repository, _) = self.write_checked(actor, owner, name).await?;
+        let pr = self.load_pr(repository.id, number).await?;
+        let reviewer = edda_db::UserRepo::find_by_username(&self.pool, reviewer_username)
+            .await?
+            .ok_or(ServiceError::NotFound)?;
+        ReviewRequestRepo::delete(&self.pool, pr.id, reviewer.id).await?;
+        Ok(())
+    }
+
+    /// Take a draft pull request out of draft (`Draft` -> `Open`).
+    /// Repository writer or the PR's own author.
+    pub async fn mark_ready(
+        &self,
+        actor: &ActorContext,
+        owner: &str,
+        name: &str,
+        number: i64,
+    ) -> Result<(), ServiceError> {
+        let (_, pr, _) = self
+            .author_or_write_checked(actor, owner, name, number)
+            .await?;
+        if !matches!(pr.state, PrState::Draft) {
+            return Err(ServiceError::Conflict(
+                "this pull request is not a draft".to_string(),
+            ));
+        }
+        PullRequestRepo::update_state(&self.pool, pr.id, &PrState::Open).await?;
+        Ok(())
+    }
+
+    /// Put an open pull request back into draft (`Open` -> `Draft`).
+    /// Repository writer or the PR's own author.
+    pub async fn convert_to_draft(
+        &self,
+        actor: &ActorContext,
+        owner: &str,
+        name: &str,
+        number: i64,
+    ) -> Result<(), ServiceError> {
+        let (_, pr, _) = self
+            .author_or_write_checked(actor, owner, name, number)
+            .await?;
+        if !matches!(pr.state, PrState::Open) {
+            return Err(ServiceError::Conflict(
+                "only an open pull request can be converted to a draft".to_string(),
+            ));
+        }
+        PullRequestRepo::update_state(&self.pool, pr.id, &PrState::Draft).await?;
+        Ok(())
+    }
+
+    /// Close an open pull request (without merging). Repository writer or
+    /// the PR's own author.
     pub async fn close(
         &self,
         actor: &ActorContext,
@@ -211,8 +317,9 @@ impl PullRequestService {
         name: &str,
         number: i64,
     ) -> Result<(), ServiceError> {
-        let (repository, _) = self.write_checked(actor, owner, name).await?;
-        let pr = self.load_pr(repository.id, number).await?;
+        let (_, pr, _) = self
+            .author_or_write_checked(actor, owner, name, number)
+            .await?;
         if !pr.state.is_open() {
             return Err(ServiceError::Conflict(
                 "this pull request is already merged or closed".to_string(),
@@ -269,6 +376,27 @@ impl PullRequestService {
         let repository = self.authz.repository_by_name(owner, name).await?;
         self.authz.check_write(actor, &repository).await?;
         Ok((repository, user_id))
+    }
+
+    /// Passes for a repository writer *or* the pull request's own author —
+    /// so a fork contributor can comment on, toggle the draft state of, or
+    /// close their own cross-repository pull request even without write
+    /// access to the target repository (the Phase 5 restriction that
+    /// blocked this).
+    async fn author_or_write_checked(
+        &self,
+        actor: &ActorContext,
+        owner: &str,
+        name: &str,
+        number: i64,
+    ) -> Result<(Repository, PullRequest, edda_domain::UserId), ServiceError> {
+        let user_id = actor.user_id().ok_or(ServiceError::Unauthorized)?;
+        let repository = self.authz.repository_by_name(owner, name).await?;
+        let pr = self.load_pr(repository.id, number).await?;
+        if pr.author_id != user_id {
+            self.authz.check_write(actor, &repository).await?;
+        }
+        Ok((repository, pr, user_id))
     }
 
     /// Authorize, then hold the repository's lock across the *whole* git
@@ -408,6 +536,20 @@ impl PullRequestService {
             strategy,
         };
 
+        // Same-repository issues named by a closing keyword in the PR's
+        // title or body (`closes #12`) are closed in the same transaction
+        // as the merge — `owner/repo#n` closing refs are left for a later
+        // phase (they need a write check on the other repo).
+        let closing_numbers: Vec<i64> = {
+            let text = format!("{}\n{}", pr.title, pr.body.as_deref().unwrap_or(""));
+            parse_closing_references(&text)
+                .into_iter()
+                .filter(|cref| cref.repository.is_none())
+                .map(|cref| cref.number)
+                .collect()
+        };
+        let actor_user_id = actor.user_id();
+
         let mut tx = self.pool.begin().await?;
         PullRequestRepo::update_state(&mut tx, pr.id, &merged_state).await?;
         EventRepo::append(
@@ -419,6 +561,39 @@ impl PullRequestService {
             },
         )
         .await?;
+        for issue_number in closing_numbers {
+            let Some(issue) =
+                IssueRepo::find_by_repository_and_number(&mut tx, repository.id, issue_number)
+                    .await?
+            else {
+                continue;
+            };
+            if !issue.state.is_open() {
+                continue;
+            }
+            IssueRepo::update_state(
+                &mut tx,
+                issue.id,
+                &IssueState::Closed {
+                    closed_at: now_unix(),
+                    reason: CloseReason::Completed,
+                },
+            )
+            .await?;
+            if let Some(closed_by_id) = actor_user_id {
+                EventRepo::append(
+                    &mut tx,
+                    EventId::new(),
+                    &DomainEvent::IssueClosed {
+                        issue_id: issue.id,
+                        repository_id: repository.id,
+                        closed_by_id,
+                        via_pull_request: Some(pr.id),
+                    },
+                )
+                .await?;
+            }
+        }
         tx.commit().await?;
 
         if let Some(actor_id) = actor.user_id() {
@@ -450,7 +625,6 @@ impl PullRequestService {
         body: &str,
         anchor: Option<DiffAnchor>,
     ) -> Result<PrCommentId, ServiceError> {
-        let commenter = actor.user_id().ok_or(ServiceError::Unauthorized)?;
         let body = body.trim();
         if body.is_empty() {
             return Err(ServiceError::Validation(
@@ -458,11 +632,11 @@ impl PullRequestService {
             ));
         }
 
-        let repository = self.authz.repository_by_name(owner, name).await?;
-        self.authz.check_write(actor, &repository).await?;
-        let pr = PullRequestRepo::find_by_repository_and_number(&self.pool, repository.id, number)
-            .await?
-            .ok_or(ServiceError::NotFound)?;
+        // A repository writer or the PR's own author (a fork contributor
+        // commenting on their own cross-repo PR).
+        let (_, pr, commenter) = self
+            .author_or_write_checked(actor, owner, name, number)
+            .await?;
 
         let mentioned = mentions::resolve(&self.pool, body, commenter).await?;
         let source = MentionSource::PullRequestComment {
@@ -601,5 +775,117 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    /// A PR owned by `author`, whose account has no access to the repo
+    /// (the fork-contributor shape). Returns `(repo_owner, number)`.
+    async fn repo_with_foreign_authored_pr(
+        pool: &DbPool,
+        author: UserId,
+        draft: bool,
+    ) -> (UserId, i64) {
+        let owner = user(pool, "maintainer").await;
+        let repository = Repository {
+            id: RepositoryId::new(),
+            owner: RepositoryOwner::User(owner),
+            name: "demo".to_string(),
+            description: None,
+            visibility: Visibility::Public,
+            forked_from: None,
+        };
+        RepositoryRepo::insert_with_owner(pool, &repository, owner)
+            .await
+            .unwrap();
+        let number = PullRequestRepo::insert(
+            pool,
+            PullRequestId::new(),
+            repository.id,
+            NewPullRequest {
+                title: "Add a thing",
+                body: None,
+                author_id: author,
+                source: &PrRef {
+                    repository_id: repository.id,
+                    branch: "feature".to_string(),
+                },
+                target: "main",
+                draft,
+            },
+        )
+        .await
+        .unwrap();
+        (owner, number)
+    }
+
+    #[tokio::test]
+    async fn request_review_writes_a_review_requested_event_and_is_idempotent() {
+        let pool = edda_db::test_pool().await;
+        let owner = user(&pool, "alice").await;
+        let reviewer = user(&pool, "bob").await;
+        let number = repo_with_pr(&pool, owner).await;
+
+        let svc = service(&pool);
+        svc.request_review(&ActorContext::User(owner), "alice", "demo", number, "bob")
+            .await
+            .unwrap();
+        svc.request_review(&ActorContext::User(owner), "alice", "demo", number, "bob")
+            .await
+            .unwrap();
+
+        let events = EventRepo::fetch_unprocessed(&pool, 50).await.unwrap();
+        let requested: Vec<_> = events
+            .iter()
+            .filter(|r| matches!(r.event, DomainEvent::ReviewRequested { reviewer_id, .. } if reviewer_id == reviewer))
+            .collect();
+        assert_eq!(requested.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn draft_and_ready_transitions_move_between_open_and_draft() {
+        let pool = edda_db::test_pool().await;
+        let author = user(&pool, "contributor").await;
+        let (owner, number) = repo_with_foreign_authored_pr(&pool, author, true).await;
+        let svc = service(&pool);
+
+        // The maintainer (write access) can take it out of draft.
+        svc.mark_ready(&ActorContext::User(owner), "maintainer", "demo", number)
+            .await
+            .unwrap();
+        // Not a draft any more.
+        let err = svc
+            .mark_ready(&ActorContext::User(owner), "maintainer", "demo", number)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::Conflict(_)));
+
+        // The author (no write access) can convert their own PR back to a draft.
+        svc.convert_to_draft(&ActorContext::User(author), "maintainer", "demo", number)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_fork_contributor_can_comment_on_and_close_their_own_pull_request() {
+        let pool = edda_db::test_pool().await;
+        let author = user(&pool, "contributor").await;
+        let _bystander = user(&pool, "bob").await;
+        let (_owner, number) = repo_with_foreign_authored_pr(&pool, author, false).await;
+
+        // No write access to the target repo, but they authored the PR.
+        service(&pool)
+            .add_comment(
+                &ActorContext::User(author),
+                "maintainer",
+                "demo",
+                number,
+                "thanks for the review",
+                None,
+            )
+            .await
+            .expect("the author may comment on their own PR");
+        service(&pool)
+            .close(&ActorContext::User(author), "maintainer", "demo", number)
+            .await
+            .expect("the author may close their own PR");
     }
 }

@@ -185,6 +185,16 @@ pub fn parse_cross_references(body: &str) -> Vec<CrossReference> {
     dedup(scan_refs(body).into_iter().map(|r| r.cref))
 }
 
+/// Every cross-reference in `body` with its `start..end` byte span — for a
+/// linkifier that rewrites each token in place. Not de-duplicated (each
+/// occurrence gets its own span) and in source order.
+pub fn parse_cross_reference_spans(body: &str) -> Vec<(std::ops::Range<usize>, CrossReference)> {
+    scan_refs(body)
+        .into_iter()
+        .map(|r| (r.start..r.end, r.cref))
+        .collect()
+}
+
 /// Whether the text immediately before byte offset `pos` is a closing
 /// keyword (optionally followed by a `:`), at a word boundary.
 fn closing_keyword_ends_at(bytes: &[u8], pos: usize) -> bool {

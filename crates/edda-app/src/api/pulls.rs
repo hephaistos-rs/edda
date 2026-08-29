@@ -9,7 +9,7 @@ use axum::{Json, Router};
 use edda_api_types::{
     AddCommentRequest, CreatePullRequest, CreatedNumberDto, FileDiffDto, MergeRequest,
     MergedPullDto, PrCommentDto, PrReviewDto, PrStateDto, PullRequestDetailDto, PullRequestDto,
-    SubmitReviewRequest,
+    SubmitReviewRequest, UsernameRequest,
 };
 use edda_db::DbPool;
 use edda_domain::{
@@ -50,6 +50,22 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/repos/{owner}/{repo}/pulls/{number}/reopen",
             post(reopen),
         )
+        .route(
+            "/api/v1/repos/{owner}/{repo}/pulls/{number}/ready",
+            post(mark_ready),
+        )
+        .route(
+            "/api/v1/repos/{owner}/{repo}/pulls/{number}/draft",
+            post(convert_to_draft),
+        )
+        .route(
+            "/api/v1/repos/{owner}/{repo}/pulls/{number}/requested-reviewers",
+            post(request_review),
+        )
+        .route(
+            "/api/v1/repos/{owner}/{repo}/pulls/{number}/requested-reviewers/{username}",
+            axum::routing::delete(cancel_review_request),
+        )
 }
 
 fn pr_state_dto(state: &PrState) -> PrStateDto {
@@ -81,6 +97,8 @@ async fn username_for(pool: &DbPool, user_id: UserId) -> Result<String, ServiceE
 
 async fn pr_dto(
     pool: &DbPool,
+    owner: &str,
+    repo: &str,
     target_repository_id: RepositoryId,
     pr: &PullRequest,
 ) -> Result<PullRequestDto, ServiceError> {
@@ -90,10 +108,14 @@ async fn pr_dto(
             .await?
             .map(|(_, owner)| owner)
             .unwrap_or_else(|| "(unknown)".to_string());
+    let ctx = crate::render::RefContext { owner, repo };
     Ok(PullRequestDto {
         number: pr.number,
         title: pr.title.clone(),
-        body_html: pr.body.as_deref().map(edda_render::markdown::render),
+        body_html: pr
+            .body
+            .as_deref()
+            .map(|body| crate::render::body_html(body, ctx)),
         author_username: username_for(pool, pr.author_id).await?,
         source_owner,
         source_branch: pr.source.branch.clone(),
@@ -113,7 +135,7 @@ async fn list(
     let prs = edda_db::PullRequestRepo::list_for_repository(&state.pool, repository.id).await?;
     let mut out = Vec::with_capacity(prs.len());
     for pr in &prs {
-        out.push(pr_dto(&state.pool, repository.id, pr).await?);
+        out.push(pr_dto(&state.pool, &owner, &repo, repository.id, pr).await?);
     }
     Ok(Json(out))
 }
@@ -129,12 +151,16 @@ async fn get_one(
             .await?
             .ok_or(ServiceError::NotFound)?;
 
+    let ctx = crate::render::RefContext {
+        owner: &owner,
+        repo: &repo,
+    };
     let comment_rows = edda_db::PrCommentRepo::list_for_pull_request(&state.pool, pr.id).await?;
     let mut comments = Vec::with_capacity(comment_rows.len());
     for comment in &comment_rows {
         comments.push(PrCommentDto {
             author_username: username_for(&state.pool, comment.author_id).await?,
-            body_html: edda_render::markdown::render(&comment.body),
+            body_html: crate::render::body_html(&comment.body, ctx),
             anchor_file_path: comment.anchor.as_ref().map(|a| a.file_path.clone()),
             anchor_line_start: comment.anchor.as_ref().map(|a| a.line_range.0),
             anchor_line_end: comment.anchor.as_ref().map(|a| a.line_range.1),
@@ -148,9 +174,17 @@ async fn get_one(
         reviews.push(PrReviewDto {
             reviewer_username: username_for(&state.pool, r.reviewer_id).await?,
             state: r.state.as_db_str().to_string(),
-            body_html: r.body.as_deref().map(edda_render::markdown::render),
+            body_html: r
+                .body
+                .as_deref()
+                .map(|body| crate::render::body_html(body, ctx)),
             created_at: r.created_at,
         });
+    }
+
+    let mut requested_reviewers = Vec::new();
+    for request in edda_db::ReviewRequestRepo::list_for_pull_request(&state.pool, pr.id).await? {
+        requested_reviewers.push(username_for(&state.pool, request.reviewer_id).await?);
     }
 
     let can_merge = pr.state.is_open()
@@ -164,9 +198,10 @@ async fn get_one(
         };
 
     Ok(Json(PullRequestDetailDto {
-        pull_request: pr_dto(&state.pool, repository.id, &pr).await?,
+        pull_request: pr_dto(&state.pool, &owner, &repo, repository.id, &pr).await?,
         comments,
         reviews,
+        requested_reviewers,
         can_merge,
     }))
 }
@@ -307,6 +342,55 @@ async fn reopen(
     actor.require_user()?;
     PullRequestService::from_state(&state)
         .reopen(actor.context(), &owner, &repo, number)
+        .await?;
+    Ok(Json(()))
+}
+
+async fn mark_ready(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path((owner, repo, number)): Path<(String, String, i64)>,
+) -> Result<Json<()>, ServiceError> {
+    actor.require_user()?;
+    PullRequestService::from_state(&state)
+        .mark_ready(actor.context(), &owner, &repo, number)
+        .await?;
+    Ok(Json(()))
+}
+
+async fn convert_to_draft(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path((owner, repo, number)): Path<(String, String, i64)>,
+) -> Result<Json<()>, ServiceError> {
+    actor.require_user()?;
+    PullRequestService::from_state(&state)
+        .convert_to_draft(actor.context(), &owner, &repo, number)
+        .await?;
+    Ok(Json(()))
+}
+
+async fn request_review(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path((owner, repo, number)): Path<(String, String, i64)>,
+    Json(body): Json<UsernameRequest>,
+) -> Result<Json<()>, ServiceError> {
+    actor.require_user()?;
+    PullRequestService::from_state(&state)
+        .request_review(actor.context(), &owner, &repo, number, &body.username)
+        .await?;
+    Ok(Json(()))
+}
+
+async fn cancel_review_request(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path((owner, repo, number, username)): Path<(String, String, i64, String)>,
+) -> Result<Json<()>, ServiceError> {
+    actor.require_user()?;
+    PullRequestService::from_state(&state)
+        .cancel_review_request(actor.context(), &owner, &repo, number, &username)
         .await?;
     Ok(Json(()))
 }

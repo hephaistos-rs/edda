@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 use edda_api_types::{
     ApplyLabelRequest, BodyRequest, CreateIssueRequest, CreateLabelRequest, IssueDetailDto,
-    IssueDto, IssueStateDto, LabelDto,
+    IssueDto, IssueStateDto, LabelDto, UsernameRequest,
 };
 
 use crate::api_client::{self, ApiResult};
@@ -185,6 +185,7 @@ pub fn IssueDetail(owner: String, name: String, number: i64) -> Element {
     let mut busy = use_signal(|| false);
     let mut new_label_name = use_signal(String::new);
     let mut new_label_color = use_signal(|| "#e0af3b".to_string());
+    let mut assignee_input = use_signal(String::new);
 
     let issues_base = issues_path(&owner, &name);
     let labels_base = labels_path(&owner, &name);
@@ -207,6 +208,48 @@ pub fn IssueDetail(owner: String, name: String, number: i64) -> Element {
             busy.set(false);
         });
     };
+
+    let assign_base = issues_base.clone();
+    let on_assign = move |event: FormEvent| {
+        event.prevent_default();
+        let username = assignee_input.read().trim().to_string();
+        if username.is_empty() {
+            return;
+        }
+        let path = format!("{assign_base}/{number}/assignees");
+        busy.set(true);
+        action_error.set(None);
+        spawn(async move {
+            match api_client::post_ok(&path, &UsernameRequest { username }).await {
+                Ok(()) => {
+                    assignee_input.set(String::new());
+                    detail.restart();
+                }
+                Err(err) => action_error.set(Some(err.to_string())),
+            }
+            busy.set(false);
+        });
+    };
+
+    fn unassign(
+        base: String,
+        number: i64,
+        username: String,
+        mut busy: Signal<bool>,
+        mut action_error: Signal<Option<String>>,
+        mut detail: Resource<ApiResult<IssueDetailDto>>,
+    ) {
+        busy.set(true);
+        action_error.set(None);
+        spawn(async move {
+            let path = format!("{base}/{number}/assignees/{username}");
+            match api_client::delete_ok(&path).await {
+                Ok(()) => detail.restart(),
+                Err(err) => action_error.set(Some(err.to_string())),
+            }
+            busy.set(false);
+        });
+    }
 
     let toggle_base = issues_base.clone();
     let mut on_toggle_state = move |currently_open: bool| {
@@ -270,6 +313,39 @@ pub fn IssueDetail(owner: String, name: String, number: i64) -> Element {
                         p { class: "mt-1 font-mono text-xs text-ink-muted", "opened by {issue.author_username}" }
                         if let Some(html) = &issue.body_html {
                             div { class: "mt-4 border border-line p-4 text-sm text-ink", dangerous_inner_html: "{html}" }
+                        }
+
+                        h2 { class: "mt-8 font-mono text-sm font-semibold text-ink", "Assignees" }
+                        div { class: "mt-2 flex flex-wrap items-center gap-2",
+                            for username in issue.assignees.clone() {
+                                button {
+                                    r#type: "button", disabled: busy(),
+                                    class: "border border-line px-2 py-0.5 font-mono text-xs text-ink hover:text-status-conflict disabled:opacity-60",
+                                    title: "remove assignee",
+                                    onclick: {
+                                        let base = issues_base.clone();
+                                        let username = username.clone();
+                                        move |_| unassign(base.clone(), number, username.clone(), busy, action_error, detail)
+                                    },
+                                    "{username} ×"
+                                }
+                            }
+                            if issue.assignees.is_empty() {
+                                span { class: "font-mono text-xs text-ink-muted", "none" }
+                            }
+                        }
+                        form { class: "mt-2 flex gap-2", onsubmit: on_assign,
+                            input {
+                                r#type: "text", placeholder: "username",
+                                class: "border border-line bg-surface px-2 py-1 font-mono text-xs text-ink focus:border-accent focus:outline-none",
+                                value: "{assignee_input}",
+                                oninput: move |event| assignee_input.set(event.value()),
+                            }
+                            button {
+                                r#type: "submit", disabled: busy(),
+                                class: "border border-line px-3 py-1 font-mono text-xs text-ink-muted hover:text-ink disabled:opacity-60",
+                                "assign"
+                            }
                         }
 
                         h2 { class: "mt-8 font-mono text-sm font-semibold text-ink", "Labels" }

@@ -41,7 +41,9 @@ pub use access::{
 pub use branch_protection::{branch_pattern_matches, BranchProtectionRule};
 pub use codeowners::{CodeOwners, CodeOwnersRule};
 pub use commit_status::{required_checks_satisfied, CommitStatus, CommitStatusState};
-pub use crossref::{parse_closing_references, parse_cross_references, CrossReference};
+pub use crossref::{
+    parse_closing_references, parse_cross_reference_spans, parse_cross_references, CrossReference,
+};
 pub use deploy_key::DeployKey;
 pub use event::{DomainEvent, DomainEventKind, MentionSource};
 pub use ids::{

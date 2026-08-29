@@ -256,6 +256,10 @@ pub struct PullRequestDetailDto {
     pub pull_request: PullRequestDto,
     pub comments: Vec<PrCommentDto>,
     pub reviews: Vec<PrReviewDto>,
+    /// Usernames with an outstanding review request (manual or from
+    /// CODEOWNERS) that they have not yet answered.
+    #[serde(default)]
+    pub requested_reviewers: Vec<String>,
     /// Whether the caller may currently merge this PR — resolved
     /// server-side (branch protection, review count, write access) so the
     /// UI never reimplements that decision.
@@ -403,7 +407,17 @@ pub struct IssueDto {
     pub author_username: String,
     pub state: IssueStateDto,
     pub milestone_title: Option<String>,
+    /// Usernames of everyone assigned to the issue.
+    #[serde(default)]
+    pub assignees: Vec<String>,
     pub created_at: i64,
+}
+
+/// Body for `POST .../issues/{n}/assignees` and
+/// `POST .../pulls/{n}/requested-reviewers`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsernameRequest {
+    pub username: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

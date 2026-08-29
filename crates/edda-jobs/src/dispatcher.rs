@@ -20,12 +20,12 @@
 use std::time::Duration;
 
 use edda_db::{
-    BranchProtectionRepo, DbPool, EventRecord, EventRepo, JobRepo, OrganizationRepo, PrReviewRepo,
-    PullRequestRepo, RepositoryRepo, UserRepo, WebhookRepo,
+    BranchProtectionRepo, DbPool, EventRecord, EventRepo, IssueAssigneeRepo, IssueRepo, JobRepo,
+    OrganizationRepo, PrReviewRepo, PullRequestRepo, RepositoryRepo, UserRepo, WebhookRepo,
 };
 use edda_domain::{
     DomainEvent, JobId, JobPayload, MentionSource, NotificationKind, NotificationSubject,
-    RepositoryId, RepositoryOwner, WebhookEvent,
+    RepositoryId, RepositoryOwner, UserId, WebhookEvent,
 };
 
 use crate::{now_unix, DEFAULT_MAX_ATTEMPTS};
@@ -185,7 +185,134 @@ async fn fan_out(pool: &DbPool, event: &DomainEvent) -> Result<Vec<JobPayload>, 
             new,
             ..
         } => fan_out_branch_pushed(pool, *repository_id, ref_name, old, new).await,
+        DomainEvent::IssueAssigned {
+            issue_id,
+            assignee_id,
+            assigned_by_id,
+            ..
+        } => {
+            let (number, title) = IssueRepo::find_by_id(pool, *issue_id)
+                .await?
+                .map_or((0, String::new()), |issue| (issue.number, issue.title));
+            Ok(notify(
+                pool,
+                *assignee_id,
+                *assigned_by_id,
+                NotificationKind::IssueAssigned,
+                NotificationSubject::Issue(*issue_id),
+                "You were assigned an issue on Edda",
+                &format!("assigned you issue #{number}: {title}"),
+            )
+            .await)
+        }
+        DomainEvent::ReviewRequested {
+            pull_request_id,
+            reviewer_id,
+            requested_by_id,
+            ..
+        } => {
+            let number = PullRequestRepo::find_by_id(pool, *pull_request_id)
+                .await?
+                .map_or(0, |pr| pr.number);
+            Ok(notify(
+                pool,
+                *reviewer_id,
+                *requested_by_id,
+                NotificationKind::PrReviewRequested,
+                NotificationSubject::PullRequest(*pull_request_id),
+                "Your review was requested on Edda",
+                &format!("requested your review on pull request #{number}"),
+            )
+            .await)
+        }
+        DomainEvent::IssueClosed {
+            issue_id,
+            closed_by_id,
+            via_pull_request,
+            ..
+        } => {
+            let Some(issue) = IssueRepo::find_by_id(pool, *issue_id).await? else {
+                return Ok(Vec::new());
+            };
+            let mut recipients: Vec<UserId> = IssueAssigneeRepo::list_for_issue(pool, *issue_id)
+                .await?
+                .into_iter()
+                .chain(std::iter::once(issue.author_id))
+                .filter(|id| id != closed_by_id)
+                .collect();
+            recipients.sort_unstable();
+            recipients.dedup();
+            let detail = match via_pull_request {
+                Some(pr_id) => {
+                    let pr_number = PullRequestRepo::find_by_id(pool, *pr_id)
+                        .await?
+                        .map_or(0, |pr| pr.number);
+                    format!(
+                        "closed issue #{} via pull request #{pr_number}",
+                        issue.number
+                    )
+                }
+                None => format!("closed issue #{}", issue.number),
+            };
+            let mut jobs = Vec::new();
+            for recipient in recipients {
+                jobs.extend(
+                    notify(
+                        pool,
+                        recipient,
+                        *closed_by_id,
+                        NotificationKind::IssueClosed,
+                        NotificationSubject::Issue(*issue_id),
+                        "An issue you follow was closed",
+                        &detail,
+                    )
+                    .await,
+                );
+            }
+            Ok(jobs)
+        }
     }
+}
+
+/// The standard "one person did something to another person" fan-out: an
+/// in-app notification plus, when the recipient hasn't opted out, an
+/// email. `action` is the sentence fragment after "@actor " (e.g.
+/// "assigned you issue #5: …").
+async fn notify(
+    pool: &DbPool,
+    recipient_id: UserId,
+    actor_id: UserId,
+    kind: NotificationKind,
+    subject: NotificationSubject,
+    email_subject: &str,
+    action: &str,
+) -> Vec<JobPayload> {
+    let mut jobs = vec![JobPayload::CreateNotification {
+        user_id: recipient_id,
+        kind,
+        subject,
+    }];
+    let email_enabled = UserRepo::email_notifications_enabled(pool, recipient_id)
+        .await
+        .unwrap_or(true);
+    if email_enabled {
+        if let Ok(Some(recipient)) = UserRepo::find_by_id(pool, recipient_id).await {
+            let actor = UserRepo::find_by_id(pool, actor_id)
+                .await
+                .ok()
+                .flatten()
+                .map_or_else(
+                    || "Someone".to_string(),
+                    |row| format!("@{}", row.user.username),
+                );
+            jobs.push(JobPayload::SendEmail {
+                to_email: recipient.user.email,
+                subject: email_subject.to_string(),
+                body_text: format!("{actor} {action}."),
+            });
+        }
+    }
+    jobs
 }
 
 /// A `refs/heads/*` update landed. Two reactions: deliver the `push`
@@ -587,5 +714,136 @@ mod tests {
             "the approval should have been dismissed by the push"
         );
         assert!(!reviews[0].is_active_approval());
+    }
+
+    #[tokio::test]
+    async fn an_issue_assigned_event_notifies_the_assignee_in_app_and_by_email() {
+        let pool = edda_db::test_pool().await;
+        let assigner = insert_user(&pool, "alice").await;
+        let assignee = insert_user(&pool, "bob").await;
+        let repo_id = insert_repo(&pool, assigner, "demo").await;
+        let issue_id = edda_domain::IssueId::new();
+        IssueRepo::insert(&pool, issue_id, repo_id, "Bug", None, assigner)
+            .await
+            .unwrap();
+
+        let event = DomainEvent::IssueAssigned {
+            issue_id,
+            repository_id: repo_id,
+            assignee_id: assignee,
+            assigned_by_id: assigner,
+        };
+        EventRepo::append(&pool, EventId::new(), &event)
+            .await
+            .unwrap();
+        let record = EventRepo::fetch_unprocessed(&pool, 10).await.unwrap()[0].clone();
+        process_one(&pool, &record).await.unwrap();
+
+        let claimed = JobRepo::claim_batch(&pool, now_unix(), 10).await.unwrap();
+        assert_eq!(claimed.len(), 2);
+        assert!(claimed.iter().any(|job| matches!(
+            &job.payload,
+            JobPayload::CreateNotification { user_id, kind, .. }
+                if *user_id == assignee && *kind == NotificationKind::IssueAssigned
+        )));
+        assert!(claimed.iter().any(|job| matches!(
+            &job.payload,
+            JobPayload::SendEmail { to_email, body_text, .. }
+                if to_email == "bob@example.com" && body_text.contains("@alice")
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_review_requested_event_notifies_the_reviewer() {
+        let pool = edda_db::test_pool().await;
+        let requester = insert_user(&pool, "alice").await;
+        let reviewer = insert_user(&pool, "bob").await;
+        let repo_id = insert_repo(&pool, requester, "demo").await;
+        let pr_id = PullRequestId::new();
+        PullRequestRepo::insert(
+            &pool,
+            pr_id,
+            repo_id,
+            edda_db::NewPullRequest {
+                title: "Add a thing",
+                body: None,
+                author_id: requester,
+                source: &edda_domain::PrRef {
+                    repository_id: repo_id,
+                    branch: "feature".to_string(),
+                },
+                target: "main",
+                draft: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let event = DomainEvent::ReviewRequested {
+            pull_request_id: pr_id,
+            repository_id: repo_id,
+            reviewer_id: reviewer,
+            requested_by_id: requester,
+        };
+        EventRepo::append(&pool, EventId::new(), &event)
+            .await
+            .unwrap();
+        let record = EventRepo::fetch_unprocessed(&pool, 10).await.unwrap()[0].clone();
+        process_one(&pool, &record).await.unwrap();
+
+        let claimed = JobRepo::claim_batch(&pool, now_unix(), 10).await.unwrap();
+        assert!(claimed.iter().any(|job| matches!(
+            &job.payload,
+            JobPayload::CreateNotification { user_id, kind, .. }
+                if *user_id == reviewer && *kind == NotificationKind::PrReviewRequested
+        )));
+    }
+
+    #[tokio::test]
+    async fn an_issue_closed_event_notifies_the_author_and_assignees_but_not_the_closer() {
+        let pool = edda_db::test_pool().await;
+        let author = insert_user(&pool, "alice").await;
+        let assignee = insert_user(&pool, "bob").await;
+        let closer = insert_user(&pool, "carol").await;
+        let repo_id = insert_repo(&pool, author, "demo").await;
+        let issue_id = edda_domain::IssueId::new();
+        IssueRepo::insert(&pool, issue_id, repo_id, "Bug", None, author)
+            .await
+            .unwrap();
+        IssueAssigneeRepo::assign(&pool, issue_id, assignee, Some(author))
+            .await
+            .unwrap();
+        // The closer is also an assignee — they must not get a notification.
+        IssueAssigneeRepo::assign(&pool, issue_id, closer, Some(author))
+            .await
+            .unwrap();
+
+        let event = DomainEvent::IssueClosed {
+            issue_id,
+            repository_id: repo_id,
+            closed_by_id: closer,
+            via_pull_request: Some(PullRequestId::new()),
+        };
+        EventRepo::append(&pool, EventId::new(), &event)
+            .await
+            .unwrap();
+        let record = EventRepo::fetch_unprocessed(&pool, 10).await.unwrap()[0].clone();
+        process_one(&pool, &record).await.unwrap();
+
+        let claimed = JobRepo::claim_batch(&pool, now_unix(), 20).await.unwrap();
+        let notified: std::collections::HashSet<_> = claimed
+            .iter()
+            .filter_map(|job| match &job.payload {
+                JobPayload::CreateNotification { user_id, kind, .. }
+                    if *kind == NotificationKind::IssueClosed =>
+                {
+                    Some(*user_id)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(notified.contains(&author));
+        assert!(notified.contains(&assignee));
+        assert!(!notified.contains(&closer), "the closer is not notified");
     }
 }

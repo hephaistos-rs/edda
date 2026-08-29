@@ -3,7 +3,10 @@
 //! events in the same transaction as the insert.
 
 use edda_auth::AuthorizationService;
-use edda_db::{DbPool, EventRepo, IssueCommentRepo, IssueRepo, LabelRepo, MilestoneRepo};
+use edda_db::{
+    DbPool, EventRepo, IssueAssigneeRepo, IssueCommentRepo, IssueRepo, LabelRepo, MilestoneRepo,
+    UserRepo,
+};
 use edda_domain::{
     ActorContext, CloseReason, DomainEvent, EventId, Issue, IssueCommentId, IssueState, LabelId,
     MentionSource, MilestoneId, Repository,
@@ -187,6 +190,61 @@ impl IssueService {
             due_on,
         )
         .await?;
+        Ok(())
+    }
+
+    /// Assign a user to an issue — write access. Idempotent: assigning
+    /// someone already assigned is a no-op (no second notification). Emits
+    /// `IssueAssigned` in the same transaction as the junction insert.
+    pub async fn assign(
+        &self,
+        actor: &ActorContext,
+        owner: &str,
+        name: &str,
+        number: i64,
+        assignee_username: &str,
+    ) -> Result<(), ServiceError> {
+        let (repository, actor_id) = self.write_checked(actor, owner, name).await?;
+        let issue = self.load_issue(repository.id, number).await?;
+        let assignee = UserRepo::find_by_username(&self.pool, assignee_username)
+            .await?
+            .ok_or(ServiceError::NotFound)?;
+
+        let mut tx = self.pool.begin().await?;
+        let newly_assigned =
+            IssueAssigneeRepo::assign(&mut tx, issue.id, assignee.id, Some(actor_id)).await?;
+        if newly_assigned {
+            EventRepo::append(
+                &mut tx,
+                EventId::new(),
+                &DomainEvent::IssueAssigned {
+                    issue_id: issue.id,
+                    repository_id: repository.id,
+                    assignee_id: assignee.id,
+                    assigned_by_id: actor_id,
+                },
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Remove an assignee from an issue — write access.
+    pub async fn unassign(
+        &self,
+        actor: &ActorContext,
+        owner: &str,
+        name: &str,
+        number: i64,
+        assignee_username: &str,
+    ) -> Result<(), ServiceError> {
+        let (repository, _) = self.write_checked(actor, owner, name).await?;
+        let issue = self.load_issue(repository.id, number).await?;
+        let assignee = UserRepo::find_by_username(&self.pool, assignee_username)
+            .await?
+            .ok_or(ServiceError::NotFound)?;
+        IssueAssigneeRepo::unassign(&self.pool, issue.id, assignee.id).await?;
         Ok(())
     }
 
@@ -429,5 +487,48 @@ mod tests {
             err,
             ServiceError::Forbidden | ServiceError::NotFound
         ));
+    }
+
+    #[tokio::test]
+    async fn assign_writes_the_junction_row_and_one_issue_assigned_event_then_is_idempotent() {
+        let pool = edda_db::test_pool().await;
+        let owner = user(&pool, "alice").await;
+        let assignee = user(&pool, "bob").await;
+        let repository = Repository {
+            id: RepositoryId::new(),
+            owner: RepositoryOwner::User(owner),
+            name: "demo".to_string(),
+            description: None,
+            visibility: Visibility::Public,
+            forked_from: None,
+        };
+        RepositoryRepo::insert_with_owner(&pool, &repository, owner)
+            .await
+            .unwrap();
+        let issue_id = edda_domain::IssueId::new();
+        let number = IssueRepo::insert(&pool, issue_id, repository.id, "Bug", None, owner)
+            .await
+            .unwrap();
+
+        let svc = service(&pool);
+        svc.assign(&ActorContext::User(owner), "alice", "demo", number, "bob")
+            .await
+            .unwrap();
+        svc.assign(&ActorContext::User(owner), "alice", "demo", number, "bob")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            edda_db::IssueAssigneeRepo::list_for_issue(&pool, issue_id)
+                .await
+                .unwrap(),
+            vec![assignee]
+        );
+        let outbox = EventRepo::fetch_unprocessed(&pool, 50).await.unwrap();
+        let assigned: Vec<_> = outbox
+            .iter()
+            .filter(|r| matches!(r.event, DomainEvent::IssueAssigned { assignee_id, .. } if assignee_id == assignee))
+            .collect();
+        assert_eq!(assigned.len(), 1, "one event for the first assignment only");
     }
 }

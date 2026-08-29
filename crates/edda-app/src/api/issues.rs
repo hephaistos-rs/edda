@@ -8,12 +8,13 @@ use axum::{Json, Router};
 use edda_api_types::{
     ApplyLabelRequest, BodyRequest, CreateIssueRequest, CreateLabelRequest, CreateMilestoneRequest,
     CreatedNumberDto, IssueCommentDto, IssueDetailDto, IssueDto, IssueStateDto, LabelDto,
-    MilestoneDto, SetMilestoneRequest,
+    MilestoneDto, SetMilestoneRequest, UsernameRequest,
 };
 use edda_db::DbPool;
 use edda_domain::{Issue, IssueState, LabelId, MilestoneId, UserId};
 
 use super::{read_repo, Actor};
+use crate::render::{body_html, RefContext};
 use crate::services::issue::NewIssueInput;
 use crate::services::{IssueService, ServiceError};
 use crate::AppState;
@@ -48,6 +49,14 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/v1/repos/{owner}/{repo}/issues/{number}/milestone",
             put(set_milestone),
+        )
+        .route(
+            "/api/v1/repos/{owner}/{repo}/issues/{number}/assignees",
+            post(add_assignee),
+        )
+        .route(
+            "/api/v1/repos/{owner}/{repo}/issues/{number}/assignees/{username}",
+            axum::routing::delete(remove_assignee),
         )
         .route(
             "/api/v1/repos/{owner}/{repo}/labels",
@@ -85,7 +94,12 @@ async fn username_for(pool: &DbPool, user_id: UserId) -> Result<String, ServiceE
         .unwrap_or_else(|| "(unknown)".to_string()))
 }
 
-async fn issue_dto(pool: &DbPool, issue: &Issue) -> Result<IssueDto, ServiceError> {
+async fn issue_dto(
+    pool: &DbPool,
+    owner: &str,
+    repo: &str,
+    issue: &Issue,
+) -> Result<IssueDto, ServiceError> {
     let milestone_title = match issue.milestone_id {
         Some(milestone_id) => {
             edda_db::MilestoneRepo::list_for_repository(pool, issue.repository_id)
@@ -96,13 +110,19 @@ async fn issue_dto(pool: &DbPool, issue: &Issue) -> Result<IssueDto, ServiceErro
         }
         None => None,
     };
+    let ctx = RefContext { owner, repo };
+    let mut assignees = Vec::new();
+    for user_id in edda_db::IssueAssigneeRepo::list_for_issue(pool, issue.id).await? {
+        assignees.push(username_for(pool, user_id).await?);
+    }
     Ok(IssueDto {
         number: issue.number,
         title: issue.title.clone(),
-        body_html: issue.body.as_deref().map(edda_render::markdown::render),
+        body_html: issue.body.as_deref().map(|body| body_html(body, ctx)),
         author_username: username_for(pool, issue.author_id).await?,
         state: issue_state_dto(&issue.state),
         milestone_title,
+        assignees,
         created_at: issue.created_at,
     })
 }
@@ -116,7 +136,7 @@ async fn list(
     let issues = edda_db::IssueRepo::list_for_repository(&state.pool, repository.id).await?;
     let mut out = Vec::with_capacity(issues.len());
     for issue in &issues {
-        out.push(issue_dto(&state.pool, issue).await?);
+        out.push(issue_dto(&state.pool, &owner, &repo, issue).await?);
     }
     Ok(Json(out))
 }
@@ -132,12 +152,16 @@ async fn get_one(
             .await?
             .ok_or(ServiceError::NotFound)?;
 
+    let ctx = RefContext {
+        owner: &owner,
+        repo: &repo,
+    };
     let comment_rows = edda_db::IssueCommentRepo::list_for_issue(&state.pool, issue.id).await?;
     let mut comments = Vec::with_capacity(comment_rows.len());
     for comment in &comment_rows {
         comments.push(IssueCommentDto {
             author_username: username_for(&state.pool, comment.author_id).await?,
-            body_html: edda_render::markdown::render(&comment.body),
+            body_html: body_html(&comment.body, ctx),
             created_at: comment.created_at,
         });
     }
@@ -149,7 +173,7 @@ async fn get_one(
         .collect();
 
     Ok(Json(IssueDetailDto {
-        issue: issue_dto(&state.pool, &issue).await?,
+        issue: issue_dto(&state.pool, &owner, &repo, &issue).await?,
         comments,
         labels,
     }))
@@ -209,6 +233,31 @@ async fn reopen(
     actor.require_user()?;
     IssueService::from_state(&state)
         .reopen(actor.context(), &owner, &repo, number)
+        .await?;
+    Ok(Json(()))
+}
+
+async fn add_assignee(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path((owner, repo, number)): Path<(String, String, i64)>,
+    Json(body): Json<UsernameRequest>,
+) -> Result<Json<()>, ServiceError> {
+    actor.require_user()?;
+    IssueService::from_state(&state)
+        .assign(actor.context(), &owner, &repo, number, &body.username)
+        .await?;
+    Ok(Json(()))
+}
+
+async fn remove_assignee(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path((owner, repo, number, username)): Path<(String, String, i64, String)>,
+) -> Result<Json<()>, ServiceError> {
+    actor.require_user()?;
+    IssueService::from_state(&state)
+        .unassign(actor.context(), &owner, &repo, number, &username)
         .await?;
     Ok(Json(()))
 }

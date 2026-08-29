@@ -20,12 +20,12 @@
 use std::time::Duration;
 
 use edda_db::{
-    DbPool, EventRecord, EventRepo, JobRepo, OrganizationRepo, PullRequestRepo, RepositoryRepo,
-    UserRepo, WebhookRepo,
+    BranchProtectionRepo, DbPool, EventRecord, EventRepo, JobRepo, OrganizationRepo, PrReviewRepo,
+    PullRequestRepo, RepositoryRepo, UserRepo, WebhookRepo,
 };
 use edda_domain::{
     DomainEvent, JobId, JobPayload, MentionSource, NotificationKind, NotificationSubject,
-    RepositoryOwner, WebhookEvent,
+    RepositoryId, RepositoryOwner, WebhookEvent,
 };
 
 use crate::{now_unix, DEFAULT_MAX_ATTEMPTS};
@@ -108,20 +108,20 @@ async fn process_one(pool: &DbPool, record: &EventRecord) -> Result<(), edda_db:
 /// a valid outcome (no webhooks subscribed, the aggregate was since
 /// deleted) — the event is still marked processed.
 async fn fan_out(pool: &DbPool, event: &DomainEvent) -> Result<Vec<JobPayload>, edda_db::DbError> {
-    match *event {
+    match event {
         DomainEvent::PullRequestMerged {
             pull_request_id,
             repository_id,
         } => {
             let webhooks =
-                WebhookRepo::find_subscribed(pool, repository_id, WebhookEvent::PullRequestMerged)
+                WebhookRepo::find_subscribed(pool, *repository_id, WebhookEvent::PullRequestMerged)
                     .await?;
             if webhooks.is_empty() {
                 return Ok(Vec::new());
             }
             let (Some(pr), Some(repo)) = (
-                PullRequestRepo::find_by_id(pool, pull_request_id).await?,
-                RepositoryRepo::find_by_id(pool, repository_id).await?,
+                PullRequestRepo::find_by_id(pool, *pull_request_id).await?,
+                RepositoryRepo::find_by_id(pool, *repository_id).await?,
             ) else {
                 return Ok(Vec::new());
             };
@@ -148,22 +148,22 @@ async fn fan_out(pool: &DbPool, event: &DomainEvent) -> Result<Vec<JobPayload>, 
         } => {
             let subject = match source {
                 MentionSource::PullRequestComment { pull_request_id } => {
-                    NotificationSubject::PullRequest(pull_request_id)
+                    NotificationSubject::PullRequest(*pull_request_id)
                 }
-                MentionSource::IssueComment { issue_id } => NotificationSubject::Issue(issue_id),
+                MentionSource::IssueComment { issue_id } => NotificationSubject::Issue(*issue_id),
             };
             let mut jobs = vec![JobPayload::CreateNotification {
-                user_id: mentioned_user_id,
+                user_id: *mentioned_user_id,
                 kind: NotificationKind::Mention,
                 subject,
             }];
 
-            let email_enabled = UserRepo::email_notifications_enabled(pool, mentioned_user_id)
+            let email_enabled = UserRepo::email_notifications_enabled(pool, *mentioned_user_id)
                 .await
                 .unwrap_or(true);
             if email_enabled {
-                if let Some(recipient) = UserRepo::find_by_id(pool, mentioned_user_id).await? {
-                    let by = UserRepo::find_by_id(pool, mentioned_by_user_id)
+                if let Some(recipient) = UserRepo::find_by_id(pool, *mentioned_user_id).await? {
+                    let by = UserRepo::find_by_id(pool, *mentioned_by_user_id)
                         .await?
                         .map_or_else(
                             || "Someone".to_string(),
@@ -178,7 +178,84 @@ async fn fan_out(pool: &DbPool, event: &DomainEvent) -> Result<Vec<JobPayload>, 
             }
             Ok(jobs)
         }
+        DomainEvent::BranchPushed {
+            repository_id,
+            ref_name,
+            old,
+            new,
+            ..
+        } => fan_out_branch_pushed(pool, *repository_id, ref_name, old, new).await,
     }
+}
+
+/// A `refs/heads/*` update landed. Two reactions: deliver the `push`
+/// webhook, and — for any open PR whose *source* is this branch — dismiss
+/// its stale approvals when the target branch's protection rule says to.
+///
+/// The dismissal is a write done here rather than a returned job: it is
+/// idempotent (`WHERE dismissed_at IS NULL`), so re-running it after a
+/// dispatcher retry is harmless, matching how this function already does
+/// non-transactional work before the claim.
+async fn fan_out_branch_pushed(
+    pool: &DbPool,
+    repository_id: RepositoryId,
+    ref_name: &str,
+    old: &str,
+    new: &str,
+) -> Result<Vec<JobPayload>, edda_db::DbError> {
+    let branch = ref_name.strip_prefix("refs/heads/").unwrap_or(ref_name);
+    const ZERO: &str = "0000000000000000000000000000000000000000";
+    let action = if old == ZERO {
+        "created"
+    } else if new == ZERO {
+        "deleted"
+    } else {
+        "updated"
+    };
+
+    // Dismiss stale approvals on any open PR sourced from this branch.
+    let prs = PullRequestRepo::list_open_with_source_branch(pool, repository_id, branch).await?;
+    for pr in &prs {
+        if new == ZERO {
+            continue;
+        }
+        let rule = BranchProtectionRepo::find_matching(pool, pr.repository_id, &pr.target).await?;
+        if rule.is_some_and(|rule| rule.dismiss_stale_reviews) {
+            let dismissed = PrReviewRepo::dismiss_all_for_pull_request(pool, pr.id).await?;
+            if dismissed > 0 {
+                tracing::info!(
+                    pull_request.id = %pr.id,
+                    dismissed,
+                    "dismissed stale approvals after a push to the PR's source branch"
+                );
+            }
+        }
+    }
+
+    let webhooks = WebhookRepo::find_subscribed(pool, repository_id, WebhookEvent::Push).await?;
+    if webhooks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(repo) = RepositoryRepo::find_by_id(pool, repository_id).await? else {
+        return Ok(Vec::new());
+    };
+    let owner = owner_display_name(pool, repo.owner).await?;
+    let payload_json = serde_json::json!({
+        "action": action,
+        "ref": ref_name,
+        "before": old,
+        "after": new,
+        "repository": { "owner": owner, "name": repo.name },
+    })
+    .to_string();
+    Ok(webhooks
+        .into_iter()
+        .map(|webhook| JobPayload::DeliverWebhook {
+            webhook_id: webhook.id,
+            event: WebhookEvent::Push,
+            payload_json: payload_json.clone(),
+        })
+        .collect())
 }
 
 /// A repository owner's `{owner}` display segment — a username or an
@@ -412,5 +489,103 @@ mod tests {
         process_one(&pool, &record).await.unwrap();
         let second = JobRepo::claim_batch(&pool, now_unix(), 10).await.unwrap();
         assert!(second.is_empty());
+    }
+
+    /// A `BranchPushed` event delivers the `push` webhook and, when the PR
+    /// sourced from that branch targets a `dismiss_stale_reviews` branch,
+    /// clears its existing approvals.
+    #[tokio::test]
+    async fn a_branch_pushed_event_delivers_the_push_webhook_and_dismisses_stale_approvals() {
+        use edda_db::{BranchProtectionRepo, BranchProtectionSettings, PrReviewRepo};
+        use edda_domain::{PrRef, ReviewState};
+
+        let pool = edda_db::test_pool().await;
+        let alice = insert_user(&pool, "alice").await;
+        let reviewer = insert_user(&pool, "rob").await;
+        let repo_id = insert_repo(&pool, alice, "demo").await;
+
+        WebhookRepo::insert(
+            &pool,
+            WebhookId::new(),
+            repo_id,
+            "https://example.com/push-hook",
+            b"ciphertext",
+            &[WebhookEvent::Push],
+        )
+        .await
+        .unwrap();
+
+        let pr_id = PullRequestId::new();
+        PullRequestRepo::insert(
+            &pool,
+            pr_id,
+            repo_id,
+            edda_db::NewPullRequest {
+                title: "Add a thing",
+                body: None,
+                author_id: alice,
+                source: &PrRef {
+                    repository_id: repo_id,
+                    branch: "feature".to_string(),
+                },
+                target: "main",
+                draft: false,
+            },
+        )
+        .await
+        .unwrap();
+        PrReviewRepo::insert(
+            &pool,
+            edda_domain::PrReviewId::new(),
+            pr_id,
+            reviewer,
+            ReviewState::Approved,
+            None,
+        )
+        .await
+        .unwrap();
+        BranchProtectionRepo::upsert_by_pattern(
+            &pool,
+            edda_domain::BranchProtectionRuleId::new(),
+            repo_id,
+            "main",
+            &BranchProtectionSettings {
+                required_approvals: 1,
+                dismiss_stale_reviews: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let event = DomainEvent::BranchPushed {
+            repository_id: repo_id,
+            ref_name: "refs/heads/feature".to_string(),
+            old: "a".repeat(40),
+            new: "b".repeat(40),
+            pusher_id: Some(alice),
+        };
+        EventRepo::append(&pool, EventId::new(), &event)
+            .await
+            .unwrap();
+        let record = EventRepo::fetch_unprocessed(&pool, 10).await.unwrap()[0].clone();
+        process_one(&pool, &record).await.unwrap();
+
+        let claimed = JobRepo::claim_batch(&pool, now_unix(), 10).await.unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert!(matches!(
+            &claimed[0].payload,
+            JobPayload::DeliverWebhook { event, payload_json, .. }
+                if *event == WebhookEvent::Push && payload_json.contains("refs/heads/feature")
+        ));
+
+        let reviews = PrReviewRepo::list_for_pull_request(&pool, pr_id)
+            .await
+            .unwrap();
+        assert!(
+            reviews.iter().all(|r| r.dismissed_at.is_some()),
+            "the approval should have been dismissed by the push"
+        );
+        assert!(!reviews[0].is_active_approval());
     }
 }

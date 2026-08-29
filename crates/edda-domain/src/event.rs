@@ -35,7 +35,9 @@ pub enum MentionSource {
     IssueComment { issue_id: IssueId },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// `Clone` but not `Copy`: `BranchPushed` carries owned `String`s (a ref
+/// name, two hex object ids), the same shape `JobPayload` already has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DomainEvent {
     PullRequestMerged {
@@ -50,6 +52,18 @@ pub enum DomainEvent {
         mentioned_by_user_id: UserId,
         source: MentionSource,
     },
+    /// One `refs/heads/*` ref landed by a `git push`. Emitted once per
+    /// updated branch by the receive path, after the ref transaction
+    /// commits. `old`/`new` are hex object ids; an all-zero `old` is a
+    /// branch create, an all-zero `new` a delete. `pusher_id` is `None`
+    /// for a deploy-key push (no user identity).
+    BranchPushed {
+        repository_id: RepositoryId,
+        ref_name: String,
+        old: String,
+        new: String,
+        pusher_id: Option<UserId>,
+    },
 }
 
 /// The discriminant of [`DomainEvent`] — stored in the `events.kind`
@@ -60,6 +74,7 @@ pub enum DomainEvent {
 pub enum DomainEventKind {
     PullRequestMerged,
     UserMentioned,
+    BranchPushed,
 }
 
 impl DomainEventKind {
@@ -68,6 +83,7 @@ impl DomainEventKind {
         match self {
             DomainEventKind::PullRequestMerged => "pull_request_merged",
             DomainEventKind::UserMentioned => "user_mentioned",
+            DomainEventKind::BranchPushed => "branch_pushed",
         }
     }
 
@@ -76,6 +92,7 @@ impl DomainEventKind {
         match value {
             "pull_request_merged" => Some(DomainEventKind::PullRequestMerged),
             "user_mentioned" => Some(DomainEventKind::UserMentioned),
+            "branch_pushed" => Some(DomainEventKind::BranchPushed),
             _ => None,
         }
     }
@@ -88,6 +105,7 @@ impl DomainEvent {
         match self {
             DomainEvent::PullRequestMerged { .. } => DomainEventKind::PullRequestMerged,
             DomainEvent::UserMentioned { .. } => DomainEventKind::UserMentioned,
+            DomainEvent::BranchPushed { .. } => DomainEventKind::BranchPushed,
         }
     }
 
@@ -97,6 +115,7 @@ impl DomainEvent {
     pub const fn aggregate_type(&self) -> &'static str {
         match self {
             DomainEvent::PullRequestMerged { .. } => "pull_request",
+            DomainEvent::BranchPushed { .. } => "repository",
             DomainEvent::UserMentioned { source, .. } => match source {
                 MentionSource::PullRequestComment { .. } => "pull_request",
                 MentionSource::IssueComment { .. } => "issue",
@@ -113,6 +132,7 @@ impl DomainEvent {
             DomainEvent::PullRequestMerged {
                 pull_request_id, ..
             } => pull_request_id.as_uuid(),
+            DomainEvent::BranchPushed { repository_id, .. } => repository_id.as_uuid(),
             DomainEvent::UserMentioned { source, .. } => match source {
                 MentionSource::PullRequestComment { pull_request_id } => pull_request_id.as_uuid(),
                 MentionSource::IssueComment { issue_id } => issue_id.as_uuid(),
@@ -131,7 +151,7 @@ mod tests {
             pull_request_id: PullRequestId::new(),
             repository_id: RepositoryId::new(),
         };
-        let json = serde_json::to_value(merged).unwrap();
+        let json = serde_json::to_value(&merged).unwrap();
         assert_eq!(json["kind"], merged.kind().as_db_str());
 
         let mentioned = DomainEvent::UserMentioned {
@@ -141,7 +161,7 @@ mod tests {
                 issue_id: IssueId::new(),
             },
         };
-        let json = serde_json::to_value(mentioned).unwrap();
+        let json = serde_json::to_value(&mentioned).unwrap();
         assert_eq!(json["kind"], mentioned.kind().as_db_str());
     }
 
@@ -150,9 +170,30 @@ mod tests {
         for kind in [
             DomainEventKind::PullRequestMerged,
             DomainEventKind::UserMentioned,
+            DomainEventKind::BranchPushed,
         ] {
             assert_eq!(DomainEventKind::from_db_str(kind.as_db_str()), Some(kind));
         }
+    }
+
+    #[test]
+    fn a_branch_pushed_event_round_trips_and_reports_its_repository_aggregate() {
+        let repo_id = RepositoryId::new();
+        let event = DomainEvent::BranchPushed {
+            repository_id: repo_id,
+            ref_name: "refs/heads/main".to_string(),
+            old: "0".repeat(40),
+            new: "a".repeat(40),
+            pusher_id: Some(UserId::new()),
+        };
+        assert_eq!(event.aggregate_type(), "repository");
+        assert_eq!(event.aggregate_id(), repo_id.as_uuid());
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(serde_json::from_str::<DomainEvent>(&json).unwrap(), event);
+        assert_eq!(
+            serde_json::to_value(&event).unwrap()["kind"],
+            event.kind().as_db_str()
+        );
     }
 
     #[test]

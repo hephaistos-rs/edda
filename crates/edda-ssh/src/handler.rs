@@ -6,7 +6,7 @@ use russh::keys::PublicKey;
 use russh::server::{self, Auth, ChannelOpenHandle, Msg, Session};
 use russh::{Channel, ChannelId};
 
-use edda_domain::ActorContext;
+use edda_domain::{ActorContext, RepositoryId, UserId};
 use edda_git::protocol;
 
 use crate::state::SshState;
@@ -31,6 +31,11 @@ enum ChannelState {
         /// `AuthorizationService::resolve_receive_checks`'s own doc comment
         /// for why this resolution can't happen inside `edda-git` itself.
         checks: edda_git::ReceiveChecks,
+        /// Carried through so `channel_eof` can hand the post-receive
+        /// fan-out (`edda_jobs::record_push`) the repository and pusher
+        /// without re-resolving them.
+        repository_id: RepositoryId,
+        pusher_id: Option<UserId>,
     },
 }
 
@@ -243,6 +248,8 @@ impl server::Handler for Connection {
                     identity,
                     buffer: Vec::new(),
                     checks,
+                    repository_id: repository.id,
+                    pusher_id: actor.user_id(),
                 }
             }
         };
@@ -304,6 +311,8 @@ impl server::Handler for Connection {
             identity,
             buffer,
             checks,
+            repository_id,
+            pusher_id,
         }) = self.channels.remove(&channel)
         {
             let body = Bytes::from(buffer);
@@ -316,7 +325,26 @@ impl server::Handler for Connection {
             )
             .await
             {
-                Ok(outcome) => succeed_git_command(channel, session, outcome.response)?,
+                Ok(outcome) => {
+                    if !outcome.applied.is_empty() {
+                        let updated: Vec<(String, String, String)> = outcome
+                            .applied
+                            .iter()
+                            .map(|r| (r.name.clone(), r.old.clone(), r.new.clone()))
+                            .collect();
+                        if let Err(err) = edda_jobs::record_push(
+                            &self.state.pool,
+                            repository_id,
+                            pusher_id,
+                            &updated,
+                        )
+                        .await
+                        {
+                            tracing::error!(error = %err, "failed to record the push for fan-out");
+                        }
+                    }
+                    succeed_git_command(channel, session, outcome.response)?;
+                }
                 Err(err) => fail_git_command(channel, session, &err.to_string())?,
             }
         }

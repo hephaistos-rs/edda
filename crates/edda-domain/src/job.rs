@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{JobId, WebhookId};
+use crate::ids::{JobId, RepositoryId, WebhookId};
 use crate::notification::{NotificationKind, NotificationSubject};
 use crate::webhook::WebhookEvent;
 
@@ -32,6 +32,10 @@ pub enum JobPayload {
         subject: String,
         body_text: String,
     },
+    /// Recompute and store a repository's on-disk size (git objects + LFS)
+    /// — enqueued by the receive path after a push, read by the next
+    /// push's quota check.
+    UpdateRepoSize { repository_id: RepositoryId },
 }
 
 /// A `HashMap`-friendly discriminant for `JobPayload`: the job poller's
@@ -43,6 +47,7 @@ pub enum JobKind {
     DeliverWebhook,
     CreateNotification,
     SendEmail,
+    UpdateRepoSize,
 }
 
 impl JobPayload {
@@ -51,6 +56,7 @@ impl JobPayload {
             JobPayload::DeliverWebhook { .. } => JobKind::DeliverWebhook,
             JobPayload::CreateNotification { .. } => JobKind::CreateNotification,
             JobPayload::SendEmail { .. } => JobKind::SendEmail,
+            JobPayload::UpdateRepoSize { .. } => JobKind::UpdateRepoSize,
         }
     }
 }
@@ -63,6 +69,7 @@ impl JobKind {
             JobKind::DeliverWebhook => "deliver_webhook",
             JobKind::CreateNotification => "create_notification",
             JobKind::SendEmail => "send_email",
+            JobKind::UpdateRepoSize => "update_repo_size",
         }
     }
 }

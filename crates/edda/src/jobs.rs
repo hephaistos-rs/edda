@@ -6,12 +6,14 @@
 //! deliberately never depends on — see that crate's own `Cargo.toml` doc
 //! comment.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use lettre::{AsyncTransport, Tokio1Executor};
 
 use edda_db::DbPool;
 use edda_domain::{JobPayload, WebhookDeliveryId};
+use edda_git::store::RepoStore;
 
 /// SMTP delivery, configured from `edda_app::config`'s `SmtpConfig`
 /// (`EDDA_SMTP_URL`/`EDDA_SMTP_FROM`). Both unset (the default) is a
@@ -101,6 +103,41 @@ pub async fn create_notification(pool: DbPool, payload: JobPayload) -> Result<()
     )
     .await
     .map(|_| ())
+    .map_err(|err| err.to_string())
+}
+
+/// Recomputes and stores a repository's on-disk size after a push, so the
+/// next push's quota check reads a fresh number. Best-effort: a repo whose
+/// row can't be resolved (deleted between the push and this job) is a
+/// silent success, not a failure to retry.
+pub async fn update_repo_size(
+    pool: DbPool,
+    store: Arc<dyn RepoStore>,
+    payload: JobPayload,
+) -> Result<(), String> {
+    let JobPayload::UpdateRepoSize { repository_id } = payload else {
+        return Err("wrong payload kind routed to the update_repo_size handler".to_string());
+    };
+    let Some((repository, owner_username)) =
+        edda_db::RepositoryRepo::find_by_id_with_owner_username(&pool, repository_id)
+            .await
+            .map_err(|err| err.to_string())?
+    else {
+        return Ok(());
+    };
+    let identity = format!("{owner_username}/{}", repository.name);
+    let (git_bytes, lfs_bytes) = tokio::task::spawn_blocking(move || {
+        edda_git::repo_storage_bytes(store.as_ref(), &identity)
+    })
+    .await
+    .map_err(|_| "repo-size measurement task panicked".to_string())?;
+    edda_db::RepoSizeRepo::upsert(
+        &pool,
+        repository_id,
+        i64::try_from(git_bytes).unwrap_or(i64::MAX),
+        i64::try_from(lfs_bytes).unwrap_or(i64::MAX),
+    )
+    .await
     .map_err(|err| err.to_string())
 }
 

@@ -2223,6 +2223,7 @@ dependencies = [
  "edda-db",
  "edda-domain",
  "edda-git",
+ "edda-jobs",
  "gix",
  "gix-object",
  "rand 0.10.2",

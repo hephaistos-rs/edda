@@ -22,8 +22,11 @@ use std::time::Duration;
 use rand::RngExt;
 use tokio::sync::Semaphore;
 
-use edda_db::{DbPool, JobRepo};
-use edda_domain::{next_retry_at, JobId, JobKind, JobPayload, JobRecord};
+use edda_db::{DbPool, EventRepo, JobRepo};
+use edda_domain::{
+    next_retry_at, DomainEvent, EventId, JobId, JobKind, JobPayload, JobRecord, RepositoryId,
+    UserId,
+};
 
 pub type HandlerFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 type Handler = Arc<dyn Fn(JobPayload) -> HandlerFuture + Send + Sync>;
@@ -75,6 +78,58 @@ fn jitter_unit() -> f64 {
 pub async fn enqueue(pool: &DbPool, payload: JobPayload) -> Result<(), edda_db::DbError> {
     let id = JobId::new();
     JobRepo::enqueue(pool, id, &payload, now_unix(), DEFAULT_MAX_ATTEMPTS).await
+}
+
+/// Records a completed `git push` for asynchronous fan-out: one
+/// [`DomainEvent::BranchPushed`] per updated `refs/heads/*` ref, plus a
+/// single `UpdateRepoSize` job — all in **one** transaction with the
+/// event append, so a crash between the ref transaction and this call is
+/// the only window that loses the fan-out, and a crash *during* this call
+/// rolls the whole thing back to be retried by the caller.
+///
+/// The transport (git-HTTP or SSH) calls this after `run_receive_pack`
+/// returns a non-empty applied-ref list. `updated_refs` entries are
+/// `(full_ref_name, old_hex, new_hex)`; non-branch refs (tags) are
+/// ignored here.
+pub async fn record_push(
+    pool: &DbPool,
+    repository_id: RepositoryId,
+    pusher_id: Option<UserId>,
+    updated_refs: &[(String, String, String)],
+) -> Result<(), edda_db::DbError> {
+    let branch_refs: Vec<&(String, String, String)> = updated_refs
+        .iter()
+        .filter(|(name, _, _)| name.starts_with("refs/heads/"))
+        .collect();
+    if branch_refs.is_empty() {
+        return Ok(());
+    }
+
+    let mut tx = pool.begin().await?;
+    for (ref_name, old, new) in &branch_refs {
+        EventRepo::append(
+            &mut tx,
+            EventId::new(),
+            &DomainEvent::BranchPushed {
+                repository_id,
+                ref_name: (*ref_name).clone(),
+                old: (*old).clone(),
+                new: (*new).clone(),
+                pusher_id,
+            },
+        )
+        .await?;
+    }
+    JobRepo::enqueue(
+        &mut tx,
+        JobId::new(),
+        &JobPayload::UpdateRepoSize { repository_id },
+        now_unix(),
+        DEFAULT_MAX_ATTEMPTS,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 pub struct PollerConfig {
@@ -175,6 +230,63 @@ async fn run_one(pool: &DbPool, handlers: &HandlerRegistry, job: JobRecord) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn record_push_appends_one_event_per_branch_and_a_single_size_job() {
+        let pool = edda_db::test_pool().await;
+        let alice = edda_domain::UserId::new();
+        edda_db::UserRepo::insert(&pool, alice, "alice", "alice@example.com", "x")
+            .await
+            .unwrap();
+        let repo = edda_domain::Repository {
+            id: RepositoryId::new(),
+            owner: edda_domain::RepositoryOwner::User(alice),
+            name: "demo".to_string(),
+            description: None,
+            visibility: edda_domain::Visibility::Public,
+            forked_from: None,
+        };
+        edda_db::RepositoryRepo::insert_with_owner(&pool, &repo, alice)
+            .await
+            .unwrap();
+
+        record_push(
+            &pool,
+            repo.id,
+            Some(alice),
+            &[
+                (
+                    "refs/heads/main".to_string(),
+                    "a".repeat(40),
+                    "b".repeat(40),
+                ),
+                (
+                    "refs/heads/feature".to_string(),
+                    "0".repeat(40),
+                    "c".repeat(40),
+                ),
+                // A tag update is not a branch — ignored.
+                ("refs/tags/v1".to_string(), "0".repeat(40), "d".repeat(40)),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let events = edda_db::EventRepo::fetch_unprocessed(&pool, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 2, "one BranchPushed per refs/heads/* ref");
+        assert!(events
+            .iter()
+            .all(|e| matches!(e.event, edda_domain::DomainEvent::BranchPushed { .. })));
+
+        let jobs = JobRepo::claim_batch(&pool, now_unix(), 10).await.unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert!(matches!(
+            jobs[0].payload,
+            JobPayload::UpdateRepoSize { repository_id } if repository_id == repo.id
+        ));
+    }
 
     #[tokio::test]
     async fn the_poller_runs_a_registered_handler_and_marks_the_job_succeeded() {

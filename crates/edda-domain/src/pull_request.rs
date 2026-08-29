@@ -178,6 +178,20 @@ pub struct PrReview {
     pub state: ReviewState,
     pub body: Option<String>,
     pub created_at: i64,
+    /// Set when a push to the PR's source branch dismissed this review
+    /// (the target branch's protection rule has `dismiss_stale_reviews`).
+    /// A dismissed `Approved` review no longer counts toward
+    /// `required_approvals` — see `access::can_merge_pull_request`.
+    pub dismissed_at: Option<i64>,
+}
+
+impl PrReview {
+    /// Whether this review currently counts as an approval — an
+    /// `Approved` verdict that has not been dismissed by a later push.
+    #[must_use]
+    pub fn is_active_approval(&self) -> bool {
+        self.state == ReviewState::Approved && self.dismissed_at.is_none()
+    }
 }
 
 /// Where an inline pull-request comment is anchored: a specific line (or
@@ -303,6 +317,7 @@ mod tests {
             state,
             body: None,
             created_at,
+            dismissed_at: None,
         }
     }
 

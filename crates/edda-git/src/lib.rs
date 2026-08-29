@@ -22,6 +22,7 @@ pub use hooks::{AppliedRef, ReceiveChecks, ReceiveOutcome};
 pub use merge::{merge_branches, merge_ref_into_branch, MergeOutcome};
 pub use refs::{force_set_ref, point_head_at, update_refs, RefUpdate, ZERO_ID};
 pub use search::{search_tree, SearchMatch};
+pub use store::repo_storage_bytes;
 pub use tags::{create_tag, list_tags, resolve_tag};
 pub use transfer::import_branch_tip;
 

@@ -592,6 +592,7 @@ TABLE pr_comments
 TABLE pr_reviews
   col body NULL
   col created_at NOT NULL
+  col dismissed_at NULL
   col id NOT NULL
   col pull_request_id NOT NULL
   col reviewer_id NOT NULL

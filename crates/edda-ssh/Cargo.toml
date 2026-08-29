@@ -20,6 +20,11 @@ edda-auth = { workspace = true }
 edda-db = { workspace = true }
 edda-domain = { workspace = true }
 edda-git = { workspace = true }
+# Post-receive fan-out: `edda_jobs::record_push` writes the `push` domain
+# event + `UpdateRepoSize` job after a successful `git push`, the same call
+# `edda-app`'s HTTP receive path makes. Enqueue-side only — this crate
+# registers no job handlers.
+edda-jobs = { workspace = true }
 gix = { workspace = true }
 rand = { workspace = true }
 # `russh`'s default features pull in `aws-lc-rs` (→ `aws-lc-sys`, a

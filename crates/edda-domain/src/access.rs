@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::branch_protection::BranchProtectionRule;
 use crate::ids::{RepositoryId, TeamId, UserId};
-use crate::pull_request::{latest_reviews, PrReview, ReviewState};
+use crate::pull_request::{latest_reviews, PrReview};
 use crate::repository::Repository;
 
 /// Ranked low-to-high so `role >= minimum` is a valid permission check —
@@ -284,7 +284,7 @@ pub fn can_merge_pull_request(
     };
     let approvals = latest_reviews(reviews)
         .into_iter()
-        .filter(|review| review.state == ReviewState::Approved)
+        .filter(|review| review.is_active_approval())
         .count();
     if (approvals as i64) < rule.required_approvals {
         return Err(AuthzError::Forbidden);
@@ -370,6 +370,7 @@ fn require_role(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pull_request::ReviewState;
 
     fn repo(visibility: Visibility) -> Repository {
         use crate::repository::RepositoryOwner;
@@ -524,6 +525,7 @@ mod tests {
             state,
             body: None,
             created_at: 0,
+            dismissed_at: None,
         }
     }
 

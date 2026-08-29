@@ -204,6 +204,11 @@ fn main() {
                 let pool = pool.clone();
                 move |payload| jobs::deliver_webhook(pool.clone(), payload)
             });
+            handlers.register(edda_domain::JobKind::UpdateRepoSize, {
+                let pool = pool.clone();
+                let store = store.clone();
+                move |payload| jobs::update_repo_size(pool.clone(), store.clone(), payload)
+            });
             edda_jobs::spawn_poller(
                 pool.clone(),
                 std::sync::Arc::new(handlers),

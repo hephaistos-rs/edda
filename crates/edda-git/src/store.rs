@@ -48,6 +48,44 @@ pub trait RepoStore: Send + Sync {
     }
 }
 
+/// Measures a repository's on-disk footprint: `(git_bytes, lfs_bytes)`,
+/// where `git_bytes` is everything under the repo directory *except* the
+/// `lfs/` subtree and `lfs_bytes` is that subtree. Recursive file-size
+/// walk; symlinks are not followed. A missing repo directory reads as
+/// `(0, 0)`. Blocking I/O — call from a blocking context.
+pub fn repo_storage_bytes(store: &dyn RepoStore, name: &str) -> (u64, u64) {
+    let root = store.repo_dir(name);
+    let lfs_root = root.join("lfs");
+    let lfs_bytes = dir_bytes(&lfs_root);
+    let total = dir_bytes(&root);
+    (total.saturating_sub(lfs_bytes), lfs_bytes)
+}
+
+/// Sum of the sizes of every regular file under `dir` (recursive, no
+/// symlink following). `0` if `dir` does not exist.
+fn dir_bytes(dir: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if file_type.is_file() {
+                if let Ok(meta) = entry.metadata() {
+                    total = total.saturating_add(meta.len());
+                }
+            }
+        }
+    }
+    total
+}
+
 pub struct LocalFsStore {
     root: PathBuf,
 }

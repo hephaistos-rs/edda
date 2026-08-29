@@ -4,7 +4,9 @@
 
 use edda_domain::{PrReview, PrReviewId, PullRequestId, ReviewState, UserId};
 
-use crate::{get_i64, get_opt_string, get_string, Backend, DbConn, DbError};
+use crate::{get_i64, get_opt_i64, get_opt_string, get_string, Backend, DbConn, DbError};
+
+const REVIEW_COLS: &str = "id, pull_request_id, reviewer_id, state, body, created_at, dismissed_at";
 
 fn row_to_review(row: sqlx::any::AnyRow) -> Result<PrReview, DbError> {
     Ok(PrReview {
@@ -21,6 +23,7 @@ fn row_to_review(row: sqlx::any::AnyRow) -> Result<PrReview, DbError> {
             .expect("stored pr_reviews.state is one of the CHECK'd values"),
         body: get_opt_string(&row, "body")?,
         created_at: get_i64(&row, "created_at")?,
+        dismissed_at: get_opt_i64(&row, "dismissed_at")?,
     })
 }
 
@@ -69,18 +72,45 @@ impl PrReviewRepo {
     ) -> Result<Vec<PrReview>, DbError> {
         let mut h = crate::conn::open(db).await?;
         let pull_request_id_text = pull_request_id.to_string();
-        let sql = match h.backend() {
-            Backend::Postgres => {
-                "SELECT id, pull_request_id, reviewer_id, state, body, created_at FROM pr_reviews WHERE pull_request_id = $1 ORDER BY created_at"
-            }
-            Backend::Sqlite | Backend::MySql => {
-                "SELECT id, pull_request_id, reviewer_id, state, body, created_at FROM pr_reviews WHERE pull_request_id = ? ORDER BY created_at"
-            }
+        let placeholder = match h.backend() {
+            Backend::Postgres => "$1",
+            Backend::Sqlite | Backend::MySql => "?",
         };
-        let rows = sqlx::query(sql)
+        let sql = format!(
+            "SELECT {REVIEW_COLS} FROM pr_reviews WHERE pull_request_id = {placeholder} ORDER BY created_at"
+        );
+        let rows = sqlx::query(&sql)
             .bind(&pull_request_id_text)
             .fetch_all(&mut *h.conn())
             .await?;
         rows.into_iter().map(row_to_review).collect()
+    }
+
+    /// Marks every not-yet-dismissed review on `pull_request_id` as
+    /// dismissed as of now — called when a push to the PR's source branch
+    /// invalidates its approvals (`dismiss_stale_reviews`). Returns how
+    /// many rows were stamped.
+    pub async fn dismiss_all_for_pull_request<'c>(
+        db: impl DbConn<'c>,
+        pull_request_id: PullRequestId,
+    ) -> Result<u64, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let now = crate::now_unix();
+        let sql = match h.backend() {
+            Backend::Postgres => {
+                "UPDATE pr_reviews SET dismissed_at = $1 \
+                 WHERE pull_request_id = $2 AND dismissed_at IS NULL"
+            }
+            Backend::Sqlite | Backend::MySql => {
+                "UPDATE pr_reviews SET dismissed_at = ? \
+                 WHERE pull_request_id = ? AND dismissed_at IS NULL"
+            }
+        };
+        let result = sqlx::query(sql)
+            .bind(now)
+            .bind(pull_request_id.to_string())
+            .execute(&mut *h.conn())
+            .await?;
+        Ok(result.rows_affected())
     }
 }

@@ -429,6 +429,22 @@ async fn receive_pack(
         Err(err) => return (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
     };
 
+    // Post-receive fan-out: the `push` domain event(s) + an `UpdateRepoSize`
+    // job, in one transaction. A failure here doesn't fail the push (the
+    // refs already moved) — it's logged and the next push will re-measure.
+    if !outcome.applied.is_empty() {
+        let updated: Vec<(String, String, String)> = outcome
+            .applied
+            .iter()
+            .map(|r| (r.name.clone(), r.old.clone(), r.new.clone()))
+            .collect();
+        if let Err(err) =
+            edda_jobs::record_push(&state.pool, repository.id, actor.user_id(), &updated).await
+        {
+            tracing::error!(error = %err, "failed to record the push for fan-out");
+        }
+    }
+
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/x-git-receive-pack-result")

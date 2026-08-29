@@ -250,6 +250,34 @@ impl PullRequestRepo {
         rows.into_iter().map(row_to_pull_request).collect()
     }
 
+    /// Every `open`/`draft` pull request whose **source** is `branch` in
+    /// `source_repository_id` — what the receive path looks up after a
+    /// push to decide which PRs a branch update touched (mergeability
+    /// recompute, stale-review dismissal). Matches same-repo and
+    /// fork-sourced PRs alike, since the lookup is on `source_repository_id`.
+    pub async fn list_open_with_source_branch<'c>(
+        db: impl DbConn<'c>,
+        source_repository_id: RepositoryId,
+        branch: &str,
+    ) -> Result<Vec<PullRequest>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let (p1, p2) = match h.backend() {
+            Backend::Postgres => ("$1", "$2"),
+            Backend::Sqlite | Backend::MySql => ("?", "?"),
+        };
+        let sql = format!(
+            "SELECT {COLUMNS} FROM pull_requests \
+             WHERE source_repository_id = {p1} AND source_branch = {p2} \
+               AND state IN ('open', 'draft') ORDER BY number"
+        );
+        let rows = sqlx::query(&sql)
+            .bind(source_repository_id.to_string())
+            .bind(branch)
+            .fetch_all(&mut *h.conn())
+            .await?;
+        rows.into_iter().map(row_to_pull_request).collect()
+    }
+
     /// Transitions a pull request to any of `PrState`'s four variants —
     /// the one place that writes `pull_requests.state` and its
     /// variant-specific columns. Callers are responsible for the

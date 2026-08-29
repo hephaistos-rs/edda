@@ -73,10 +73,26 @@ impl Env {
     /// Present and non-blank, or `None`. Blank is treated as unset so an
     /// empty `EDDA_FOO=` in a compose file doesn't half-enable a feature.
     fn get(&self, var: &'static str) -> Option<String> {
+        self.get_dyn(var)
+    }
+
+    /// `get` for a runtime-computed variable name (the
+    /// `EDDA_OIDC_<NAME>_*` multi-provider keys).
+    fn get_dyn(&self, var: &str) -> Option<String> {
         match std::env::var(var) {
             Ok(v) if !v.trim().is_empty() => Some(v.trim().to_string()),
             _ => None,
         }
+    }
+
+    /// `fail` for a runtime-computed variable name. Leaks the name to get
+    /// the `'static` the error record wants — this runs once at startup
+    /// over a handful of short strings.
+    fn fail_dyn(&mut self, var: String, problem: impl Into<String>) {
+        self.errors.push(ConfigError {
+            var: Box::leak(var.into_boxed_str()),
+            problem: problem.into(),
+        });
     }
 
     /// Parse an optional var, falling back to `default`; a present-but-junk
@@ -274,25 +290,21 @@ impl WebauthnConfig {
     }
 }
 
-/// OIDC consumer-login credentials. All-four-or-none.
-#[derive(Debug, Clone)]
-pub struct OidcConfig {
-    pub issuer_url: String,
-    pub client_id: String,
-    pub client_secret: String,
-    pub redirect_url: String,
-}
-
-impl OidcConfig {
-    pub fn into_auth(self) -> edda_auth::oauth::Config {
-        edda_auth::oauth::Config {
-            issuer_url: self.issuer_url,
-            client_id: self.client_id,
-            client_secret: self.client_secret,
-            redirect_url: self.redirect_url,
-        }
-    }
-}
+/// The configured OIDC providers (Phase 9, multi-provider + S12). Two
+/// input shapes:
+///
+///   * legacy single provider — `EDDA_OAUTH_{ISSUER_URL,CLIENT_ID,
+///     CLIENT_SECRET,REDIRECT_URL}` (all four or none) → one provider
+///     named `oidc`, `Auto` provisioning, no domain filter;
+///   * multi — `EDDA_OIDC_PROVIDERS=a,b,c` names the providers, then for
+///     each `<NAME>`: `EDDA_OIDC_<NAME>_{ISSUER_URL,CLIENT_ID,
+///     CLIENT_SECRET,REDIRECT_URL}` (required) plus optional
+///     `_DISPLAY_NAME`, `_ALLOWED_EMAIL_DOMAINS`, `_PROVISIONING`
+///     (`auto` | `link-only` | `approval`).
+///
+/// Setting both is a startup error. An empty result means OIDC login
+/// isn't offered.
+pub type OidcConfig = edda_auth::oauth::Providers;
 
 /// Outbound SMTP. Both-or-none; unset is a fully supported standalone mode
 /// (email jobs log and no-op).
@@ -385,7 +397,8 @@ pub struct Settings {
     pub session: SessionConfig,
     pub registration: RegistrationConfig,
     pub webauthn: Option<WebauthnConfig>,
-    pub oidc: Option<OidcConfig>,
+    /// Empty when OIDC login isn't offered.
+    pub oidc: OidcConfig,
     pub smtp: Option<SmtpConfig>,
     pub rate_limit: RateLimitConfig,
 }
@@ -732,8 +745,21 @@ fn parse_webauthn(env: &mut Env) -> Option<WebauthnConfig> {
     }
 }
 
-fn parse_oidc(env: &mut Env) -> Option<OidcConfig> {
-    let fields = [
+fn parse_oidc(env: &mut Env) -> OidcConfig {
+    use edda_auth::oauth::{ProviderConfig, Providers, Provisioning};
+
+    let names: Vec<String> = env
+        .get("EDDA_OIDC_PROVIDERS")
+        .map(|raw| {
+            raw.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // The legacy single-provider form.
+    let legacy = [
         ("EDDA_OAUTH_ISSUER_URL", env.get("EDDA_OAUTH_ISSUER_URL")),
         ("EDDA_OAUTH_CLIENT_ID", env.get("EDDA_OAUTH_CLIENT_ID")),
         (
@@ -745,26 +771,93 @@ fn parse_oidc(env: &mut Env) -> Option<OidcConfig> {
             env.get("EDDA_OAUTH_REDIRECT_URL"),
         ),
     ];
-    let set = fields.iter().filter(|(_, v)| v.is_some()).count();
-    if set == 0 {
-        return None;
+    let legacy_set = legacy.iter().filter(|(_, v)| v.is_some()).count();
+
+    if legacy_set > 0 && !names.is_empty() {
+        env.fail(
+            "EDDA_OIDC_PROVIDERS",
+            "use either the multi-provider EDDA_OIDC_* variables or the single-provider EDDA_OAUTH_* set, not both",
+        );
+        return Providers::default();
     }
-    if set < fields.len() {
-        for (name, value) in &fields {
-            if value.is_none() {
-                env.fail(name, "all four EDDA_OAUTH_* variables must be set together");
+
+    if legacy_set > 0 {
+        if legacy_set < legacy.len() {
+            for (name, value) in &legacy {
+                if value.is_none() {
+                    env.fail(name, "all four EDDA_OAUTH_* variables must be set together");
+                }
             }
+            return Providers::default();
         }
-        return None;
+        let [issuer_url, client_id, client_secret, redirect_url] =
+            legacy.map(|(_, v)| v.expect("checked all set above"));
+        return Providers(vec![ProviderConfig {
+            name: "oidc".to_string(),
+            display_name: "SSO".to_string(),
+            issuer_url,
+            client_id,
+            client_secret,
+            redirect_url,
+            allowed_email_domains: Vec::new(),
+            provisioning: Provisioning::Auto,
+        }]);
     }
-    let [issuer_url, client_id, client_secret, redirect_url] =
-        fields.map(|(_, v)| v.expect("checked all set above"));
-    Some(OidcConfig {
-        issuer_url,
-        client_id,
-        client_secret,
-        redirect_url,
-    })
+
+    let mut providers = Vec::new();
+    for name in &names {
+        let key = name.to_ascii_uppercase();
+        let mut required = |suffix: &str| {
+            let var = format!("EDDA_OIDC_{key}_{suffix}");
+            match env.get_dyn(&var) {
+                Some(v) => v,
+                None => {
+                    env.fail_dyn(var, "is required for this OIDC provider");
+                    String::new()
+                }
+            }
+        };
+        let issuer_url = required("ISSUER_URL");
+        let client_id = required("CLIENT_ID");
+        let client_secret = required("CLIENT_SECRET");
+        let redirect_url = required("REDIRECT_URL");
+        let display_name = env
+            .get_dyn(&format!("EDDA_OIDC_{key}_DISPLAY_NAME"))
+            .unwrap_or_else(|| name.clone());
+        let allowed_email_domains = env
+            .get_dyn(&format!("EDDA_OIDC_{key}_ALLOWED_EMAIL_DOMAINS"))
+            .map(|raw| {
+                raw.split(',')
+                    .map(|d| d.trim().trim_start_matches('@').to_ascii_lowercase())
+                    .filter(|d| !d.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let provisioning = match env.get_dyn(&format!("EDDA_OIDC_{key}_PROVISIONING")) {
+            None => Provisioning::default(),
+            Some(raw) => Provisioning::parse(&raw).unwrap_or_else(|| {
+                env.fail_dyn(
+                    format!("EDDA_OIDC_{key}_PROVISIONING"),
+                    "must be one of auto, link-only, approval",
+                );
+                Provisioning::default()
+            }),
+        };
+        if issuer_url.is_empty() {
+            continue;
+        }
+        providers.push(ProviderConfig {
+            name: name.clone(),
+            display_name,
+            issuer_url,
+            client_id,
+            client_secret,
+            redirect_url,
+            allowed_email_domains,
+            provisioning,
+        });
+    }
+    Providers(providers)
 }
 
 fn parse_smtp(env: &mut Env) -> Option<SmtpConfig> {
@@ -845,6 +938,14 @@ mod tests {
             self.touched.push(var);
             std::env::set_var(var, value);
         }
+        /// `set` for a runtime-computed variable name (the
+        /// `EDDA_OIDC_<NAME>_*` multi-provider keys). Leaks the name for
+        /// the `'static` `touched` list — test-only, once per test.
+        fn set_owned(&mut self, var: String, value: &str) {
+            let var: &'static str = Box::leak(var.into_boxed_str());
+            self.touched.push(var);
+            std::env::set_var(var, value);
+        }
         fn unset(&mut self, var: &'static str) {
             self.touched.push(var);
             std::env::remove_var(var);
@@ -877,6 +978,7 @@ mod tests {
         "EDDA_OAUTH_CLIENT_ID",
         "EDDA_OAUTH_CLIENT_SECRET",
         "EDDA_OAUTH_REDIRECT_URL",
+        "EDDA_OIDC_PROVIDERS",
         "EDDA_SMTP_URL",
         "EDDA_SMTP_FROM",
         "EDDA_RATE_LIMIT_PER_SECOND",
@@ -905,7 +1007,7 @@ mod tests {
         assert_eq!(s.http.bind.port(), 8080);
         assert_eq!(s.ssh.bind.port(), 2222);
         assert_eq!(s.http.external_url, "http://127.0.0.1:8080");
-        assert!(s.webauthn.is_none() && s.oidc.is_none() && s.smtp.is_none());
+        assert!(s.webauthn.is_none() && s.oidc.is_empty() && s.smtp.is_none());
         assert!(!s.secret_keys.is_configured());
         assert_eq!(s.rate_limit.per_second, 5);
         assert_eq!(s.git.repo_root, scope.data_dir.join("repos"));
@@ -1072,5 +1174,47 @@ mod tests {
         scope.set("EDDA_REGISTRATION_MODE", "halfway");
         let errs = Settings::from_env().expect_err("bad mode");
         assert!(errs.0.iter().any(|e| e.var == "EDDA_REGISTRATION_MODE"));
+    }
+
+    #[test]
+    fn a_multi_provider_oidc_config_parses_each_named_provider() {
+        let mut scope = EnvScope::new();
+        scope.set("EDDA_OIDC_PROVIDERS", "google, corp");
+        for p in ["GOOGLE", "CORP"] {
+            scope.set_owned(
+                format!("EDDA_OIDC_{p}_ISSUER_URL"),
+                "https://issuer.example",
+            );
+            scope.set_owned(format!("EDDA_OIDC_{p}_CLIENT_ID"), "id");
+            scope.set_owned(format!("EDDA_OIDC_{p}_CLIENT_SECRET"), "secret");
+            scope.set_owned(
+                format!("EDDA_OIDC_{p}_REDIRECT_URL"),
+                "https://edda.example/api/auth/oauth/x/callback",
+            );
+        }
+        scope.set_owned("EDDA_OIDC_CORP_PROVISIONING".to_string(), "link-only");
+        scope.set_owned(
+            "EDDA_OIDC_CORP_ALLOWED_EMAIL_DOMAINS".to_string(),
+            "corp.example",
+        );
+
+        let s = Settings::from_env().expect("valid multi-provider config");
+        assert_eq!(s.oidc.len(), 2);
+        let corp = s.oidc.by_name("corp").expect("corp provider");
+        assert_eq!(corp.provisioning, edda_auth::oauth::Provisioning::LinkOnly);
+        assert_eq!(corp.allowed_email_domains, vec!["corp.example".to_string()]);
+        assert_eq!(
+            s.oidc.by_name("google").unwrap().provisioning,
+            edda_auth::oauth::Provisioning::Auto
+        );
+
+        // The legacy single-provider set alongside the multi form is an
+        // error.
+        scope.set("EDDA_OAUTH_ISSUER_URL", "https://legacy.example");
+        scope.set("EDDA_OAUTH_CLIENT_ID", "x");
+        scope.set("EDDA_OAUTH_CLIENT_SECRET", "x");
+        scope.set("EDDA_OAUTH_REDIRECT_URL", "https://legacy.example/cb");
+        let errs = Settings::from_env().expect_err("both forms set");
+        assert!(errs.0.iter().any(|e| e.var == "EDDA_OIDC_PROVIDERS"));
     }
 }

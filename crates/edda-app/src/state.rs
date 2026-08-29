@@ -32,8 +32,9 @@ pub struct AppState {
 pub struct RuntimeConfig {
     /// `None` unless `EDDA_WEBAUTHN_RP_ID`/`_ORIGIN` are configured.
     pub webauthn: Option<edda_auth::webauthn::Config>,
-    /// `None` unless the `EDDA_OAUTH_*` set is configured.
-    pub oidc: Option<edda_auth::oauth::Config>,
+    /// The configured OIDC providers; empty (the `Default`) when OIDC
+    /// login isn't offered.
+    pub oidc: edda_auth::oauth::Providers,
     /// `EDDA_EXTERNAL_URL` (or a derived `http://ip:port`). Anchors
     /// redirect/origin defaults; empty in `Default`.
     pub external_url: String,

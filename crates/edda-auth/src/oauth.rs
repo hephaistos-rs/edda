@@ -1,11 +1,10 @@
-//! OAuth2/OIDC *consumer* login against exactly one, instance-configured,
-//! generic OIDC-compliant provider — Edda authenticates against external
+//! OAuth2/OIDC *consumer* login against one or more instance-configured,
+//! generic OIDC-compliant providers — Edda authenticates against external
 //! identity providers, it does not act as one itself (that's out of this
 //! plan's scope entirely). Provider configuration is environment-driven,
-//! not database-stored (parsed once by `edda_app::config` from the
-//! `EDDA_OAUTH_*` variables and passed in via `AppState`) — there is
-//! nothing per-instance-secret about it that needs at-rest encryption the
-//! way a per-user TOTP secret does.
+//! not database-stored (parsed once by `edda_app::config` and passed in
+//! via `AppState`) — there is nothing per-instance-secret about it that
+//! needs at-rest encryption the way a per-user TOTP secret does.
 //!
 //! **Account-linking policy** (deliberate, not incidental): a first-time
 //! OAuth login whose email matches an *existing* password-based account
@@ -14,6 +13,11 @@
 //! their own account — see `LoginOutcome::EmailBelongsToExistingAccount`,
 //! which the HTTP layer maps to "please log in with your password, then
 //! link this from settings," never to a silent link.
+//!
+//! **Per-provider provisioning controls** (S12): each provider carries
+//! an email-domain allowlist and a [`Provisioning`] mode
+//! (`Auto`/`LinkOnly`/`Approval`) that governs what happens when the
+//! provider vouches for an email Edda has never seen.
 
 use openidconnect::core::{CoreClient, CoreProviderMetadata, CoreResponseType};
 use openidconnect::reqwest;
@@ -25,18 +29,121 @@ use openidconnect::{
 use edda_db::{DbPool, OAuthIdentityRepo, UserRepo};
 use edda_domain::{OAuthIdentityId, User, UserId};
 
-pub const PROVIDER_NAME: &str = "oidc";
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is after the unix epoch")
+        .as_secs() as i64
+}
 
-/// One OIDC provider's consumer-login credentials. Constructed by
-/// `edda_app::config` from the `EDDA_OAUTH_*` variables (all four or
-/// none) and passed in via `AppState` — this crate never reads the
-/// environment. `None` in `AppState` means OIDC login isn't offered.
+/// What happens when a configured provider vouches for an email address
+/// that has no Edda account yet (S12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Provisioning {
+    /// Auto-create a full, active account from the provider's claims
+    /// (the historical behaviour).
+    #[default]
+    Auto,
+    /// Refuse: the person must already have an Edda account and link this
+    /// provider to it from settings. "SSO for existing accounts only."
+    LinkOnly,
+    /// Create the account but leave it pending administrator approval
+    /// (`users.approved_at` NULL) — the same queue an `Approval`-mode
+    /// password signup lands in.
+    Approval,
+}
+
+impl Provisioning {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "linkonly" | "link-only" | "link_only" => Some(Self::LinkOnly),
+            "approval" => Some(Self::Approval),
+            _ => None,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::LinkOnly => "link-only",
+            Self::Approval => "approval",
+        }
+    }
+}
+
+/// One OIDC provider's consumer-login credentials plus its provisioning
+/// policy. Constructed by `edda_app::config` and passed in via
+/// `AppState`; this crate never reads the environment.
 #[derive(Debug, Clone)]
-pub struct Config {
+pub struct ProviderConfig {
+    /// URL-safe key used in the callback route and stored on the
+    /// `oauth_identities` row (e.g. `"google"`). Stable for the life of
+    /// the linked identity.
+    pub name: String,
+    /// Human label for the "sign in with …" affordance.
+    pub display_name: String,
     pub issuer_url: String,
     pub client_id: String,
     pub client_secret: String,
     pub redirect_url: String,
+    /// Lowercased bare domains; empty = any. A login whose email domain
+    /// isn't listed is refused (`LoginOutcome::EmailDomainNotAllowed`).
+    pub allowed_email_domains: Vec<String>,
+    pub provisioning: Provisioning,
+}
+
+impl ProviderConfig {
+    /// Whether `email`'s domain passes this provider's allowlist — same
+    /// rule as `edda_domain::RegistrationPolicy::email_domain_allowed`.
+    #[must_use]
+    pub fn email_domain_allowed(&self, email: &str) -> bool {
+        if self.allowed_email_domains.is_empty() {
+            return true;
+        }
+        let Some(domain) = email.rsplit('@').next().filter(|d| !d.is_empty()) else {
+            return false;
+        };
+        self.allowed_email_domains
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(domain))
+    }
+}
+
+/// Every configured OIDC provider, resolvable by name. Empty means OIDC
+/// login isn't offered.
+#[derive(Debug, Clone, Default)]
+pub struct Providers(pub Vec<ProviderConfig>);
+
+impl Providers {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[must_use]
+    pub fn by_name(&self, name: &str) -> Option<&ProviderConfig> {
+        self.0.iter().find(|p| p.name == name)
+    }
+
+    /// The sole provider when exactly one is configured — lets the
+    /// single-provider HTTP routes stay parameter-free.
+    #[must_use]
+    pub fn only(&self) -> Option<&ProviderConfig> {
+        match self.0.as_slice() {
+            [one] => Some(one),
+            _ => None,
+        }
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, ProviderConfig> {
+        self.0.iter()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -51,6 +158,18 @@ pub enum OAuthError {
     NoEmail,
     #[error(transparent)]
     Db(#[from] edda_db::DbError),
+}
+
+impl From<edda_db::user_repo::InsertUserError> for OAuthError {
+    fn from(err: edda_db::user_repo::InsertUserError) -> Self {
+        match err {
+            edda_db::user_repo::InsertUserError::Db(err) => OAuthError::Db(err),
+            // A username/email collision on a freshly-derived random
+            // username is not something the caller can act on — surface
+            // it as a generic verification failure.
+            other => OAuthError::Verification(other.to_string()),
+        }
+    }
 }
 
 /// Everything the HTTP layer needs to stash (in the pre-login session)
@@ -98,8 +217,8 @@ macro_rules! discover_and_build_client {
 /// Starts a login: returns the URL to redirect the browser to, plus the
 /// CSRF/nonce/PKCE values the caller must hold onto (in the session) and
 /// pass back into `complete` unchanged.
-pub async fn start(config: &Config) -> Result<AuthorizationRequest, OAuthError> {
-    let (client, _http_client) = discover_and_build_client!(config);
+pub async fn start(provider: &ProviderConfig) -> Result<AuthorizationRequest, OAuthError> {
+    let (client, _http_client) = discover_and_build_client!(provider);
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
     let (auth_url, csrf_token, nonce) = client
@@ -124,28 +243,36 @@ pub enum LoginOutcome {
     /// A known OAuth identity resolved directly to an existing user.
     LoggedIn(User),
     /// A brand-new email — an account was created from the provider's
-    /// claims and linked immediately, the same way a fresh signup would
-    /// be.
+    /// claims and linked immediately (`Provisioning::Auto`).
     NewAccountCreated(User),
+    /// A brand-new email under `Provisioning::Approval` — the account was
+    /// created but is inactive until an administrator approves it. The
+    /// caller must **not** start a session.
+    NewAccountPendingApproval(User),
     /// The provider's email matches an existing *password* account with
     /// no linked OAuth identity yet — per the account-linking policy,
     /// this is never auto-linked. The caller must log in with their
     /// password and use `link` from an authenticated context instead.
     EmailBelongsToExistingAccount,
+    /// A brand-new email under `Provisioning::LinkOnly` — self-service
+    /// account creation via this provider is disabled; the person must
+    /// already have an Edda account and link the provider to it.
+    ProvisioningNotAllowed,
+    /// The provider's email is not in this provider's domain allowlist.
+    EmailDomainNotAllowed,
 }
 
 /// Completes the callback: verifies the code/state, resolves the
-/// provider's `sub`+email claims, and either logs into a known linked
-/// identity, creates a brand-new account, or refuses to auto-link an
-/// email match — see `LoginOutcome`.
+/// provider's `sub`+email claims, and applies the provider's
+/// provisioning policy — see [`LoginOutcome`].
 pub async fn complete(
     pool: &DbPool,
-    config: &Config,
+    provider: &ProviderConfig,
     code: &str,
     pkce_verifier: String,
     nonce: &str,
 ) -> Result<LoginOutcome, OAuthError> {
-    let (client, http_client) = discover_and_build_client!(config);
+    let (client, http_client) = discover_and_build_client!(provider);
 
     let token_response = client
         .exchange_code(AuthorizationCode::new(code.to_string()))
@@ -169,8 +296,11 @@ pub async fn complete(
         .map(|email| email.as_str().to_string())
         .ok_or(OAuthError::NoEmail)?;
 
+    // A returning linked identity logs in regardless of the provisioning
+    // policy or the domain allowlist — those gate *creation*, not an
+    // account that already exists and is already linked.
     if let Some(identity) =
-        OAuthIdentityRepo::find_by_provider_subject(pool, PROVIDER_NAME, &subject).await?
+        OAuthIdentityRepo::find_by_provider_subject(pool, &provider.name, &subject).await?
     {
         let row = UserRepo::find_by_id(pool, identity.user_id)
             .await?
@@ -178,26 +308,35 @@ pub async fn complete(
         return Ok(LoginOutcome::LoggedIn(row.user));
     }
 
+    if !provider.email_domain_allowed(&email) {
+        return Ok(LoginOutcome::EmailDomainNotAllowed);
+    }
+
     if UserRepo::find_by_email(pool, &email).await?.is_some() {
         return Ok(LoginOutcome::EmailBelongsToExistingAccount);
     }
+
+    // Brand-new email — apply the provisioning mode.
+    let approved_at = match provider.provisioning {
+        Provisioning::LinkOnly => return Ok(LoginOutcome::ProvisioningNotAllowed),
+        Provisioning::Auto => Some(now_unix()),
+        Provisioning::Approval => None,
+    };
 
     let username = derive_username_from_email(&email);
     let random_password_hash = crate::password::hash_password_async(random_unusable_secret())
         .await
         .expect("hashing a freshly generated random string never fails");
     let user_id = UserId::new();
-    UserRepo::insert(pool, user_id, &username, &email, &random_password_hash)
-        .await
-        .map_err(|err| match err {
-            edda_db::user_repo::InsertUserError::Db(err) => OAuthError::Db(err),
-            _ => OAuthError::Db(edda_db::DbError::RowNotFound),
-        })?;
+    UserRepo::insert(pool, user_id, &username, &email, &random_password_hash).await?;
+    // The IdP vouches for the address, so treat it as verified; approval
+    // depends on the provisioning mode.
+    UserRepo::stamp_signup_status(pool, user_id, approved_at, Some(now_unix())).await?;
     OAuthIdentityRepo::insert(
         pool,
         OAuthIdentityId::new(),
         user_id,
-        PROVIDER_NAME,
+        &provider.name,
         &subject,
     )
     .await?;
@@ -205,7 +344,10 @@ pub async fn complete(
     let row = UserRepo::find_by_id(pool, user_id)
         .await?
         .expect("just-inserted user exists");
-    Ok(LoginOutcome::NewAccountCreated(row.user))
+    Ok(match provider.provisioning {
+        Provisioning::Approval => LoginOutcome::NewAccountPendingApproval(row.user),
+        _ => LoginOutcome::NewAccountCreated(row.user),
+    })
 }
 
 /// Links an OAuth identity to an *already authenticated* user — the only
@@ -213,13 +355,13 @@ pub async fn complete(
 /// email match, per the account-linking policy.
 pub async fn link(
     pool: &DbPool,
-    config: &Config,
+    provider: &ProviderConfig,
     user_id: UserId,
     code: &str,
     pkce_verifier: String,
     nonce: &str,
 ) -> Result<(), OAuthError> {
-    let (client, http_client) = discover_and_build_client!(config);
+    let (client, http_client) = discover_and_build_client!(provider);
 
     let token_response = client
         .exchange_code(AuthorizationCode::new(code.to_string()))
@@ -241,7 +383,7 @@ pub async fn link(
         pool,
         OAuthIdentityId::new(),
         user_id,
-        PROVIDER_NAME,
+        &provider.name,
         &subject,
     )
     .await?;
@@ -422,12 +564,18 @@ mod tests {
         base_url
     }
 
-    fn test_config(base_url: &str, client_id: &str) -> Config {
-        Config {
+    const TEST_PROVIDER_NAME: &str = "oidc";
+
+    fn test_provider(base_url: &str, client_id: &str) -> ProviderConfig {
+        ProviderConfig {
+            name: TEST_PROVIDER_NAME.to_string(),
+            display_name: "Test IdP".to_string(),
             issuer_url: base_url.to_string(),
             client_id: client_id.to_string(),
             client_secret: "unused-by-the-mock".to_string(),
             redirect_url: "http://localhost/callback".to_string(),
+            allowed_email_domains: Vec::new(),
+            provisioning: Provisioning::Auto,
         }
     }
 
@@ -438,20 +586,20 @@ mod tests {
     /// the mock to echo the same fixed nonce back, exactly mirroring what
     /// `start`+a real provider would produce between them.
     async fn complete_against_mock(
-        config: &Config,
+        provider: &ProviderConfig,
         pool: &DbPool,
     ) -> Result<LoginOutcome, OAuthError> {
         let pkce_verifier = "test-pkce-verifier-unused-by-mock".to_string();
-        complete(pool, config, "mock-auth-code", pkce_verifier, TEST_NONCE).await
+        complete(pool, provider, "mock-auth-code", pkce_verifier, TEST_NONCE).await
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_brand_new_email_creates_and_logs_into_a_new_account() {
         let pool = edda_db::test_pool().await;
         let base_url = spawn_mock_idp("subject-new", "new-user@example.com", "test-client").await;
-        let config = test_config(&base_url, "test-client");
+        let provider = test_provider(&base_url, "test-client");
 
-        let outcome = complete_against_mock(&config, &pool).await.unwrap();
+        let outcome = complete_against_mock(&provider, &pool).await.unwrap();
         let user = match outcome {
             LoginOutcome::NewAccountCreated(user) => user,
             _ => panic!("expected a new account to be created"),
@@ -460,7 +608,7 @@ mod tests {
 
         // Logging in again with the same subject resolves to the same
         // account, not a second one.
-        let outcome = complete_against_mock(&config, &pool).await.unwrap();
+        let outcome = complete_against_mock(&provider, &pool).await.unwrap();
         match outcome {
             LoginOutcome::LoggedIn(logged_in) => assert_eq!(logged_in.id, user.id),
             _ => panic!("expected the second login to resolve the already-linked identity"),
@@ -482,9 +630,9 @@ mod tests {
 
         let base_url =
             spawn_mock_idp("subject-existing", "existing@example.com", "test-client").await;
-        let config = test_config(&base_url, "test-client");
+        let provider = test_provider(&base_url, "test-client");
 
-        let outcome = complete_against_mock(&config, &pool).await.unwrap();
+        let outcome = complete_against_mock(&provider, &pool).await.unwrap();
         assert!(matches!(
             outcome,
             LoginOutcome::EmailBelongsToExistingAccount
@@ -493,7 +641,7 @@ mod tests {
         // And no identity was linked as a side effect of that refusal.
         assert!(OAuthIdentityRepo::find_by_provider_subject(
             &pool,
-            PROVIDER_NAME,
+            TEST_PROVIDER_NAME,
             "subject-existing"
         )
         .await
@@ -511,11 +659,11 @@ mod tests {
 
         let base_url =
             spawn_mock_idp("subject-to-link", "existing@example.com", "test-client").await;
-        let config = test_config(&base_url, "test-client");
+        let provider = test_provider(&base_url, "test-client");
 
         link(
             &pool,
-            &config,
+            &provider,
             user_id,
             "mock-auth-code",
             "test-pkce-verifier-unused-by-mock".to_string(),
@@ -524,11 +672,89 @@ mod tests {
         .await
         .unwrap();
 
-        let identity =
-            OAuthIdentityRepo::find_by_provider_subject(&pool, PROVIDER_NAME, "subject-to-link")
-                .await
-                .unwrap()
-                .expect("identity is now linked");
+        let identity = OAuthIdentityRepo::find_by_provider_subject(
+            &pool,
+            TEST_PROVIDER_NAME,
+            "subject-to-link",
+        )
+        .await
+        .unwrap()
+        .expect("identity is now linked");
         assert_eq!(identity.user_id, user_id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn link_only_provisioning_refuses_a_brand_new_email() {
+        let pool = edda_db::test_pool().await;
+        let base_url = spawn_mock_idp("subject-fresh", "fresh@example.com", "test-client").await;
+        let mut provider = test_provider(&base_url, "test-client");
+        provider.provisioning = Provisioning::LinkOnly;
+
+        assert!(matches!(
+            complete_against_mock(&provider, &pool).await.unwrap(),
+            LoginOutcome::ProvisioningNotAllowed
+        ));
+        // Nothing was created.
+        assert!(edda_db::UserRepo::find_by_email(&pool, "fresh@example.com")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn approval_provisioning_creates_a_pending_account() {
+        let pool = edda_db::test_pool().await;
+        let base_url =
+            spawn_mock_idp("subject-pending", "pending@example.com", "test-client").await;
+        let mut provider = test_provider(&base_url, "test-client");
+        provider.provisioning = Provisioning::Approval;
+
+        let user = match complete_against_mock(&provider, &pool).await.unwrap() {
+            LoginOutcome::NewAccountPendingApproval(user) => user,
+            other => panic!(
+                "expected pending approval, got {other:?}",
+                other = OutcomeTag(&other)
+            ),
+        };
+        let status = edda_db::UserRepo::account_status(&pool, user.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!status.is_approved(), "the account waits for an admin");
+        assert!(
+            status.is_email_verified(),
+            "the IdP vouched for the address"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_domain_outside_the_allowlist_is_refused() {
+        let pool = edda_db::test_pool().await;
+        let base_url = spawn_mock_idp("subject-x", "someone@evil.example", "test-client").await;
+        let mut provider = test_provider(&base_url, "test-client");
+        provider.allowed_email_domains = vec!["example.com".to_string()];
+
+        assert!(matches!(
+            complete_against_mock(&provider, &pool).await.unwrap(),
+            LoginOutcome::EmailDomainNotAllowed
+        ));
+    }
+
+    /// A tiny label so `panic!("… {}", …)` can name a `LoginOutcome`
+    /// variant without `LoginOutcome` itself needing `Debug` (it carries a
+    /// `User`, and widening that type's derives is out of scope here).
+    struct OutcomeTag<'a>(&'a LoginOutcome);
+    impl std::fmt::Debug for OutcomeTag<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let name = match self.0 {
+                LoginOutcome::LoggedIn(_) => "LoggedIn",
+                LoginOutcome::NewAccountCreated(_) => "NewAccountCreated",
+                LoginOutcome::NewAccountPendingApproval(_) => "NewAccountPendingApproval",
+                LoginOutcome::EmailBelongsToExistingAccount => "EmailBelongsToExistingAccount",
+                LoginOutcome::ProvisioningNotAllowed => "ProvisioningNotAllowed",
+                LoginOutcome::EmailDomainNotAllowed => "EmailDomainNotAllowed",
+            };
+            f.write_str(name)
+        }
     }
 }

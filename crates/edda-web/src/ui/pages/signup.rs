@@ -14,6 +14,9 @@ struct SignupBody<'a> {
 /// (navigate home); `PendingApproval` means the instance runs
 /// `Approval`-mode registration and an admin must approve the account
 /// before it can sign in.
+// The non-wasm SSR build only has the stub `request_signup`, which never
+// constructs these — the real one is wasm32-only (browser `fetch`).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 enum SignupResult {
     Active,
     PendingApproval,

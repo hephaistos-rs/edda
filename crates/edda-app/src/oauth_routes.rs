@@ -1,9 +1,16 @@
 //! HTTP surface for OAuth2/OIDC consumer login — the routes that drive
 //! `edda_auth::oauth`'s `start`/`complete`/`link` through an actual
 //! browser redirect round-trip. Nothing here decides *policy* (account
-//! linking, email matching); that is all `edda_auth::oauth`'s job — this
-//! module only shuttles the browser to and from the configured identity
-//! provider and stashes the CSRF/nonce/PKCE values in between.
+//! linking, email matching, per-provider provisioning); that is all
+//! `edda_auth::oauth`'s job — this module only shuttles the browser to
+//! and from the chosen identity provider and stashes the CSRF/nonce/PKCE
+//! values in between.
+//!
+//! Since Phase 9 the instance may configure **several** providers
+//! (`EDDA_OIDC_PROVIDERS`). The `{provider}`-parameterized routes name
+//! one explicitly; the bare routes work only when exactly one provider
+//! is configured. The chosen provider's name is recorded in the pending
+//! session blob, so the callback resolves it from there, not the URL.
 //!
 //! The three values `start` returns (csrf token, nonce, PKCE verifier)
 //! have to survive the redirect to the provider and back, so they're
@@ -11,7 +18,7 @@
 //! same session machinery `axum_login` itself rides on, just used here
 //! before a login exists rather than after.
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
@@ -20,7 +27,8 @@ use axum_login::{AuthSession, AuthnBackend};
 use serde::Deserialize;
 use tower_sessions::Session;
 
-use edda_auth::{oauth, Backend};
+use edda_auth::oauth::{self, ProviderConfig};
+use edda_auth::Backend;
 
 use crate::state::AppState;
 
@@ -28,6 +36,9 @@ const SESSION_KEY: &str = "oauth_pending";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct PendingOAuth {
+    /// Which configured provider this flow is against — the callback
+    /// resolves the `ProviderConfig` from this, never from the URL.
+    provider_name: String,
     csrf_token: String,
     nonce: String,
     pkce_verifier: String,
@@ -40,71 +51,145 @@ struct PendingOAuth {
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/auth/oauth/enabled", get(enabled))
+        .route("/api/auth/oauth/providers", get(list_providers))
         .route("/api/auth/oauth/login", get(start_login))
         .route("/api/auth/oauth/link", get(start_link))
         .route("/api/auth/oauth/callback", get(callback))
+        .route("/api/auth/oauth/{provider}/login", get(start_login_named))
+        .route("/api/auth/oauth/{provider}/link", get(start_link_named))
+        .route("/api/auth/oauth/{provider}/callback", get(callback))
 }
 
-/// Lets the UI decide whether to render an "sign in with SSO"/"link
-/// external account" affordance at all — this instance's OIDC
-/// configuration is server-side, so the client has no other way to know
-/// whether `/api/auth/oauth/login` would even work.
+/// Lets the UI decide whether to render a "sign in with SSO" affordance
+/// at all — this instance's OIDC configuration is server-side.
 async fn enabled(State(state): State<AppState>) -> Response {
-    axum::Json(state.config.oidc.is_some()).into_response()
+    axum::Json(!state.config.oidc.is_empty()).into_response()
 }
 
-/// This instance's OIDC config, or a 404 when it isn't configured (the
-/// `EDDA_OAUTH_*` set unset). Resolved once at startup by
-/// `edda_app::config` and carried in `AppState`.
-// `Err` is a ready-to-return axum `Response` (the "value or a 404" helper
-// pattern) — intentionally, not an error to bubble up a deep call stack.
+#[derive(serde::Serialize)]
+struct ProviderDto {
+    name: String,
+    display_name: String,
+}
+
+/// The configured providers, for a UI that offers a choice.
+async fn list_providers(State(state): State<AppState>) -> Response {
+    let list: Vec<ProviderDto> = state
+        .config
+        .oidc
+        .iter()
+        .map(|p| ProviderDto {
+            name: p.name.clone(),
+            display_name: p.display_name.clone(),
+        })
+        .collect();
+    axum::Json(list).into_response()
+}
+
+/// Resolves the provider for a request: an explicit name, or — when
+/// `name` is `None` — the sole configured provider. `Err` is a
+/// ready-to-return response (404 when OIDC is off, 400 when a name is
+/// needed or unknown).
 #[allow(clippy::result_large_err)]
-fn config_or_404(state: &AppState) -> Result<oauth::Config, Response> {
-    state.config.oidc.clone().ok_or_else(|| {
-        (
+fn resolve_provider<'a>(
+    state: &'a AppState,
+    name: Option<&str>,
+) -> Result<&'a ProviderConfig, Response> {
+    if state.config.oidc.is_empty() {
+        return Err((
             StatusCode::NOT_FOUND,
             "OAuth login is not configured for this instance",
         )
-            .into_response()
-    })
+            .into_response());
+    }
+    match name {
+        Some(name) => state
+            .config
+            .oidc
+            .by_name(name)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "no such OIDC provider").into_response()),
+        None => state.config.oidc.only().ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "several OIDC providers are configured — use /api/auth/oauth/{provider}/login",
+            )
+                .into_response()
+        }),
+    }
 }
 
-/// Begins a fresh login attempt: redirects the browser to the configured
-/// provider's consent screen.
+/// Begins a fresh login attempt against the sole configured provider.
 async fn start_login(State(state): State<AppState>, session: Session) -> Response {
-    begin(&state, session, None).await
+    begin(&state, session, None, None).await
+}
+
+/// Begins a fresh login against a named provider.
+async fn start_login_named(
+    State(state): State<AppState>,
+    session: Session,
+    Path(provider): Path<String>,
+) -> Response {
+    begin(&state, session, Some(&provider), None).await
 }
 
 /// Begins a *link* attempt from an already-authenticated session — the
 /// only path that may attach a new OAuth identity to an account whose
 /// email already matches an existing password account (see
 /// `oauth::link`'s doc comment). Refuses outright if the caller isn't
-/// logged in; there is nothing useful to link a floating identity to.
+/// logged in.
 async fn start_link(
     State(state): State<AppState>,
     session: Session,
     auth: AuthSession<Backend>,
 ) -> Response {
-    let Some(session_user) = auth.user else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            "log in before linking an external account",
-        )
-            .into_response();
-    };
-    begin(&state, session, Some(session_user.user.id.to_string())).await
+    match require_login(&auth) {
+        Ok(user_id) => begin(&state, session, None, Some(user_id)).await,
+        Err(resp) => resp,
+    }
 }
 
-async fn begin(state: &AppState, session: Session, link_user_id: Option<String>) -> Response {
-    let config = match config_or_404(state) {
-        Ok(config) => config,
+async fn start_link_named(
+    State(state): State<AppState>,
+    session: Session,
+    auth: AuthSession<Backend>,
+    Path(provider): Path<String>,
+) -> Response {
+    match require_login(&auth) {
+        Ok(user_id) => begin(&state, session, Some(&provider), Some(user_id)).await,
+        Err(resp) => resp,
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn require_login(auth: &AuthSession<Backend>) -> Result<String, Response> {
+    auth.user
+        .as_ref()
+        .map(|u| u.user.id.to_string())
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                "log in before linking an external account",
+            )
+                .into_response()
+        })
+}
+
+async fn begin(
+    state: &AppState,
+    session: Session,
+    provider_name: Option<&str>,
+    link_user_id: Option<String>,
+) -> Response {
+    let provider = match resolve_provider(state, provider_name) {
+        Ok(provider) => provider,
         Err(response) => return response,
     };
-    let request = match oauth::start(&config).await {
+    let request = match oauth::start(provider).await {
         Ok(request) => request,
         Err(err) => return (StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
     };
     let pending = PendingOAuth {
+        provider_name: provider.name.clone(),
         csrf_token: request.csrf_token,
         nonce: request.nonce,
         pkce_verifier: request.pkce_verifier,
@@ -133,9 +218,9 @@ async fn record(pool: &edda_db::DbPool, event_type: &str, actor_id: &str) {
 }
 
 /// Handles the provider's redirect back to Edda: verifies the CSRF state
-/// matches what `begin` stashed, then hands the authorization code to
-/// `oauth::complete` (a login) or `oauth::link` (an account link),
-/// depending on which one `begin` recorded as pending.
+/// matches what `begin` stashed, resolves the provider from the pending
+/// blob, then hands the authorization code to `oauth::complete` (a
+/// login) or `oauth::link` (an account link).
 #[tracing::instrument(name = "authentication.oauth.callback", skip_all)]
 async fn callback(
     State(state): State<AppState>,
@@ -143,11 +228,6 @@ async fn callback(
     mut auth: AuthSession<Backend>,
     Query(params): Query<CallbackParams>,
 ) -> Response {
-    let config = match config_or_404(&state) {
-        Ok(config) => config,
-        Err(response) => return response,
-    };
-
     let pending: Option<PendingOAuth> = match session.get(SESSION_KEY).await {
         Ok(pending) => pending,
         Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
@@ -163,6 +243,11 @@ async fn callback(
     // is single-shot, and the callback endpoint must never be replayable.
     let _ = session.remove::<PendingOAuth>(SESSION_KEY).await;
 
+    let provider = match resolve_provider(&state, Some(&pending.provider_name)) {
+        Ok(provider) => provider.clone(),
+        Err(response) => return response,
+    };
+
     if params.state != pending.csrf_token {
         return (
             StatusCode::BAD_REQUEST,
@@ -177,7 +262,7 @@ async fn callback(
         };
         return match oauth::link(
             &state.pool,
-            &config,
+            &provider,
             user_id,
             &params.code,
             pending.pkce_verifier,
@@ -195,7 +280,7 @@ async fn callback(
 
     let outcome = match oauth::complete(
         &state.pool,
-        &config,
+        &provider,
         &params.code,
         pending.pkce_verifier,
         &pending.nonce,
@@ -207,13 +292,34 @@ async fn callback(
     };
 
     let user = match outcome {
-        oauth::LoginOutcome::LoggedIn(user) => user,
-        oauth::LoginOutcome::NewAccountCreated(user) => user,
+        oauth::LoginOutcome::LoggedIn(user) | oauth::LoginOutcome::NewAccountCreated(user) => user,
+        oauth::LoginOutcome::NewAccountPendingApproval(_) => {
+            return (
+                StatusCode::ACCEPTED,
+                "your account was created and is awaiting administrator approval",
+            )
+                .into_response();
+        }
         oauth::LoginOutcome::EmailBelongsToExistingAccount => {
             return (
                 StatusCode::CONFLICT,
                 "an account with that email already exists — log in with your password, then \
                  link this provider from settings",
+            )
+                .into_response();
+        }
+        oauth::LoginOutcome::ProvisioningNotAllowed => {
+            return (
+                StatusCode::FORBIDDEN,
+                "this provider does not create new accounts — ask an administrator for one, then \
+                 link the provider from settings",
+            )
+                .into_response();
+        }
+        oauth::LoginOutcome::EmailDomainNotAllowed => {
+            return (
+                StatusCode::FORBIDDEN,
+                "your email domain is not permitted for this sign-in provider",
             )
                 .into_response();
         }

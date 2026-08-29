@@ -160,7 +160,7 @@ fn main() {
                 backend,
                 config: edda_app::RuntimeConfig {
                     webauthn: settings.webauthn.clone().map(|w| w.into_auth()),
-                    oidc: settings.oidc.clone().map(|o| o.into_auth()),
+                    oidc: settings.oidc.clone(),
                     external_url: settings.http.external_url.clone(),
                     trusted_origins: settings.http.trusted_origins.clone(),
                     rate_limit: settings.rate_limit.clone(),

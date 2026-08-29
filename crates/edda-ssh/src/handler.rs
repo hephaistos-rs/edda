@@ -100,17 +100,29 @@ impl server::Handler for Connection {
     type Error = HandlerError;
 
     async fn auth_publickey(&mut self, user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
-        match edda_auth::ssh::authenticate(&self.state.pool, key).await {
-            Some(resolved) => {
-                tracing::info!(user = %user, peer = ?self.peer_addr, resolved_user = %resolved.username, "ssh public-key authentication succeeded");
-                self.actor = Some(ActorContext::User(resolved.id));
-                Ok(Auth::Accept)
-            }
-            None => {
-                tracing::debug!(user = %user, peer = ?self.peer_addr, "ssh public-key authentication failed: no matching registered key");
-                Ok(Auth::reject())
-            }
+        // User keys first, so a key registered as both a user key and a
+        // deploy key resolves to the user (matching `edda_auth::deploy_keys`'
+        // own doc comment).
+        if let Some(resolved) = edda_auth::ssh::authenticate(&self.state.pool, key).await {
+            tracing::info!(user = %user, peer = ?self.peer_addr, resolved_user = %resolved.username, "ssh public-key authentication succeeded");
+            self.actor = Some(ActorContext::User(resolved.id));
+            return Ok(Auth::Accept);
         }
+        if let Some(resolution) = edda_auth::deploy_keys::authenticate(&self.state.pool, key).await
+        {
+            tracing::info!(
+                user = %user, peer = ?self.peer_addr,
+                repository_id = %resolution.repository_id, read_only = resolution.read_only,
+                "ssh deploy-key authentication succeeded"
+            );
+            self.actor = Some(ActorContext::DeployKey {
+                repository_id: resolution.repository_id,
+                read_only: resolution.read_only,
+            });
+            return Ok(Auth::Accept);
+        }
+        tracing::debug!(user = %user, peer = ?self.peer_addr, "ssh public-key authentication failed: no matching registered key");
+        Ok(Auth::reject())
     }
 
     async fn channel_open_session(

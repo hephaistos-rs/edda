@@ -12,7 +12,7 @@ use edda_domain::{ActorContext, Repository, RepositoryId, RepositoryOwner, Visib
 use edda_git::store::RepoStore;
 use edda_git::LockRegistry;
 
-use super::{acting_user, git_identity, ServiceError};
+use super::{acting_user, audit, git_identity, ServiceError};
 use crate::AppState;
 
 /// What a caller supplies to open a repository.
@@ -113,6 +113,13 @@ impl RepositoryService {
             None => RepositoryRepo::insert_with_owner(&self.pool, &repository, user.id).await,
         }?;
 
+        audit::record(
+            &self.pool,
+            audit::AuditEntry::new("repository.create", &user.id.to_string())
+                .target("repository", &repository.id.to_string())
+                .detail(serde_json::json!({ "identity": identity, "private": spec.private })),
+        )
+        .await;
         Ok((owner_username, repository.name))
     }
 
@@ -162,6 +169,13 @@ impl RepositoryService {
                 edda_db::repository_repo::InsertRepositoryError::Db(err) => ServiceError::Db(err),
             })?;
 
+        audit::record(
+            &self.pool,
+            audit::AuditEntry::new("repository.fork", &user.id.to_string())
+                .target("repository", &fork.id.to_string())
+                .detail(serde_json::json!({ "source": source_identity, "fork": dest_identity })),
+        )
+        .await;
         Ok((user.username, name.to_string()))
     }
 
@@ -193,6 +207,15 @@ impl RepositoryService {
         self.authz.check_danger_zone(actor, &repository).await?;
         RepositoryRepo::update_visibility(&self.pool, repository.id, visibility_of(private))
             .await?;
+        if let Some(actor_id) = actor.user_id() {
+            audit::record(
+                &self.pool,
+                audit::AuditEntry::new("repository.set_visibility", &actor_id.to_string())
+                    .target("repository", &repository.id.to_string())
+                    .detail(serde_json::json!({ "identity": git_identity(owner, name), "private": private })),
+            )
+            .await;
+        }
         Ok(())
     }
 
@@ -209,6 +232,15 @@ impl RepositoryService {
         let identity = git_identity(owner, name);
         edda_git::delete_repo(self.store.as_ref(), &self.locks, &identity).await?;
         RepositoryRepo::delete(&self.pool, repository.id).await?;
+        if let Some(actor_id) = actor.user_id() {
+            audit::record(
+                &self.pool,
+                audit::AuditEntry::new("repository.delete", &actor_id.to_string())
+                    .target("repository", &repository.id.to_string())
+                    .detail(serde_json::json!({ "identity": identity })),
+            )
+            .await;
+        }
         Ok(())
     }
 

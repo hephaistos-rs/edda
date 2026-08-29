@@ -12,13 +12,18 @@ use edda_domain::UserId;
 
 fn print_usage() {
     eprintln!(
-        "usage: edda-cli user <create|list|disable|enable|delete> [args...]\n\
+        "usage: edda-cli <user|secrets> ...\n\
          \n\
          edda-cli user create <username> <email> [--admin]\n\
          edda-cli user list\n\
          edda-cli user disable <username>\n\
          edda-cli user enable <username>\n\
-         edda-cli user delete <username>"
+         edda-cli user delete <username>\n\
+         \n\
+         edda-cli secrets rotate\n\
+         \x20 re-encrypts every stored TOTP / webhook secret under the first\n\
+         \x20 entry of EDDA_SECRET_KEYS; run after prepending a new primary\n\
+         \x20 key, then drop the old entry."
     );
 }
 
@@ -57,11 +62,98 @@ async fn run(args: &[String]) -> Result<(), String> {
 
     match args {
         [subcommand, rest @ ..] if subcommand == "user" => user_command(&pool, rest).await,
+        [subcommand, rest @ ..] if subcommand == "secrets" => secrets_command(&pool, rest).await,
         _ => {
             print_usage();
             Err("no subcommand given".to_string())
         }
     }
+}
+
+async fn secrets_command(pool: &edda_db::DbPool, args: &[String]) -> Result<(), String> {
+    match args {
+        [action] if action == "rotate" => rotate_secrets(pool).await,
+        _ => {
+            print_usage();
+            Err("unrecognized `secrets` invocation".to_string())
+        }
+    }
+}
+
+/// Re-encrypts every `secret_ciphertext` (TOTP + webhook) under the current
+/// primary `EDDA_SECRET_KEYS` entry. Idempotent: a blob already on the
+/// primary is rewritten with a fresh nonce, still valid.
+async fn rotate_secrets(pool: &edda_db::DbPool) -> Result<(), String> {
+    let (keys, primary_id) = parse_secret_keys()?;
+    edda_auth::secret_box::init(keys, Some(primary_id.clone()));
+
+    let secrets = edda_db::SecretRotationRepo::load_all(pool)
+        .await
+        .map_err(|err| err.to_string())?;
+    if secrets.is_empty() {
+        println!("no stored secrets to rotate");
+        return Ok(());
+    }
+
+    let mut rotated = 0usize;
+    for secret in &secrets {
+        let reencrypted = edda_auth::secret_box::reencrypt(&secret.ciphertext)
+            .map_err(|err| format!("{} {}: {err}", secret.kind, secret.id))?;
+        edda_db::SecretRotationRepo::store(pool, secret, &reencrypted)
+            .await
+            .map_err(|err| err.to_string())?;
+        rotated += 1;
+    }
+
+    println!("re-encrypted {rotated} secret(s) under key id {primary_id:?}");
+    println!("older key ids can now be removed from EDDA_SECRET_KEYS");
+    Ok(())
+}
+
+/// `(id, key)` pairs plus the primary id — what `secret_box::init` takes.
+type ResolvedSecretKeys = (Vec<(String, [u8; 32])>, String);
+
+/// The same `EDDA_SECRET_KEYS` shape `edda_app::config` parses: a
+/// comma-separated list of `id:hex` (or a single bare 64-hex key, id
+/// `default`), first entry primary.
+fn parse_secret_keys() -> Result<ResolvedSecretKeys, String> {
+    let raw = std::env::var("EDDA_SECRET_KEYS")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or("EDDA_SECRET_KEYS is not set — nothing to rotate to")?;
+    let items: Vec<&str> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut entries = Vec::new();
+    for item in &items {
+        let (id, hex) = match item.split_once(':') {
+            Some((id, hex)) => (id.trim().to_string(), hex.trim()),
+            None if items.len() == 1 => ("default".to_string(), item.trim()),
+            None => return Err("every EDDA_SECRET_KEYS entry must be `id:hex`".to_string()),
+        };
+        let key = decode_hex_32(hex)
+            .ok_or_else(|| format!("key {id:?} must be 64 hex characters (32 bytes)"))?;
+        entries.push((id, key));
+    }
+    let primary_id = entries
+        .first()
+        .map(|(id, _)| id.clone())
+        .ok_or("EDDA_SECRET_KEYS has no entries")?;
+    Ok((entries, primary_id))
+}
+
+fn decode_hex_32(input: &str) -> Option<[u8; 32]> {
+    let input = input.trim();
+    if input.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, chunk) in input.as_bytes().chunks(2).enumerate() {
+        out[i] = u8::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
+    }
+    Some(out)
 }
 
 async fn user_command(pool: &edda_db::DbPool, args: &[String]) -> Result<(), String> {

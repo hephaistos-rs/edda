@@ -153,7 +153,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Stub — Phase 8 hardens the WebAuthn RP verifier and adds the
-      # external conformance-vector suite this job will run
-      # (`cargo test -p edda-auth --test webauthn_conformance`).
-      - run: echo "webauthn conformance vectors land in Phase 8 (plan.local.md §11)"
+      - uses: Swatinem/rust-cache@v2
+      # The byte-frozen conformance vectors for the hand-rolled WebAuthn RP
+      # verifier (plan.local.md C1). `tests/fixtures/webauthn/*.json` are
+      # replayed through the real `finish_registration` /
+      # `finish_authentication`; a drift in what the verifier accepts fails
+      # here. Gated as its own job so a regression is unmistakable in the
+      # checks list, not buried in the DB-matrix `test` job.
+      - run: cargo test -p edda-auth webauthn::tests::conformance::every_conformance_fixture_matches_its_expected_outcome

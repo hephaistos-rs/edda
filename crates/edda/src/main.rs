@@ -54,16 +54,25 @@ fn main() {
     // `edda_telemetry`'s module docs for the full explanation.
     let telemetry_guard = edda_telemetry::init();
 
-    // Install the at-rest encryption key (or `None`). No lazy panic: if
+    // Install the at-rest encryption key set (or none). No lazy panic: if
     // it's absent, TOTP/webhook-secret features fail with a clear error
-    // instead of aborting a request.
-    edda_auth::secret_box::init(settings.secret_keys.primary());
+    // instead of aborting a request. The first entry is the primary; the
+    // rest can still decrypt, so `edda-cli secrets rotate` can move blobs
+    // onto a new primary.
+    edda_auth::secret_box::init(
+        settings.secret_keys.all(),
+        settings.secret_keys.primary_id(),
+    );
     if !settings.secret_keys.is_configured() {
         tracing::warn!(
             "EDDA_SECRET_KEYS is not set — TOTP (2FA) enrollment and creating webhooks with a \
              stored secret will be unavailable until it is configured"
         );
     }
+
+    // Argon2 cost parameters (or the library defaults) — one place,
+    // before any password is hashed.
+    edda_auth::password::configure(settings.argon2.into_auth());
 
     // `dioxus::server::serve`'s callback can run more than once (dev-mode hot
     // reload re-invokes it to rebuild the router); the shutdown watcher below
@@ -72,12 +81,14 @@ fn main() {
     let telemetry_guard = std::sync::Arc::new(tokio::sync::Mutex::new(Some(telemetry_guard)));
     let shutdown_watcher_started = std::sync::Arc::new(std::sync::Once::new());
     let ssh_server_started = std::sync::Arc::new(std::sync::Once::new());
+    let session_gc_started = std::sync::Arc::new(std::sync::Once::new());
 
     dioxus::server::serve(move || {
         let settings = settings.clone();
         let telemetry_guard = telemetry_guard.clone();
         let shutdown_watcher_started = shutdown_watcher_started.clone();
         let ssh_server_started = ssh_server_started.clone();
+        let session_gc_started = session_gc_started.clone();
         async move {
             let pool = edda_db::pool(&settings.db.url, settings.db.pool_options()).await?;
 
@@ -104,8 +115,32 @@ fn main() {
             // relies on, so this doesn't weaken that protection — it only
             // permits the top-level-GET-navigation case `Strict` was
             // blocking unnecessarily.
-            let session_layer = tower_sessions::SessionManagerLayer::new(session_store)
-                .with_same_site(tower_sessions::cookie::SameSite::Lax);
+            let session_layer = tower_sessions::SessionManagerLayer::new(session_store.clone())
+                .with_same_site(tower_sessions::cookie::SameSite::Lax)
+                // Rolling inactivity window (S10); the absolute ceiling is
+                // enforced per-request in `edda-app`'s actor resolution.
+                .with_expiry(tower_sessions::Expiry::OnInactivity(
+                    tower_sessions::cookie::time::Duration::seconds(
+                        settings.session.rolling_ttl_secs,
+                    ),
+                ));
+
+            // GC expired session rows (S10) — `tower-sessions` only marks
+            // them expired, it never deletes. Same `Once` guard as the
+            // other background tasks, and for the same dev-hot-reload
+            // reason.
+            session_gc_started.call_once(|| {
+                use tower_sessions::session_store::ExpiredDeletion;
+                let store = session_store.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = store
+                        .continuously_delete_expired(tokio::time::Duration::from_secs(3600))
+                        .await
+                    {
+                        tracing::warn!(error = %err, "session GC task stopped");
+                    }
+                });
+            });
 
             let backend = edda_auth::Backend::new(pool.clone());
             let auth_layer =
@@ -128,8 +163,9 @@ fn main() {
                     oidc: settings.oidc.clone().map(|o| o.into_auth()),
                     external_url: settings.http.external_url.clone(),
                     trusted_origins: settings.http.trusted_origins.clone(),
-                    rate_limit: settings.rate_limit,
+                    rate_limit: settings.rate_limit.clone(),
                     git_limits: settings.git.limits,
+                    session: settings.session,
                 },
             };
             let router = dioxus::server::router(App)

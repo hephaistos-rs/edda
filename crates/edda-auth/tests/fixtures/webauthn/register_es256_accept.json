@@ -1,0 +1,14 @@
+{
+  "kind": "registration",
+  "description": "ES256 registration, same-origin, UP+UV",
+  "config": {
+    "rp_id": "example.com",
+    "origin": "https://example.com"
+  },
+  "challenge_b64": "r2HWsqC7V5ulX-D5S7wcL27fTrsh4Xg0ewe5tBVNhF4",
+  "client_data_json_b64": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoicjJIV3NxQzdWNXVsWC1ENVM3d2NMMjdmVHJzaDRYZzBld2U1dEJWTmhGNCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+  "attestation_object_b64": "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YViao3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUdFAAAAAAAAAAAAAAAAAAAAAAAAAAAAGFNRMX1RrNfmgtVlpgtBdCtV1BggDyr5LKQBAiABIVggLgcsAEaEnwYvstTG3fOlqeh3NhiokNQvWUyPZspJFAsiWCC9J6cbQ9MMRZ1AuJ-i6dHxIspDc3MFsVRL2B4im6iPQw",
+  "public_key_algorithm": -7,
+  "credential_id_b64": "U1ExfVGs1-aC1WWmC0F0K1XUGCAPKvks",
+  "expect_accept": true
+}

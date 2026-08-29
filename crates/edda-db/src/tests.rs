@@ -12,8 +12,8 @@ use edda_domain::{
 use crate::{
     AccessTokenRepo, AuditEventRepo, BranchProtectionRepo, IssueCommentRepo, IssueRepo, LabelRepo,
     LfsRepo, MilestoneRepo, OAuthIdentityRepo, OrganizationRepo, PrCommentRepo, PrReviewRepo,
-    PullRequestRepo, RepoAccessRepo, RepositoryRepo, SshKeyRepo, TeamMemberRepo, TeamRepo,
-    TotpRepo, UserRepo, WebauthnRepo,
+    PullRequestRepo, RepoAccessRepo, RepositoryRepo, SecretRotationRepo, SshKeyRepo,
+    TeamMemberRepo, TeamRepo, TotpRepo, UserRepo, WebauthnRepo, WebhookRepo,
 };
 
 async fn insert_user(pool: &crate::DbPool, username: &str) -> UserId {
@@ -263,19 +263,121 @@ async fn an_access_token_authenticates_back_to_its_owning_user_and_scope() {
         "laptop",
         "deadbeef",
         &edda_domain::RepositoryScope::All,
+        edda_domain::TokenScope::RepoWrite,
     )
     .await
     .unwrap();
 
-    let (user, scope): (User, edda_domain::RepositoryScope) =
+    let (user, scope, token_scope): (User, edda_domain::RepositoryScope, edda_domain::TokenScope) =
         AccessTokenRepo::find_by_hash(&pool, "deadbeef")
             .await
             .unwrap()
             .unwrap();
     assert_eq!(user.id, alice);
     assert_eq!(scope, edda_domain::RepositoryScope::All);
+    assert_eq!(token_scope, edda_domain::TokenScope::RepoWrite);
 
     assert!(AccessTokenRepo::find_by_hash(&pool, "not-a-real-hash")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn a_login_attempt_counter_increments_upserts_and_clears() {
+    use crate::LoginAttemptRepo;
+    let pool = crate::test_pool().await;
+    let key = "alice@example.com|203.0.113.7";
+
+    assert!(LoginAttemptRepo::current(&pool, key)
+        .await
+        .unwrap()
+        .is_none());
+
+    let a = LoginAttemptRepo::record_failure(&pool, key, 1_000)
+        .await
+        .unwrap();
+    assert_eq!(a.failure_count, 1);
+    assert_eq!(a.first_failed_at, 1_000);
+
+    let b = LoginAttemptRepo::record_failure(&pool, key, 1_050)
+        .await
+        .unwrap();
+    assert_eq!(b.failure_count, 2);
+    assert_eq!(b.first_failed_at, 1_000); // unchanged
+    assert_eq!(b.last_failed_at, 1_050);
+
+    LoginAttemptRepo::set_locked_until(&pool, key, Some(2_000))
+        .await
+        .unwrap();
+    assert_eq!(
+        LoginAttemptRepo::current(&pool, key)
+            .await
+            .unwrap()
+            .unwrap()
+            .locked_until,
+        Some(2_000)
+    );
+
+    LoginAttemptRepo::clear(&pool, key).await.unwrap();
+    assert!(LoginAttemptRepo::current(&pool, key)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn a_deploy_key_resolves_to_its_repository_and_read_only_flag() {
+    use crate::DeployKeyRepo;
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let repository = repo(alice, "r", Visibility::Private);
+    RepositoryRepo::insert(&pool, &repository).await.unwrap();
+
+    DeployKeyRepo::insert(
+        &pool,
+        edda_domain::DeployKeyId::new(),
+        repository.id,
+        "SHA256:deploykeyfp",
+        "ssh-ed25519 AAAA... ci",
+        "ci",
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (resolved_repo, read_only) =
+        DeployKeyRepo::find_by_fingerprint(&pool, "SHA256:deploykeyfp")
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(resolved_repo, repository.id);
+    assert!(read_only);
+
+    let listed = DeployKeyRepo::list_for_repository(&pool, repository.id)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].title, "ci");
+
+    // The same fingerprint can't be registered twice.
+    let err = DeployKeyRepo::insert(
+        &pool,
+        edda_domain::DeployKeyId::new(),
+        repository.id,
+        "SHA256:deploykeyfp",
+        "ssh-ed25519 AAAA... ci2",
+        "ci2",
+        false,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        crate::deploy_key_repo::InsertDeployKeyError::FingerprintTaken
+    ));
+
+    assert!(DeployKeyRepo::find_by_fingerprint(&pool, "SHA256:nope")
         .await
         .unwrap()
         .is_none());
@@ -566,6 +668,58 @@ async fn a_totp_secret_is_not_activated_until_activate_is_called() {
 
     TotpRepo::activate(&pool, alice).await.unwrap();
     assert!(TotpRepo::is_activated(&pool, alice).await.unwrap());
+}
+
+#[tokio::test]
+async fn secret_rotation_repo_enumerates_and_rewrites_every_stored_ciphertext() {
+    use edda_domain::{WebhookEvent, WebhookId};
+
+    let pool = crate::test_pool().await;
+    let alice = insert_user(&pool, "alice").await;
+    let repo_row = Repository {
+        id: RepositoryId::new(),
+        owner: RepositoryOwner::User(alice),
+        name: "r".to_string(),
+        description: None,
+        visibility: Visibility::Public,
+        forked_from: None,
+    };
+    RepositoryRepo::insert(&pool, &repo_row).await.unwrap();
+
+    TotpRepo::upsert_secret(&pool, alice, b"totp-cipher-v1")
+        .await
+        .unwrap();
+    let webhook_id = WebhookId::new();
+    WebhookRepo::insert(
+        &pool,
+        webhook_id,
+        repo_row.id,
+        "https://example.test/hook",
+        b"webhook-cipher-v1",
+        &[WebhookEvent::PullRequestMerged],
+    )
+    .await
+    .unwrap();
+
+    let loaded = SecretRotationRepo::load_all(&pool).await.unwrap();
+    assert_eq!(loaded.len(), 2);
+    let kinds: std::collections::HashSet<_> = loaded.iter().map(|s| s.kind).collect();
+    assert!(kinds.contains("totp") && kinds.contains("webhook"));
+
+    for secret in &loaded {
+        let rewritten = format!("{}-rotated", String::from_utf8_lossy(&secret.ciphertext));
+        SecretRotationRepo::store(&pool, secret, rewritten.as_bytes())
+            .await
+            .unwrap();
+    }
+
+    let (totp_after, _) = TotpRepo::find_by_user(&pool, alice).await.unwrap().unwrap();
+    assert_eq!(totp_after, b"totp-cipher-v1-rotated");
+    let webhook_after = WebhookRepo::find_secret_ciphertext(&pool, webhook_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(webhook_after, b"webhook-cipher-v1-rotated");
 }
 
 #[tokio::test]

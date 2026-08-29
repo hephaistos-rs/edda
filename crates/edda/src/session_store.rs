@@ -15,7 +15,7 @@
 //! `tower-sessions-sqlx-store`'s; this enum only dispatches to it.
 
 use tower_sessions::session::{Id, Record};
-use tower_sessions::session_store::Result as StoreResult;
+use tower_sessions::session_store::{ExpiredDeletion, Result as StoreResult};
 use tower_sessions::SessionStore;
 
 #[derive(Clone)]
@@ -99,6 +99,22 @@ impl SessionStore for AnySessionStore {
             Self::Sqlite(s) => s.delete(session_id).await,
             Self::Postgres(s) => s.delete(session_id).await,
             Self::MySql(s) => s.delete(session_id).await,
+        }
+    }
+}
+
+// The GC half of S10: `main.rs` spawns `continuously_delete_expired` (the
+// trait's provided method) so rows whose `Expiry` has passed don't
+// accumulate forever. Each concrete store's own `delete_expired` does the
+// backend-specific `DELETE`; this enum just dispatches, exactly like the
+// `SessionStore` impl above.
+#[async_trait::async_trait]
+impl ExpiredDeletion for AnySessionStore {
+    async fn delete_expired(&self) -> StoreResult<()> {
+        match self {
+            Self::Sqlite(s) => s.delete_expired().await,
+            Self::Postgres(s) => s.delete_expired().await,
+            Self::MySql(s) => s.delete_expired().await,
         }
     }
 }

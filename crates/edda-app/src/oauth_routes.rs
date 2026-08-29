@@ -122,18 +122,12 @@ struct CallbackParams {
     state: String,
 }
 
-/// Best-effort audit logging — see `admin_routes::record`'s identical
-/// reasoning for why a logging failure must never fail the action it
-/// describes.
+/// Best-effort OAuth audit logging, via the one audit path
+/// (`crate::services::audit`, S11).
 async fn record(pool: &edda_db::DbPool, event_type: &str, actor_id: &str) {
-    let _ = edda_db::AuditEventRepo::insert(
+    crate::services::audit::record(
         pool,
-        edda_domain::AuditEventId::new(),
-        event_type,
-        Some(actor_id),
-        None,
-        None,
-        None,
+        crate::services::audit::AuditEntry::new(event_type, actor_id),
     )
     .await;
 }
@@ -239,6 +233,7 @@ async fn callback(
     if let Err(err) = auth.login(&session_user).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
     }
+    crate::auth_routes::stamp_session_login(&auth).await;
     record(&state.pool, "auth.login.success", &user.id.to_string()).await;
     Redirect::to("/").into_response()
 }

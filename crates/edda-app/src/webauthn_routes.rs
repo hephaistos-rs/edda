@@ -255,6 +255,7 @@ async fn login_verify(
     if let Err(err) = auth.login(&session_user).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
     }
+    crate::auth_routes::stamp_session_login(&auth).await;
     record(&state.pool, "auth.login.success", &user_id.to_string()).await;
     Json(CurrentUserDto::from(row.user)).into_response()
 }

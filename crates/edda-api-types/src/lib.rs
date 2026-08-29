@@ -580,6 +580,32 @@ pub struct AddCollaboratorRequest {
     pub email: String,
 }
 
+// ──────────────────────────── deploy keys ─────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeployKeyDto {
+    pub id: String,
+    pub fingerprint: String,
+    pub public_key: String,
+    pub title: String,
+    pub read_only: bool,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateDeployKeyRequest {
+    pub title: String,
+    pub public_key: String,
+    /// Default `true` — a deploy key is read-only unless asked otherwise.
+    #[serde(default = "default_true")]
+    pub read_only: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 // ──────────────────────────── notifications ───────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

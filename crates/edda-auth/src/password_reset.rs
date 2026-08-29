@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use edda_db::{DbPool, PasswordResetTokenRepo, UserRepo};
 use edda_domain::{PasswordResetTokenId, User, UserId};
 
-use crate::password::hash_password;
+use crate::password::hash_password_async;
 
 const TOKEN_TTL_SECONDS: i64 = 3600;
 
@@ -112,7 +112,7 @@ pub async fn consume(
         return Err(ConsumeError::InvalidOrExpired);
     };
 
-    let new_hash = hash_password(new_password)?;
+    let new_hash = hash_password_async(new_password.to_string()).await?;
     UserRepo::update_password_hash(pool, user_id, &new_hash).await?;
     PasswordResetTokenRepo::mark_used(pool, token_id).await?;
 
@@ -141,7 +141,7 @@ mod tests {
             user_id,
             "alice",
             "alice@example.com",
-            &hash_password("old-pw").unwrap(),
+            &crate::password::hash_password("old-pw").unwrap(),
         )
         .await
         .unwrap();

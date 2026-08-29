@@ -1,7 +1,8 @@
 //! The audit log's persistence boundary — a plain insert/list pair. The
-//! *decision* of which events are security-relevant enough to record
-//! lives in `edda_telemetry::audit` (the `tracing_subscriber::Layer` that
-//! captures them); this repo just stores whatever it's handed.
+//! *decision* of which events are security-relevant enough to record lives
+//! in `edda_app::services::audit` (called by every mutating application
+//! service and the raw auth/admin/OAuth routes); this repo just stores
+//! whatever it's handed.
 
 use edda_domain::AuditEventId;
 

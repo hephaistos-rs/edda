@@ -56,7 +56,10 @@ fn temp_dir() -> std::path::PathBuf {
 }
 
 async fn harness() -> (SocketAddr, String, std::path::PathBuf) {
-    edda_auth::secret_box::init(Some([0x11; 32]));
+    edda_auth::secret_box::init(
+        vec![("test".to_string(), [0x11; 32])],
+        Some("test".to_string()),
+    );
     let pool = edda_db::test_pool().await;
     let store_root = temp_dir();
     let store: Arc<dyn RepoStore> = Arc::new(LocalFsStore::new(store_root.clone()));

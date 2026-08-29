@@ -370,6 +370,18 @@ impl PullRequestService {
         .await?;
         tx.commit().await?;
 
+        if let Some(actor_id) = actor.user_id() {
+            super::audit::record(
+                &self.pool,
+                super::audit::AuditEntry::new("pull_request.merge", &actor_id.to_string())
+                    .target("repository", &repository.id.to_string())
+                    .detail(serde_json::json!({
+                        "number": number,
+                        "merge_commit": outcome.merge_commit,
+                    })),
+            )
+            .await;
+        }
         Ok(outcome)
     }
 

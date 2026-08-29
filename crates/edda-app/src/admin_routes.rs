@@ -20,17 +20,12 @@ use edda_domain::require_instance_admin;
 
 use crate::state::AppState;
 
-/// Best-effort: an audit-logging failure must never fail the admin action
-/// it's recording — the action already succeeded by the time this runs.
+/// Best-effort admin audit logging, via the one audit path
+/// (`crate::services::audit`, S11).
 async fn record(pool: &edda_db::DbPool, event_type: &str, actor_id: &str, target_id: &str) {
-    let _ = edda_db::AuditEventRepo::insert(
+    crate::services::audit::record(
         pool,
-        edda_domain::AuditEventId::new(),
-        event_type,
-        Some(actor_id),
-        Some("user"),
-        Some(target_id),
-        None,
+        crate::services::audit::AuditEntry::new(event_type, actor_id).target("user", target_id),
     )
     .await;
 }

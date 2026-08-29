@@ -35,6 +35,8 @@ edda-render = { workspace = true }
 # Only for `rate_limit`'s concrete `GovernorLayer` type — see the workspace
 # `Cargo.toml` entry's comment.
 governor = { workspace = true }
+# CIDR parsing for the rate limiter's `EDDA_TRUSTED_PROXIES` allowlist.
+ipnet = { workspace = true }
 # The narrow `enqueue`/`dispatch` primitives only (password-reset email,
 # webhook/notification fan-out from `pull_request`/`issue` mutations
 # routed through this crate's git-protected-branch check) — never the

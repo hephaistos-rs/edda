@@ -244,7 +244,10 @@ mod tests {
     use axum::Router;
 
     fn set_test_key() {
-        edda_auth::secret_box::init(Some([0x11; 32]));
+        edda_auth::secret_box::init(
+            vec![("test".to_string(), [0x11; 32])],
+            Some("test".to_string()),
+        );
     }
 
     #[derive(Clone, Default)]

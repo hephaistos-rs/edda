@@ -162,9 +162,15 @@ mod tests {
     use super::*;
 
     fn set_test_key() {
-        // Same fixed key `secret_box`'s own tests install; `init`'s
+        // Same fixed key set `secret_box`'s own tests install; `init`'s
         // `OnceLock` reads whichever call lands first.
-        crate::secret_box::init(Some([0u8; 32]));
+        crate::secret_box::init(
+            vec![
+                ("v2".to_string(), [0xBB; 32]),
+                ("v1".to_string(), [0xAA; 32]),
+            ],
+            Some("v2".to_string()),
+        );
     }
 
     /// Generates the code a real authenticator app would show right now,

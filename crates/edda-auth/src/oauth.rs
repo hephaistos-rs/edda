@@ -183,7 +183,8 @@ pub async fn complete(
     }
 
     let username = derive_username_from_email(&email);
-    let random_password_hash = crate::password::hash_password(&random_unusable_secret())
+    let random_password_hash = crate::password::hash_password_async(random_unusable_secret())
+        .await
         .expect("hashing a freshly generated random string never fails");
     let user_id = UserId::new();
     UserRepo::insert(pool, user_id, &username, &email, &random_password_hash)

@@ -6,7 +6,7 @@ use edda_auth::AuthorizationService;
 use edda_db::{CollaboratorRow, DbPool, RepoAccessRepo, UserRepo};
 use edda_domain::{AccessSubject, ActorContext, RepoRole, Repository, UserId};
 
-use super::ServiceError;
+use super::{audit, ServiceError};
 use crate::AppState;
 
 #[derive(Clone)]
@@ -45,6 +45,15 @@ impl CollaboratorService {
             RepoRole::Write,
         )
         .await?;
+        if let Some(actor_id) = actor.user_id() {
+            audit::record(
+                &self.pool,
+                audit::AuditEntry::new("collaborator.add", &actor_id.to_string())
+                    .target("repository", &repository.id.to_string())
+                    .detail(serde_json::json!({ "user_id": user.id.to_string(), "role": "write" })),
+            )
+            .await;
+        }
         Ok(())
     }
 
@@ -60,6 +69,15 @@ impl CollaboratorService {
             .await?
         {
             return Err(ServiceError::NotFound);
+        }
+        if let Some(actor_id) = actor.user_id() {
+            audit::record(
+                &self.pool,
+                audit::AuditEntry::new("collaborator.remove", &actor_id.to_string())
+                    .target("repository", &repository.id.to_string())
+                    .detail(serde_json::json!({ "user_id": target.to_string() })),
+            )
+            .await;
         }
         Ok(())
     }

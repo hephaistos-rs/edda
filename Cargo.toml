@@ -128,6 +128,12 @@ chrono = "0.4.45"
 comrak = { version = "0.54.0", default-features = false }
 dioxus = "0.7.1"
 dioxus-free-icons = "0.10.0"
+# WebAuthn EdDSA credential verification (`edda_auth::webauthn`), alongside
+# the ES256 path `p256` already covers. Pure-Rust RustCrypto-family, and the
+# exact version `russh` already locks for SSH key handling (`cargo tree -i`
+# confirms `russh`/`ssh-key` -> `ed25519-dalek 3`), so naming it directly
+# adds no new resolved version and no new advisory.
+ed25519-dalek = "3.0.0"
 flate2 = "1.1.9"
 gix = "0.86.0"
 # Owned actor-identity type (`Signature`), only needed directly by
@@ -172,6 +178,13 @@ governor = "0.10"
 # HTML sanitizer run on every `comrak` output — see that dependency's own
 # comment.
 ammonia = "4.1.4"
+# HKDF-SHA256 for `edda_auth::signing_keys` — derives the per-purpose
+# HS256 secrets (pending-login, WebAuthn ceremony, LFS transfer) from the
+# primary `EDDA_SECRET_KEYS` entry so they survive a restart and there is
+# one configured root secret, not three process-random ones (plan L4).
+# `0.12`, pairing with `hmac` 0.12 / `sha2` 0.10 / `digest` 0.10 already
+# pinned above; already in the graph via `sqlx`.
+hkdf = "0.12"
 # Webhook payload signing (HMAC-SHA256, `edda_auth::webhook_signing`) — a
 # standalone dependency rather than reusing `jsonwebtoken`'s bundled HMAC:
 # that crate only exposes HMAC wrapped in its own JWT-shaped API (sign/
@@ -186,6 +199,10 @@ ammonia = "4.1.4"
 # `sha2`-0.10-derived `Sha256` type, so it fails to compile as a second,
 # incompatible version rather than reusing the one already resolved.
 hmac = "0.12"
+# CIDR parsing for the rate limiter's `EDDA_TRUSTED_PROXIES` allowlist
+# (`edda_app::rate_limit` / `edda_app::config`). Already in the graph via
+# `hyper-util`; named here only so `edda-app` can parse + type the list.
+ipnet = "2.11"
 # Only HMAC (`hmac`/`sha2`) is actually used here (HS256), but the crate
 # has no narrower "HMAC-only" feature to enable instead.
 jsonwebtoken = { version = "11.0.0", default-features = false, features = ["rust_crypto"] }
@@ -237,6 +254,17 @@ rand = { version = "0.10", features = ["thread_rng"] }
 # the graph. `default-features = false` drops `default-tls` (`native-tls`,
 # a C dependency this workspace avoids wherever a pure-Rust path exists).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# WebAuthn RS256 credential verification (RSASSA-PKCS1-v1_5 + SHA-256,
+# `edda_auth::webauthn`). The `0.9` line, not the `0.10.0-rc` one `russh`
+# pulls: `0.9` is on the `digest`/`sha2` 0.10 + `signature` 2.2 generation
+# this workspace already standardises on (`sha2 = "0.10.9"` above), so
+# `pkcs1v15::VerifyingKey::<sha2::Sha256>` type-checks against the same
+# `Sha256` the rest of `edda-auth` uses; `0.10.0-rc` is on `sha2` 0.11 /
+# `digest` 0.11. Already in the graph via `sqlx-mysql`'s `caching_sha2`
+# auth, so no new resolved crate. RUSTSEC-2023-0071 (Marvin timing) is
+# already accepted in `deny.toml` / `.cargo/audit.toml` — local verify
+# only, no oracle.
+rsa = "0.9.10"
 # `ring` crypto backend selected over the `aws-lc-rs` default — see
 # `crates/edda-ssh/Cargo.toml`'s doc comment for the rationale.
 russh = { version = "0.63", default-features = false, features = ["ring", "rsa"] }
@@ -244,6 +272,10 @@ serde = "1.0.229"
 serde_json = "1.0.145"
 sha2 = "0.10.9"
 sqlx = "0.8.6"
+# Constant-time byte-slice equality for the WebAuthn challenge compare
+# (`edda_auth::webauthn`) — defence in depth behind the ceremony token's
+# HMAC. Single version already in the graph via `p256`/`curve25519-dalek`.
+subtle = "2.6.1"
 # `default-fancy` (fancy-regex backend), not `default-onig` — Onig is a C
 # library, and this workspace avoids native/C dependencies wherever a
 # pure-Rust alternative exists (the same preference already applied to

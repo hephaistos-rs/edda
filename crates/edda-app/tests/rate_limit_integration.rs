@@ -130,6 +130,7 @@ async fn sustained_requests_trip_the_limiter_but_never_a_real_git_clone() {
             rate_limit: edda_app::config::RateLimitConfig {
                 per_second: 1,
                 burst: 3,
+                ..Default::default()
             },
             ..Default::default()
         },

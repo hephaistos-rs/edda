@@ -47,10 +47,18 @@ pub fn router(state: AppState) -> Router {
         &state.config.trusted_origins,
     );
 
-    let rate_limited = Router::new()
+    // The auth-adjacent endpoints carry a second, stricter limiter
+    // (`EDDA_AUTH_RATE_LIMIT_*`) on top of the general one below — a
+    // brute-force / credential-stuffing bucket that bites well before the
+    // interactive-use budget does.
+    let auth_endpoints = Router::new()
         .merge(auth_routes::routes())
         .merge(oauth_routes::routes())
         .merge(webauthn_routes::routes())
+        .route_layer(rate_limit::auth_layer(&state.config.rate_limit));
+
+    let rate_limited = Router::new()
+        .merge(auth_endpoints)
         .merge(access_routes::routes())
         .merge(ssh_key_routes::routes())
         .merge(admin_routes::routes())

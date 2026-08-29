@@ -5,7 +5,7 @@ use edda_db::DbPool;
 use edda_git::store::RepoStore;
 use edda_git::LockRegistry;
 
-use crate::config::{GitLimits, RateLimitConfig};
+use crate::config::{GitLimits, RateLimitConfig, SessionConfig};
 
 /// Everything an `edda-app` handler needs, constructed once by the
 /// composition root (`edda-web`) and shared via axum's `State` extractor
@@ -48,4 +48,9 @@ pub struct RuntimeConfig {
     /// (`EDDA_GIT_MAX_PACK_BYTES` / `EDDA_LFS_MAX_OBJECT_BYTES`). `Default`
     /// is 2 GiB / 4 GiB — a real cap even in tests that don't tune it.
     pub git_limits: GitLimits,
+    /// Session lifetimes (S10). The request path reads
+    /// `session.absolute_ttl_secs` to expire a too-old session in the
+    /// actor-resolution path; the rolling TTL is applied at wiring time by
+    /// the composition root's `Expiry`.
+    pub session: SessionConfig,
 }

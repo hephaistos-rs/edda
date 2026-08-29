@@ -7,12 +7,15 @@
 
 pub mod authz;
 pub mod backend;
+pub mod deploy_keys;
+pub mod login_throttle;
 pub mod oauth;
 pub mod organization;
 pub mod password;
 pub mod password_reset;
 pub mod pending_login;
 pub mod secret_box;
+pub mod signing_keys;
 pub mod signup;
 pub mod ssh;
 pub mod tokens;

@@ -3,7 +3,7 @@ use edda_db::{DbPool, OrganizationRepo, UserRepo};
 use edda_domain::validation::is_valid_username;
 use edda_domain::{User, UserId};
 
-use crate::password::hash_password;
+use crate::password::hash_password_async;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SignupError {
@@ -71,7 +71,7 @@ pub async fn signup(
         return Err(SignupError::UsernameTaken);
     }
 
-    let password_hash = hash_password(password)?;
+    let password_hash = hash_password_async(password.to_string()).await?;
     let id = UserId::new();
     UserRepo::insert(pool, id, username, email, &password_hash).await?;
     Ok(User {

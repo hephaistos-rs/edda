@@ -30,6 +30,12 @@ base64 = { workspace = true }
 coset = { workspace = true }
 edda-db = { workspace = true }
 edda-domain = { workspace = true }
+# WebAuthn EdDSA (Ed25519) credential verification — the raw-message
+# `signature::Verifier` path, alongside `p256` for ES256. See the workspace
+# `Cargo.toml`'s comment for why this is the version `russh` already locks.
+ed25519-dalek = { workspace = true }
+# Per-purpose HS256 secret derivation (`signing_keys`) — see that module.
+hkdf = { workspace = true }
 # Outgoing webhook payload signing (`webhook_signing`) — see that module's
 # doc comment.
 hmac = { workspace = true }
@@ -46,6 +52,9 @@ p256 = { workspace = true }
 # dependency comment.
 passkey-types = { workspace = true }
 rand = { workspace = true, features = ["thread_rng"] }
+# WebAuthn RS256 credential verification (RSASSA-PKCS1-v1_5 + SHA-256).
+# Workspace-pinned to `russh`'s already-locked version — see that comment.
+rsa = { workspace = true }
 # Only for `russh::keys` (= the `ssh_key` crate's types, re-exported) —
 # public-key parsing and fingerprinting are an authentication-credential
 # concern, the same category `argon2`/`sha2` already cover here, not an
@@ -61,7 +70,13 @@ serde = { workspace = true, features = ["derive"] }
 # (de)serialization, `edda-db` just stores the resulting string.
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+# Constant-time equality for the WebAuthn challenge compare (`webauthn`).
+subtle = { workspace = true }
 thiserror = { workspace = true }
+# `spawn_blocking` for Argon2 hashing (`password`) — CPU-bound work must not
+# run on an async worker. `rt` only; the multi-thread runtime, macros, and
+# net features stay dev-only below.
+tokio = { workspace = true, features = ["rt"] }
 totp-rs = { workspace = true }
 tracing = { workspace = true }
 

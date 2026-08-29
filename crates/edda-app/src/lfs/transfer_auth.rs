@@ -5,20 +5,17 @@
 //! server needs no session/cookie state to verify it — the token *is* the
 //! authorization, scoped as narrowly as the one request it's for.
 //!
-//! The signing secret is generated once per process (`OnceLock`, filled
-//! with 32 random bytes at first use) rather than read from configuration
-//! or persisted: a token is only ever verified within the same short
-//! window it was issued in (`TRANSFER_TOKEN_TTL`), well inside one
-//! process's lifetime for the ordinary case (a batch response consumed by
-//! the immediately-following upload/download request) — a mid-transfer
-//! server restart invalidates any outstanding token, which just makes the
-//! client retry the batch call, not a correctness problem.
+//! The signing secret comes from `edda_auth::signing_keys` (HKDF over the
+//! primary `EDDA_SECRET_KEYS` entry with an LFS-transfer `info` label, or a
+//! per-process random fallback when no key is configured). A token is only
+//! ever verified within the short window it was issued in
+//! (`TRANSFER_TOKEN_TTL`) — in the fallback case a mid-transfer restart
+//! invalidates outstanding tokens, which just makes the client retry the
+//! batch call, not a correctness problem.
 
-use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
-use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
 const TRANSFER_TOKEN_TTL_SECONDS: u64 = 900;
@@ -38,13 +35,8 @@ struct Claims {
     exp: u64,
 }
 
-fn secret() -> &'static [u8; 32] {
-    static SECRET: OnceLock<[u8; 32]> = OnceLock::new();
-    SECRET.get_or_init(|| {
-        let mut bytes = [0u8; 32];
-        rand::rng().fill(&mut bytes);
-        bytes
-    })
+fn secret() -> [u8; 32] {
+    edda_auth::signing_keys::derive(edda_auth::signing_keys::LFS_TRANSFER)
 }
 
 fn now_unix() -> u64 {
@@ -66,7 +58,7 @@ pub fn issue(repo: &str, oid: &str, action: TransferAction) -> String {
     encode(
         &Header::new(Algorithm::HS256),
         &claims,
-        &EncodingKey::from_secret(secret()),
+        &EncodingKey::from_secret(&secret()),
     )
     .expect("HMAC signing over an in-memory struct never fails")
 }
@@ -77,7 +69,8 @@ pub fn issue(repo: &str, oid: &str, action: TransferAction) -> String {
 /// that it's *a* validly-signed token for *some* transfer.
 pub fn verify(token: &str, repo: &str, oid: &str, action: TransferAction) -> bool {
     let validation = Validation::new(Algorithm::HS256);
-    let Ok(data) = decode::<Claims>(token, &DecodingKey::from_secret(secret()), &validation) else {
+    let Ok(data) = decode::<Claims>(token, &DecodingKey::from_secret(&secret()), &validation)
+    else {
         return false;
     };
     data.claims.repo == repo && data.claims.oid == oid && data.claims.action == action

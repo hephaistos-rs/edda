@@ -1,4 +1,4 @@
-use edda_domain::{AccessToken, AccessTokenId, RepositoryScope, User, UserId};
+use edda_domain::{AccessToken, AccessTokenId, RepositoryScope, TokenScope, User, UserId};
 
 use crate::{get_bool, get_i64, get_opt_i64, get_string, Backend, DbConn, DbError};
 
@@ -11,9 +11,19 @@ fn scope_from_json(json: &str) -> RepositoryScope {
         .expect("stored access_tokens.repository_scope is valid JSON written by this crate")
 }
 
+fn token_scope_to_json(scope: TokenScope) -> String {
+    serde_json::to_string(&scope).expect("TokenScope always serializes")
+}
+
+fn token_scope_from_json(json: &str) -> TokenScope {
+    serde_json::from_str(json)
+        .expect("stored access_tokens.token_scope is valid JSON written by this crate")
+}
+
 pub struct AccessTokenRepo;
 
 impl AccessTokenRepo {
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert<'c>(
         db: impl DbConn<'c>,
         id: AccessTokenId,
@@ -21,18 +31,20 @@ impl AccessTokenRepo {
         name: &str,
         token_hash: &str,
         repository_scope: &RepositoryScope,
+        token_scope: TokenScope,
     ) -> Result<i64, DbError> {
         let mut h = crate::conn::open(db).await?;
         let id_text = id.to_string();
         let user_id_text = user_id.to_string();
         let scope_json = scope_to_json(repository_scope);
+        let token_scope_json = token_scope_to_json(token_scope);
         let created_at = crate::now_unix();
         let sql = match h.backend() {
             Backend::Postgres => {
-                "INSERT INTO access_tokens (id, user_id, name, token_hash, repository_scope, created_at) VALUES ($1, $2, $3, $4, $5, $6)"
+                "INSERT INTO access_tokens (id, user_id, name, token_hash, repository_scope, token_scope, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)"
             }
             Backend::Sqlite | Backend::MySql => {
-                "INSERT INTO access_tokens (id, user_id, name, token_hash, repository_scope, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+                "INSERT INTO access_tokens (id, user_id, name, token_hash, repository_scope, token_scope, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
             }
         };
         sqlx::query(sql)
@@ -41,6 +53,7 @@ impl AccessTokenRepo {
             .bind(name)
             .bind(token_hash)
             .bind(&scope_json)
+            .bind(&token_scope_json)
             .bind(created_at)
             .execute(&mut *h.conn())
             .await?;
@@ -55,10 +68,10 @@ impl AccessTokenRepo {
         let user_id_text = user_id.to_string();
         let sql = match h.backend() {
             Backend::Postgres => {
-                "SELECT id, name, repository_scope, created_at, last_used_at FROM access_tokens WHERE user_id = $1 ORDER BY created_at DESC"
+                "SELECT id, name, repository_scope, token_scope, created_at, last_used_at FROM access_tokens WHERE user_id = $1 ORDER BY created_at DESC"
             }
             Backend::Sqlite | Backend::MySql => {
-                "SELECT id, name, repository_scope, created_at, last_used_at FROM access_tokens WHERE user_id = ? ORDER BY created_at DESC"
+                "SELECT id, name, repository_scope, token_scope, created_at, last_used_at FROM access_tokens WHERE user_id = ? ORDER BY created_at DESC"
             }
         };
         let rows = sqlx::query(sql)
@@ -74,6 +87,7 @@ impl AccessTokenRepo {
                     user_id,
                     name: get_string(&row, "name")?,
                     repository_scope: scope_from_json(&get_string(&row, "repository_scope")?),
+                    token_scope: token_scope_from_json(&get_string(&row, "token_scope")?),
                     created_at: get_i64(&row, "created_at")?,
                     last_used_at: get_opt_i64(&row, "last_used_at")?,
                 })
@@ -107,22 +121,22 @@ impl AccessTokenRepo {
     }
 
     /// Resolves a raw token's hash to the user it belongs to and the
-    /// token's own scope. Also best-effort records `last_used_at` — a
-    /// failure to record that shouldn't fail the authentication it's just
-    /// accounting for.
+    /// token's own scopes (repository-set + operation). Also best-effort
+    /// records `last_used_at` — a failure to record that shouldn't fail the
+    /// authentication it's just accounting for.
     pub async fn find_by_hash<'c>(
         db: impl DbConn<'c>,
         token_hash: &str,
-    ) -> Result<Option<(User, RepositoryScope)>, DbError> {
+    ) -> Result<Option<(User, RepositoryScope, TokenScope)>, DbError> {
         let mut h = crate::conn::open(db).await?;
         let select_sql = match h.backend() {
             Backend::Postgres => {
-                r#"SELECT u.id as user_id, u.username, u.email, u.is_admin, u.disabled_at, t.repository_scope
+                r#"SELECT u.id as user_id, u.username, u.email, u.is_admin, u.disabled_at, t.repository_scope, t.token_scope
                    FROM access_tokens t JOIN users u ON u.id = t.user_id
                    WHERE t.token_hash = $1"#
             }
             Backend::Sqlite | Backend::MySql => {
-                r#"SELECT u.id as user_id, u.username, u.email, u.is_admin, u.disabled_at, t.repository_scope
+                r#"SELECT u.id as user_id, u.username, u.email, u.is_admin, u.disabled_at, t.repository_scope, t.token_scope
                    FROM access_tokens t JOIN users u ON u.id = t.user_id
                    WHERE t.token_hash = ?"#
             }
@@ -158,6 +172,7 @@ impl AccessTokenRepo {
         Ok(Some((
             user,
             scope_from_json(&get_string(&row, "repository_scope")?),
+            token_scope_from_json(&get_string(&row, "token_scope")?),
         )))
     }
 }

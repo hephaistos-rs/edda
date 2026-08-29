@@ -69,7 +69,10 @@ struct Harness {
 impl Harness {
     async fn new() -> Self {
         // Webhook creation encrypts its signing secret at rest.
-        edda_auth::secret_box::init(Some([0x11; 32]));
+        edda_auth::secret_box::init(
+            vec![("test".to_string(), [0x11; 32])],
+            Some("test".to_string()),
+        );
         let pool = edda_db::test_pool().await;
         let store_root = temp_dir();
         let store: Arc<dyn RepoStore> = Arc::new(LocalFsStore::new(store_root.clone()));
@@ -164,6 +167,26 @@ async fn the_repository_write_endpoints_round_trip() {
     edda_git::create_repo(h.store.as_ref(), &h.locks, "alice/proj")
         .await
         .ok();
+
+    // S11: the mutation wrote an audit row with a populated detail_json.
+    let audit = edda_db::AuditEventRepo::list_recent(&h.pool, 50)
+        .await
+        .unwrap();
+    let create_row = audit
+        .iter()
+        .find(|e| e.event_type == "repository.create")
+        .expect("a repository.create audit row");
+    assert_eq!(
+        create_row.actor_id.as_deref(),
+        Some(h.alice.to_string().as_str())
+    );
+    assert!(
+        create_row
+            .detail_json
+            .as_deref()
+            .is_some_and(|d| d.contains("alice/proj")),
+        "detail_json carries the repo identity"
+    );
 
     // update description
     assert_eq!(
@@ -604,6 +627,60 @@ async fn write_endpoints_reject_no_token_and_a_non_collaborator() {
             .post(format!("{}/api/v1/repos/alice/locked/issues", h.base))
             .bearer_auth(&bob_token)
             .json(&json!({ "title": "x" }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_scoped_pat_may_read_but_not_write() {
+    let h = Harness::new().await;
+    h.make_repo("scoped").await;
+
+    // `alice` owns the repo, but this token is `repo:read` only.
+    let (read_token, _) = tokens::create_scoped(
+        &h.pool,
+        h.alice,
+        "readonly",
+        edda_domain::TokenScope::RepoRead,
+    )
+    .await
+    .unwrap();
+
+    // A GET is fine.
+    assert_eq!(
+        h.client
+            .get(format!("{}/api/v1/repos/alice/scoped/issues", h.base))
+            .bearer_auth(&read_token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+
+    // A write is refused at the extractor (403), before any authz check.
+    assert_eq!(
+        h.client
+            .post(format!("{}/api/v1/repos/alice/scoped/issues", h.base))
+            .bearer_auth(&read_token)
+            .json(&json!({ "title": "nope" }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+
+    // The same owner's unscoped token still writes fine.
+    assert_eq!(
+        h.client
+            .post(format!("{}/api/v1/repos/alice/scoped/issues", h.base))
+            .bearer_auth(&h.token)
+            .json(&json!({ "title": "ok" }))
             .send()
             .await
             .unwrap()

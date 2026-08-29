@@ -14,8 +14,10 @@
 //! `/api/v1` axum handler; the Dioxus server functions call the same
 //! services until the UI is cut over to the HTTP surface.
 
+pub mod audit;
 pub mod branch_protection;
 pub mod collaborator;
+pub mod deploy_key;
 pub mod issue;
 pub mod mentions;
 pub mod notification;
@@ -28,6 +30,7 @@ pub mod webhook;
 
 pub use branch_protection::BranchProtectionService;
 pub use collaborator::CollaboratorService;
+pub use deploy_key::DeployKeyService;
 pub use issue::IssueService;
 pub use notification::NotificationService;
 pub use organization::OrganizationService;

@@ -5,6 +5,7 @@
 
 pub mod access;
 pub mod branch_protection;
+pub mod deploy_key;
 pub mod event;
 pub mod ids;
 pub mod issue;
@@ -28,15 +29,16 @@ pub use access::{
     can_administer_repository, can_manage_repository_danger_zone, can_merge_pull_request,
     can_open_cross_repo_pull_request, can_read_repository, can_write_repository,
     require_instance_admin, AccessSubject, ActorContext, AuthzError, RepoAccess, RepoRole,
-    RepositoryScope,
+    RepositoryScope, TokenScope,
 };
 pub use branch_protection::BranchProtectionRule;
+pub use deploy_key::DeployKey;
 pub use event::{DomainEvent, DomainEventKind, MentionSource};
 pub use ids::{
-    AccessTokenId, AuditEventId, BranchProtectionRuleId, EventId, IssueCommentId, IssueId, JobId,
-    LabelId, LfsLockId, MilestoneId, NotificationId, OAuthIdentityId, OrganizationId,
-    PasswordResetTokenId, PrCommentId, PrReviewId, PullRequestId, ReleaseAssetId, ReleaseId,
-    RepositoryId, SshKeyId, TeamId, TotpRecoveryCodeId, UserId, WebauthnCredentialId,
+    AccessTokenId, AuditEventId, BranchProtectionRuleId, DeployKeyId, EventId, IssueCommentId,
+    IssueId, JobId, LabelId, LfsLockId, MilestoneId, NotificationId, OAuthIdentityId,
+    OrganizationId, PasswordResetTokenId, PrCommentId, PrReviewId, PullRequestId, ReleaseAssetId,
+    ReleaseId, RepositoryId, SshKeyId, TeamId, TotpRecoveryCodeId, UserId, WebauthnCredentialId,
     WebhookDeliveryId, WebhookId,
 };
 pub use issue::{

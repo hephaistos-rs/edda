@@ -7,7 +7,7 @@ use edda_auth::AuthorizationService;
 use edda_db::{DbPool, WebhookRepo};
 use edda_domain::{ActorContext, Repository, WebhookEvent, WebhookId};
 
-use super::ServiceError;
+use super::{audit, ServiceError};
 use crate::security::ssrf;
 use crate::AppState;
 
@@ -83,6 +83,16 @@ impl WebhookService {
         )
         .await?;
 
+        if let Some(actor_id) = actor.user_id() {
+            audit::record(
+                &self.pool,
+                audit::AuditEntry::new("webhook.create", &actor_id.to_string())
+                    .target("repository", &repository.id.to_string())
+                    // The URL, never the secret.
+                    .detail(serde_json::json!({ "webhook_id": id.to_string(), "target_url": target_url })),
+            )
+            .await;
+        }
         Ok(CreatedWebhook {
             id,
             secret: raw_secret,
@@ -99,6 +109,15 @@ impl WebhookService {
         let repository = self.administer_checked(actor, owner, name).await?;
         if !WebhookRepo::delete(&self.pool, repository.id, webhook_id).await? {
             return Err(ServiceError::NotFound);
+        }
+        if let Some(actor_id) = actor.user_id() {
+            audit::record(
+                &self.pool,
+                audit::AuditEntry::new("webhook.delete", &actor_id.to_string())
+                    .target("repository", &repository.id.to_string())
+                    .detail(serde_json::json!({ "webhook_id": webhook_id.to_string() })),
+            )
+            .await;
         }
         Ok(())
     }

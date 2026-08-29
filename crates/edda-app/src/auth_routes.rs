@@ -18,22 +18,40 @@ use edda_auth::{Backend, Credentials as AuthCredentials};
 
 use crate::state::AppState;
 
-/// Best-effort audit logging — see `admin_routes::record`'s identical
-/// reasoning for why a logging failure must never fail the action it
-/// describes. `pub(crate)`: `webauthn_routes` completes a login exactly
-/// the same way `login`/`login_totp` here do, and shares this rather than
-/// duplicating it.
+/// Best-effort audit logging — now a thin shim over the one audit path
+/// (`crate::services::audit`, S11). `pub(crate)`: `webauthn_routes` /
+/// `oauth_routes` complete a login the same way `login`/`login_totp` here
+/// do, and share this rather than duplicating it.
 pub(crate) async fn record(pool: &edda_db::DbPool, event_type: &str, actor_id: &str) {
-    let _ = edda_db::AuditEventRepo::insert(
+    crate::services::audit::record(
         pool,
-        edda_domain::AuditEventId::new(),
-        event_type,
-        Some(actor_id),
-        None,
-        None,
-        None,
+        crate::services::audit::AuditEntry::new(event_type, actor_id),
     )
     .await;
+}
+
+/// The session key holding the unix time the current session was
+/// established — read in the actor-resolution path to enforce the absolute
+/// session TTL (S10).
+pub(crate) const SESSION_LOGIN_AT: &str = "login_at";
+
+/// Records "this session started now" — call right after every successful
+/// `auth.login(...)`.
+pub(crate) async fn stamp_session_login(auth: &AuthSession<Backend>) {
+    let _ = auth
+        .session
+        .insert(SESSION_LOGIN_AT, crate::services::now_unix())
+        .await;
+}
+
+/// Whether a session established at `login_at` has passed the absolute TTL
+/// (`EDDA_SESSION_ABSOLUTE_TTL_SECONDS`). A session with no stamp predates
+/// the feature and is treated as fresh, so a deploy doesn't kick everyone.
+pub(crate) fn session_login_expired(login_at: Option<i64>, absolute_ttl_secs: i64) -> bool {
+    match login_at {
+        Some(at) => crate::services::now_unix().saturating_sub(at) > absolute_ttl_secs,
+        None => false,
+    }
 }
 
 pub fn routes() -> Router<AppState> {
@@ -210,6 +228,7 @@ async fn signup(
     if let Err(err) = auth.login(&session_user).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
     }
+    crate::auth_routes::stamp_session_login(&auth).await;
 
     Json(CurrentUserDto::from(user)).into_response()
 }
@@ -225,10 +244,44 @@ enum LoginResponse {
 
 // `skip_all`: `creds` carries a raw password — never a span field.
 #[tracing::instrument(name = "authentication.login", skip_all)]
-async fn login(mut auth: AuthSession<Backend>, Json(creds): Json<LoginBody>) -> Response {
+async fn login(
+    State(state): State<AppState>,
+    mut auth: AuthSession<Backend>,
+    headers: HeaderMap,
+    Json(body): Json<LoginBody>,
+) -> Response {
+    let email = body.email.clone();
+    let client_ip = crate::rate_limit::client_ip(&headers)
+        .map(|ip| ip.to_string())
+        .unwrap_or_default();
+
+    // Brute-force throttle (S4): a locked (account, IP) or a locked
+    // account-wide counter refuses the attempt before the password is even
+    // checked.
+    match edda_auth::login_throttle::check(&state.pool, &email, &client_ip).await {
+        Ok(()) => {}
+        Err(edda_auth::login_throttle::ThrottleError::LockedOut {
+            retry_after_seconds,
+        }) => {
+            record(&state.pool, "auth.login.throttled", &email).await;
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(
+                    axum::http::header::RETRY_AFTER,
+                    retry_after_seconds.to_string(),
+                )],
+                "too many failed sign-in attempts — try again later",
+            )
+                .into_response();
+        }
+        Err(err) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+        }
+    }
+
     let creds = AuthCredentials {
-        email: creds.email,
-        password: creds.password,
+        email: body.email,
+        password: body.password,
     };
 
     // `Backend::authenticate` already refuses a disabled account here
@@ -238,14 +291,21 @@ async fn login(mut auth: AuthSession<Backend>, Json(creds): Json<LoginBody>) -> 
     let session_user = match auth.authenticate(creds).await {
         Ok(Some(session_user)) => session_user,
         Ok(None) => {
+            let _ =
+                edda_auth::login_throttle::record_failure(&state.pool, &email, &client_ip).await;
             return (
                 StatusCode::UNAUTHORIZED,
                 "that email or password isn't right",
             )
-                .into_response()
+                .into_response();
         }
         Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
     };
+
+    // The password was correct — clear the throttle now, even if a second
+    // factor is still pending (2FA guessing is bounded by TOTP's own
+    // window and the auth-endpoint rate limiter, not this counter).
+    let _ = edda_auth::login_throttle::record_success(&state.pool, &email, &client_ip).await;
 
     let user = session_user.user.clone();
 
@@ -285,6 +345,7 @@ async fn login(mut auth: AuthSession<Backend>, Json(creds): Json<LoginBody>) -> 
     if let Err(err) = auth.login(&session_user).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
     }
+    crate::auth_routes::stamp_session_login(&auth).await;
     record(pool, "auth.login.success", &user.id.to_string()).await;
 
     Json(LoginResponse::LoggedIn(CurrentUserDto::from(user))).into_response()
@@ -338,6 +399,7 @@ async fn login_totp(
     if let Err(err) = auth.login(&session_user).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
     }
+    crate::auth_routes::stamp_session_login(&auth).await;
     record(&state.pool, "auth.login.success", &user_id.to_string()).await;
     Json(CurrentUserDto::from(row.user)).into_response()
 }
@@ -360,6 +422,28 @@ async fn me(auth: AuthSession<Backend>) -> Response {
 #[derive(Deserialize)]
 struct CreateTokenBody {
     name: String,
+    /// `"read"` → a `repo:read` token (clone/fetch + GET `/api/v1`),
+    /// `"write"` → also push + mutating `/api/v1`. Omitted → a fully
+    /// unscoped token (every operation), the historical default.
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+fn parse_token_scope(raw: Option<&str>) -> Result<edda_domain::TokenScope, &'static str> {
+    match raw.map(str::trim).unwrap_or("") {
+        "" | "all" => Ok(edda_domain::TokenScope::All),
+        "read" => Ok(edda_domain::TokenScope::RepoRead),
+        "write" => Ok(edda_domain::TokenScope::RepoWrite),
+        _ => Err("scope must be one of: read, write, all"),
+    }
+}
+
+fn token_scope_label(scope: edda_domain::TokenScope) -> &'static str {
+    match scope {
+        edda_domain::TokenScope::All => "all",
+        edda_domain::TokenScope::RepoRead => "read",
+        edda_domain::TokenScope::RepoWrite => "write",
+    }
 }
 
 #[derive(Serialize)]
@@ -367,6 +451,7 @@ struct CreatedTokenDto {
     id: String,
     name: String,
     token: String,
+    scope: &'static str,
     created_at: i64,
 }
 
@@ -374,6 +459,7 @@ struct CreatedTokenDto {
 struct TokenInfoDto {
     id: String,
     name: String,
+    scope: &'static str,
     created_at: i64,
     last_used_at: Option<i64>,
 }
@@ -383,6 +469,7 @@ impl From<edda_domain::AccessToken> for TokenInfoDto {
         Self {
             id: token.id.to_string(),
             name: token.name,
+            scope: token_scope_label(token.token_scope),
             created_at: token.created_at,
             last_used_at: token.last_used_at,
         }
@@ -401,7 +488,13 @@ async fn create_token(
     let Some(session_user) = auth.user else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    match edda_auth::tokens::create(&state.pool, session_user.user.id, &body.name).await {
+    let scope = match parse_token_scope(body.scope.as_deref()) {
+        Ok(scope) => scope,
+        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    };
+    match edda_auth::tokens::create_scoped(&state.pool, session_user.user.id, &body.name, scope)
+        .await
+    {
         Ok((raw, token)) => {
             record(
                 &state.pool,
@@ -413,6 +506,7 @@ async fn create_token(
                 id: token.id.to_string(),
                 name: token.name,
                 token: raw,
+                scope: token_scope_label(token.token_scope),
                 created_at: token.created_at,
             })
             .into_response()

@@ -23,6 +23,7 @@ mod git_read;
 
 pub mod branch_protection;
 pub mod collaborators;
+pub mod deploy_keys;
 pub mod issues;
 pub mod notifications;
 pub mod orgs;
@@ -36,11 +37,12 @@ pub mod webhooks;
 use axum::extract::FromRequestParts;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
+use axum::response::{IntoResponse, Response};
 use axum::Router;
 use axum_login::AuthSession;
 
 use edda_auth::Backend;
-use edda_domain::{ActorContext, Repository, UserId};
+use edda_domain::{ActorContext, Repository, TokenScope, UserId};
 
 use crate::services::ServiceError;
 use crate::AppState;
@@ -63,10 +65,27 @@ impl Actor {
     pub fn require_user(&self) -> Result<UserId, ServiceError> {
         self.0.user_id().ok_or(ServiceError::Unauthorized)
     }
+
+    /// Asserts the actor's PAT operation scope permits `required`
+    /// (`RepoRead` on a GET, `RepoWrite` on a mutation). A session-cookie
+    /// user is not PAT-scoped and always passes; a token with a narrower
+    /// scope gets `Forbidden`. Anonymous is unaffected here — `require_user`
+    /// upstream already turns it into `Unauthorized`.
+    pub fn require_scope(&self, required: TokenScope) -> Result<(), ServiceError> {
+        if self.0.permits_token_scope(required) {
+            Ok(())
+        } else {
+            Err(ServiceError::Forbidden)
+        }
+    }
 }
 
 impl FromRequestParts<AppState> for Actor {
-    type Rejection = std::convert::Infallible;
+    // Rejects only one case: a scoped PAT used on a method it isn't
+    // allowed for (a `repo:read` token doing a write). Everything else —
+    // no credential, a bad token — resolves to `Anonymous` and is handled
+    // by the handler's own `require_user`.
+    type Rejection = Response;
 
     async fn from_request_parts(
         parts: &mut Parts,
@@ -78,8 +97,25 @@ impl FromRequestParts<AppState> for Actor {
         // that layer, or without a valid session, simply carries no user
         // here and falls through to the bearer check.
         if let Ok(auth) = AuthSession::<Backend>::from_request_parts(parts, state).await {
-            if let Some(session_user) = auth.user {
-                return Ok(Actor(ActorContext::User(session_user.user.id)));
+            if let Some(session_user) = &auth.user {
+                let user_id = session_user.user.id;
+                // Absolute session TTL (S10): a session established longer
+                // ago than `EDDA_SESSION_ABSOLUTE_TTL_SECONDS` is treated
+                // as signed-out regardless of recent activity.
+                let login_at = auth
+                    .session
+                    .get::<i64>(crate::auth_routes::SESSION_LOGIN_AT)
+                    .await
+                    .ok()
+                    .flatten();
+                if crate::auth_routes::session_login_expired(
+                    login_at,
+                    state.config.session.absolute_ttl_secs,
+                ) {
+                    let _ = auth.session.flush().await;
+                } else {
+                    return Ok(Actor(ActorContext::User(user_id)));
+                }
             }
         }
 
@@ -90,14 +126,30 @@ impl FromRequestParts<AppState> for Actor {
             .and_then(|value| value.strip_prefix("Bearer "));
         let context = match token {
             Some(token) => match edda_auth::tokens::authenticate(&state.pool, token).await {
-                Some((user, scope)) => ActorContext::Token {
+                Some((user, scope, token_scope)) => ActorContext::Token {
                     user_id: user.id,
                     scope,
+                    token_scope,
                 },
                 None => ActorContext::Anonymous,
             },
             None => ActorContext::Anonymous,
         };
+
+        // A read-only PAT may issue safe (GET/HEAD/OPTIONS) requests only;
+        // anything else needs `RepoWrite` (or `All`). One check here covers
+        // every `/api/v1` mutation route without threading a scope
+        // assertion through ~30 handlers. Per-resource authorization
+        // (`check_write` etc.) still runs in the service layer.
+        let required = if parts.method.is_safe() {
+            TokenScope::RepoRead
+        } else {
+            TokenScope::RepoWrite
+        };
+        if !context.permits_token_scope(required) {
+            return Err(ServiceError::Forbidden.into_response());
+        }
+
         Ok(Actor(context))
     }
 }
@@ -126,6 +178,7 @@ pub fn routes() -> Router<AppState> {
         .merge(webhooks::routes())
         .merge(branch_protection::routes())
         .merge(collaborators::routes())
+        .merge(deploy_keys::routes())
         .merge(orgs::routes())
         .merge(teams::routes())
         .merge(notifications::routes())

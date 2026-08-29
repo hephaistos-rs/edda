@@ -88,25 +88,80 @@ impl RepositoryScope {
     }
 }
 
+/// A personal access token's *operation* scope — orthogonal to
+/// [`RepositoryScope`] (which repositories) — narrowing which *kinds* of
+/// operation a token may perform. `All` is what every token issued before
+/// scopes existed carries, so this changes nothing about an existing
+/// token; `RepoRead`/`RepoWrite` let a token-creation UI issue a
+/// deliberately limited token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TokenScope {
+    All,
+    RepoRead,
+    RepoWrite,
+}
+
+impl TokenScope {
+    /// Whether a token with `self` may perform an operation that requires
+    /// `required` (`RepoRead` or `RepoWrite`). `RepoWrite` implies
+    /// `RepoRead`; `All` implies everything.
+    #[must_use]
+    pub fn permits(self, required: TokenScope) -> bool {
+        // A total order: All > RepoWrite > RepoRead.
+        fn rank(scope: TokenScope) -> u8 {
+            match scope {
+                TokenScope::RepoRead => 0,
+                TokenScope::RepoWrite => 1,
+                TokenScope::All => 2,
+            }
+        }
+        rank(self) >= rank(required)
+    }
+}
+
 /// Who is asking, resolved uniformly regardless of which credential kind
-/// they authenticated with (session cookie or bearer token) — see
-/// `edda-auth::authn` for how each resolves into one of these variants.
+/// they authenticated with (session cookie, bearer token, or a repo-scoped
+/// SSH deploy key) — see `edda-auth` for how each resolves into one of
+/// these variants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActorContext {
     Anonymous,
     User(UserId),
     Token {
         user_id: UserId,
+        /// Which repositories this token may act against.
         scope: RepositoryScope,
+        /// Which kinds of operation this token may perform.
+        token_scope: TokenScope,
+    },
+    /// An SSH deploy key: authenticates as one repository, not a user.
+    DeployKey {
+        repository_id: RepositoryId,
+        /// `true` → clone/fetch only; `false` → also push.
+        read_only: bool,
     },
 }
 
 impl ActorContext {
+    /// The acting user, or `None` for an anonymous request or a deploy key
+    /// (which has no user identity).
     pub fn user_id(&self) -> Option<UserId> {
         match self {
-            ActorContext::Anonymous => None,
+            ActorContext::Anonymous | ActorContext::DeployKey { .. } => None,
             ActorContext::User(id) => Some(*id),
             ActorContext::Token { user_id, .. } => Some(*user_id),
+        }
+    }
+
+    /// Whether this actor's PAT operation scope permits `required`. A
+    /// session `User` and a deploy key are not PAT-scoped, so they always
+    /// pass this axis — a deploy key's own read/write limit is enforced by
+    /// [`can_read_repository`] / [`can_write_repository`].
+    #[must_use]
+    pub fn permits_token_scope(&self, required: TokenScope) -> bool {
+        match self {
+            ActorContext::Token { token_scope, .. } => token_scope.permits(required),
+            _ => true,
         }
     }
 }
@@ -133,6 +188,15 @@ pub fn can_read_repository(
     repository: &Repository,
     access: Option<&RepoAccess>,
 ) -> Result<(), AuthzError> {
+    // A deploy key acts as exactly one repository: it may always read that
+    // one (public or private), and nothing else.
+    if let ActorContext::DeployKey { repository_id, .. } = actor {
+        return if *repository_id == repository.id {
+            Ok(())
+        } else {
+            Err(AuthzError::NotFound)
+        };
+    }
     if !repository.is_private() {
         return Ok(());
     }
@@ -278,6 +342,18 @@ fn require_role(
         }
     };
 
+    // A deploy key is asked for `Write` or higher here (reads never reach
+    // `require_role`). It may push to its own repository only when it is
+    // not read-only, and can never administer.
+    if let ActorContext::DeployKey {
+        repository_id,
+        read_only,
+    } = actor
+    {
+        let ok = *repository_id == repository.id && !*read_only && minimum <= RepoRole::Write;
+        return if ok { Ok(()) } else { Err(not_permitted()) };
+    }
+
     let Some(access) = access else {
         return Err(not_permitted());
     };
@@ -340,6 +416,56 @@ mod tests {
     }
 
     #[test]
+    fn a_deploy_key_acts_only_on_its_own_repository() {
+        let mine = repo(Visibility::Private);
+        let other = repo(Visibility::Private);
+        let rw = ActorContext::DeployKey {
+            repository_id: mine.id,
+            read_only: false,
+        };
+        let ro = ActorContext::DeployKey {
+            repository_id: mine.id,
+            read_only: true,
+        };
+
+        // Read + write on its own repo for a read-write key; read only for
+        // a read-only key.
+        assert!(can_read_repository(&rw, &mine, None).is_ok());
+        assert!(can_write_repository(&rw, &mine, None).is_ok());
+        assert!(can_read_repository(&ro, &mine, None).is_ok());
+        assert_eq!(
+            can_write_repository(&ro, &mine, None).unwrap_err(),
+            AuthzError::NotFound
+        );
+
+        // Nothing at all on any other repo, and never admin.
+        assert_eq!(
+            can_read_repository(&rw, &other, None).unwrap_err(),
+            AuthzError::NotFound
+        );
+        assert_eq!(
+            can_administer_repository(&rw, &mine, None).unwrap_err(),
+            AuthzError::NotFound
+        );
+        assert!(rw.user_id().is_none());
+    }
+
+    #[test]
+    fn a_read_scoped_token_may_not_perform_a_write_operation() {
+        let actor_read = ActorContext::Token {
+            user_id: UserId::new(),
+            scope: RepositoryScope::All,
+            token_scope: TokenScope::RepoRead,
+        };
+        assert!(actor_read.permits_token_scope(TokenScope::RepoRead));
+        assert!(!actor_read.permits_token_scope(TokenScope::RepoWrite));
+
+        // `All` and a plain session user pass every axis.
+        assert!(ActorContext::User(UserId::new()).permits_token_scope(TokenScope::RepoWrite));
+        assert!(TokenScope::All.permits(TokenScope::RepoWrite));
+    }
+
+    #[test]
     fn write_requires_at_least_write_role() {
         let private = repo(Visibility::Private);
         let user = UserId::new();
@@ -382,6 +508,7 @@ mod tests {
         let actor = ActorContext::Token {
             user_id: user,
             scope: RepositoryScope::PublicOnly,
+            token_scope: TokenScope::All,
         };
         assert_eq!(
             can_write_repository(&actor, &private, Some(&owner)).unwrap_err(),
@@ -545,6 +672,7 @@ mod tests {
         let actor = ActorContext::Token {
             user_id: user,
             scope: RepositoryScope::Specific(vec![repo_a.id]),
+            token_scope: TokenScope::All,
         };
 
         assert!(can_write_repository(&actor, &repo_a, Some(&grant_a)).is_ok());

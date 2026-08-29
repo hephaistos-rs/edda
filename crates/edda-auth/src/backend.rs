@@ -4,7 +4,7 @@ use serde::Deserialize;
 use edda_db::{DbPool, UserRepo};
 use edda_domain::User;
 
-use crate::password::verify_password;
+use crate::password::{verify_dummy_async, verify_password_async};
 
 /// The identity `axum_login` stores in a session — a domain `User` plus
 /// the one credential field the domain type deliberately excludes (see
@@ -76,6 +76,11 @@ impl AuthnBackend for Backend {
 
     async fn authenticate(&self, creds: Credentials) -> Result<Option<SessionUser>, AuthError> {
         let Some(row) = UserRepo::find_by_email(&self.pool, &creds.email).await? else {
+            // Spend an Argon2 verification anyway, so a request for an
+            // unknown email takes about as long as one for a known email
+            // with a wrong password — no account-enumeration timing oracle
+            // (L8).
+            verify_dummy_async().await;
             return Ok(None);
         };
         // A disabled account fails the same way a wrong password does —
@@ -83,9 +88,10 @@ impl AuthnBackend for Backend {
         // so a login attempt can't be used to probe whether an email is
         // registered-but-disabled.
         if crate::require_enabled(&row.user).is_err() {
+            verify_dummy_async().await;
             return Ok(None);
         }
-        if verify_password(&creds.password, &row.password_hash) {
+        if verify_password_async(creds.password, row.password_hash.clone()).await {
             Ok(Some(SessionUser {
                 user: row.user,
                 password_hash: row.password_hash,

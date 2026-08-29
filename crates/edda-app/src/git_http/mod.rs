@@ -106,7 +106,20 @@ pub(crate) async fn resolve_actor(
     headers: &HeaderMap,
 ) -> ActorContext {
     if let Some(session_user) = &auth.user {
-        return ActorContext::User(session_user.user.id);
+        // Absolute session TTL (S10), same check as the `/api/v1` `Actor`
+        // extractor. A too-old cookie session falls through to Basic auth.
+        let login_at = auth
+            .session
+            .get::<i64>(crate::auth_routes::SESSION_LOGIN_AT)
+            .await
+            .ok()
+            .flatten();
+        if !crate::auth_routes::session_login_expired(
+            login_at,
+            state.config.session.absolute_ttl_secs,
+        ) {
+            return ActorContext::User(session_user.user.id);
+        }
     }
 
     let Some(value) = headers
@@ -128,16 +141,22 @@ pub(crate) async fn resolve_actor(
         return ActorContext::Anonymous;
     };
 
-    if let Some((user, scope)) = edda_auth::tokens::authenticate(&state.pool, secret).await {
+    if let Some((user, scope, token_scope)) =
+        edda_auth::tokens::authenticate(&state.pool, secret).await
+    {
         return ActorContext::Token {
             user_id: user.id,
             scope,
+            token_scope,
         };
     }
-    if let Some((user, scope)) = edda_auth::tokens::authenticate(&state.pool, identity).await {
+    if let Some((user, scope, token_scope)) =
+        edda_auth::tokens::authenticate(&state.pool, identity).await
+    {
         return ActorContext::Token {
             user_id: user.id,
             scope,
+            token_scope,
         };
     }
 
@@ -187,6 +206,15 @@ pub(crate) async fn require_write_access(
     repository: &Repository,
 ) -> Result<(), Response> {
     let actor = resolve_actor(state, auth, headers).await;
+    // A `repo:read` PAT authenticates fine but may not push — reject before
+    // the role check, with the same 403 a non-collaborator identity gets.
+    if !actor.permits_token_scope(edda_domain::TokenScope::RepoWrite) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "this token's scope does not permit pushing",
+        )
+            .into_response());
+    }
     match state.authz.check_write(&actor, repository).await {
         Ok(()) => Ok(()),
         Err(AuthzError::NotFound) if matches!(actor, ActorContext::Anonymous) => {

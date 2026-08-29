@@ -185,32 +185,82 @@ impl Default for GitLimits {
 /// AES-256-GCM key material for at-rest secret encryption (TOTP shared
 /// secrets, webhook signing secrets). Optional: an instance that never
 /// enrolls 2FA or creates a webhook never needs it — but if
-/// `EDDA_SECRET_KEYS` *is* set, it must be valid.
+/// `EDDA_SECRET_KEYS` *is* set, every entry must be valid.
 ///
-/// Format today is a single 64-hex key (optionally `id:hex`, id ignored
-/// for now); Phase 8 turns the id into real key-rotation.
+/// `EDDA_SECRET_KEYS` is a comma-separated list of `id:hex` entries (or a
+/// single bare 64-hex key, which gets the id `default`). The **first**
+/// entry is the primary: new ciphertext is encrypted under it and stamped
+/// with its id. Every entry can decrypt, so rotation is: prepend a new
+/// primary, run `edda-cli secrets rotate`, drop the old entry.
 #[derive(Debug, Clone, Default)]
 pub struct SecretKeys {
-    primary: Option<[u8; 32]>,
+    /// `(id, key)` pairs in declared order; first = primary. Empty when
+    /// `EDDA_SECRET_KEYS` is unset.
+    entries: Vec<(String, [u8; 32])>,
 }
 
 impl SecretKeys {
-    /// The key to encrypt new secrets with, if configured.
-    pub fn primary(&self) -> Option<[u8; 32]> {
-        self.primary
+    /// Every configured `(id, key)` pair — handed to
+    /// `edda_auth::secret_box::init`.
+    pub fn all(&self) -> Vec<(String, [u8; 32])> {
+        self.entries.clone()
+    }
+
+    /// The id of the primary (first) key, if any.
+    pub fn primary_id(&self) -> Option<String> {
+        self.entries.first().map(|(id, _)| id.clone())
     }
 
     pub fn is_configured(&self) -> bool {
-        self.primary.is_some()
+        !self.entries.is_empty()
     }
 }
 
-/// WebAuthn relying-party identity. Both-or-neither: one without the other
-/// is a configuration error, since a mismatch fails every ceremony.
+/// Argon2id password-hashing cost parameters (`EDDA_ARGON2_*`). `Default`
+/// mirrors the `argon2` crate's own defaults (19 MiB / t=2 / p=1); raise
+/// them for a host with spare CPU/RAM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Argon2Config {
+    pub memory_kib: u32,
+    pub iterations: u32,
+    pub parallelism: u32,
+}
+
+impl Default for Argon2Config {
+    fn default() -> Self {
+        Self {
+            memory_kib: 19_456,
+            iterations: 2,
+            parallelism: 1,
+        }
+    }
+}
+
+impl Argon2Config {
+    pub fn into_auth(self) -> edda_auth::password::Params {
+        edda_auth::password::Params {
+            memory_kib: self.memory_kib,
+            iterations: self.iterations,
+            parallelism: self.parallelism,
+        }
+    }
+}
+
+/// WebAuthn relying-party identity plus two hardening toggles. `rp_id` /
+/// `origin` are both-or-neither: one without the other is a configuration
+/// error, since a mismatch fails every ceremony. `require_uv` /
+/// `allow_cross_origin` are independent booleans, both defaulting off.
 #[derive(Debug, Clone)]
 pub struct WebauthnConfig {
     pub rp_id: String,
     pub origin: String,
+    /// `EDDA_WEBAUTHN_REQUIRE_UV` — mandate the authenticator's
+    /// user-verified flag (PIN/biometric) on every ceremony. Default false.
+    pub require_uv: bool,
+    /// `EDDA_WEBAUTHN_ALLOW_CROSS_ORIGIN` — permit a passkey prompt driven
+    /// from a cross-origin `<iframe>` (`clientDataJSON.crossOrigin == true`).
+    /// Default false.
+    pub allow_cross_origin: bool,
 }
 
 impl WebauthnConfig {
@@ -218,6 +268,8 @@ impl WebauthnConfig {
         edda_auth::webauthn::Config {
             rp_id: self.rp_id,
             origin: self.origin,
+            require_uv: self.require_uv,
+            allow_cross_origin: self.allow_cross_origin,
         }
     }
 }
@@ -250,12 +302,46 @@ pub struct SmtpConfig {
     pub from: String,
 }
 
+/// Session lifetime (S10). `rolling` is the inactivity window fed to
+/// `tower_sessions`' `Expiry::OnInactivity`; `absolute` is a hard ceiling
+/// checked in the actor-resolution path (a session older than this is
+/// treated as signed-out regardless of activity).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionConfig {
+    /// `EDDA_SESSION_ROLLING_TTL_SECONDS` (default 14 days).
+    pub rolling_ttl_secs: i64,
+    /// `EDDA_SESSION_ABSOLUTE_TTL_SECONDS` (default 90 days).
+    pub absolute_ttl_secs: i64,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            rolling_ttl_secs: 14 * 24 * 60 * 60,
+            absolute_ttl_secs: 90 * 24 * 60 * 60,
+        }
+    }
+}
+
 /// Per-client token-bucket limits for the API surface (never the git or
-/// LFS routes). Defaults are generous enough for interactive use.
-#[derive(Debug, Clone, Copy)]
+/// LFS routes). Two buckets: a general one, and a stricter one applied to
+/// just the auth endpoints (`/api/auth/*`, OAuth/WebAuthn begin+verify).
+/// Defaults are generous enough for interactive use.
+#[derive(Debug, Clone)]
 pub struct RateLimitConfig {
     pub per_second: u64,
     pub burst: u32,
+    /// Stricter bucket for the auth endpoints (`EDDA_AUTH_RATE_LIMIT_*`).
+    pub auth_per_second: u64,
+    pub auth_burst: u32,
+    /// `EDDA_TRUSTED_PROXIES` — CIDRs of reverse proxies whose
+    /// `X-Forwarded-For` / `Forwarded` header may be trusted for the
+    /// limiter key. Empty (the default) means forwarded headers are
+    /// ignored entirely and every direct client shares one bucket. Peer-IP
+    /// matching against these CIDRs needs `ConnectInfo` (Phase 13); for
+    /// now a non-empty list is simply the signal to honour the leftmost
+    /// forwarded hop.
+    pub trusted_proxies: Vec<ipnet::IpNet>,
 }
 
 impl Default for RateLimitConfig {
@@ -263,6 +349,9 @@ impl Default for RateLimitConfig {
         Self {
             per_second: 5,
             burst: 20,
+            auth_per_second: 1,
+            auth_burst: 5,
+            trusted_proxies: Vec::new(),
         }
     }
 }
@@ -279,6 +368,8 @@ pub struct Settings {
     pub db: DbConfig,
     pub git: GitConfig,
     pub secret_keys: SecretKeys,
+    pub argon2: Argon2Config,
+    pub session: SessionConfig,
     pub webauthn: Option<WebauthnConfig>,
     pub oidc: Option<OidcConfig>,
     pub smtp: Option<SmtpConfig>,
@@ -352,18 +443,33 @@ impl Settings {
         }
 
         let secret_keys = parse_secret_keys(&mut env);
+        let argon2 = parse_argon2(&mut env);
+        let session = parse_session(&mut env);
         let webauthn = parse_webauthn(&mut env);
         let oidc = parse_oidc(&mut env);
         let smtp = parse_smtp(&mut env);
 
-        let per_second = env.parse_or::<u64>("EDDA_RATE_LIMIT_PER_SECOND", 5);
+        let rl_default = RateLimitConfig::default();
+        let per_second = env.parse_or::<u64>("EDDA_RATE_LIMIT_PER_SECOND", rl_default.per_second);
         if per_second == 0 {
             env.fail("EDDA_RATE_LIMIT_PER_SECOND", "must be greater than 0");
         }
-        let burst = env.parse_or::<u32>("EDDA_RATE_LIMIT_BURST", 20);
+        let burst = env.parse_or::<u32>("EDDA_RATE_LIMIT_BURST", rl_default.burst);
         if burst == 0 {
             env.fail("EDDA_RATE_LIMIT_BURST", "must be greater than 0");
         }
+        let auth_per_second = env.parse_or::<u64>(
+            "EDDA_AUTH_RATE_LIMIT_PER_SECOND",
+            rl_default.auth_per_second,
+        );
+        if auth_per_second == 0 {
+            env.fail("EDDA_AUTH_RATE_LIMIT_PER_SECOND", "must be greater than 0");
+        }
+        let auth_burst = env.parse_or::<u32>("EDDA_AUTH_RATE_LIMIT_BURST", rl_default.auth_burst);
+        if auth_burst == 0 {
+            env.fail("EDDA_AUTH_RATE_LIMIT_BURST", "must be greater than 0");
+        }
+        let trusted_proxies = parse_trusted_proxies(&mut env);
 
         let default_git_limits = GitLimits::default();
         let max_pack_bytes =
@@ -406,12 +512,17 @@ impl Settings {
                 },
             },
             secret_keys,
+            argon2,
+            session,
             webauthn,
             oidc,
             smtp,
             rate_limit: RateLimitConfig {
                 per_second: per_second.max(1),
                 burst: burst.max(1),
+                auth_per_second: auth_per_second.max(1),
+                auth_burst: auth_burst.max(1),
+                trusted_proxies,
             },
             data_dir,
         })
@@ -422,29 +533,138 @@ fn parse_secret_keys(env: &mut Env) -> SecretKeys {
     let Some(raw) = env.get("EDDA_SECRET_KEYS") else {
         return SecretKeys::default();
     };
-    // Forward-compatible with the Phase-8 `id:hex,id:hex` format: take the
-    // first entry, and the part after a `:` if present.
-    let first = raw.split(',').next().unwrap_or(&raw).trim();
-    let hex = first.rsplit(':').next().unwrap_or(first);
-    match decode_hex_32(hex) {
-        Some(key) => SecretKeys { primary: Some(key) },
-        None => {
+    let items: Vec<&str> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut entries: Vec<(String, [u8; 32])> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for item in &items {
+        let (id, hex) = match item.split_once(':') {
+            Some((id, hex)) => (id.trim().to_string(), hex.trim()),
+            // A bare (id-less) 64-hex key is only accepted as the *sole*
+            // entry — once there's more than one, ids are mandatory so
+            // `decrypt` can tell them apart.
+            None if items.len() == 1 => ("default".to_string(), item.trim()),
+            None => {
+                env.fail(
+                    "EDDA_SECRET_KEYS",
+                    "every entry must be `id:hex` when more than one key is listed",
+                );
+                continue;
+            }
+        };
+        if id.is_empty() || id.len() > 32 {
             env.fail(
                 "EDDA_SECRET_KEYS",
-                "must be a 64-character hex-encoded 32-byte key (optionally `id:hex`)",
+                format!("key id {id:?} must be 1-32 characters"),
             );
-            SecretKeys::default()
+            continue;
         }
+        if !seen.insert(id.clone()) {
+            env.fail("EDDA_SECRET_KEYS", format!("duplicate key id {id:?}"));
+            continue;
+        }
+        match decode_hex_32(hex) {
+            Some(key) => entries.push((id, key)),
+            None => env.fail(
+                "EDDA_SECRET_KEYS",
+                format!("key {id:?} must be a 64-character hex-encoded 32-byte value"),
+            ),
+        }
+    }
+    SecretKeys { entries }
+}
+
+fn parse_trusted_proxies(env: &mut Env) -> Vec<ipnet::IpNet> {
+    let Some(raw) = env.get("EDDA_TRUSTED_PROXIES") else {
+        return Vec::new();
+    };
+    let mut nets = Vec::new();
+    for entry in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        // Accept a bare IP (treated as a /32 or /128) as well as a CIDR.
+        let parsed = entry
+            .parse::<ipnet::IpNet>()
+            .or_else(|_| entry.parse::<std::net::IpAddr>().map(ipnet::IpNet::from));
+        match parsed {
+            Ok(net) => nets.push(net),
+            Err(_) => env.fail(
+                "EDDA_TRUSTED_PROXIES",
+                format!("{entry:?} is not a valid IP address or CIDR"),
+            ),
+        }
+    }
+    nets
+}
+
+fn parse_session(env: &mut Env) -> SessionConfig {
+    let d = SessionConfig::default();
+    let rolling = env.parse_or::<i64>("EDDA_SESSION_ROLLING_TTL_SECONDS", d.rolling_ttl_secs);
+    let absolute = env.parse_or::<i64>("EDDA_SESSION_ABSOLUTE_TTL_SECONDS", d.absolute_ttl_secs);
+    if rolling <= 0 {
+        env.fail("EDDA_SESSION_ROLLING_TTL_SECONDS", "must be greater than 0");
+    }
+    if absolute <= 0 {
+        env.fail(
+            "EDDA_SESSION_ABSOLUTE_TTL_SECONDS",
+            "must be greater than 0",
+        );
+    }
+    if rolling > 0 && absolute > 0 && absolute < rolling {
+        env.fail(
+            "EDDA_SESSION_ABSOLUTE_TTL_SECONDS",
+            "must be at least EDDA_SESSION_ROLLING_TTL_SECONDS",
+        );
+    }
+    SessionConfig {
+        rolling_ttl_secs: rolling,
+        absolute_ttl_secs: absolute,
+    }
+}
+
+fn parse_argon2(env: &mut Env) -> Argon2Config {
+    let d = Argon2Config::default();
+    let memory_kib = env.parse_or::<u32>("EDDA_ARGON2_MEMORY_KIB", d.memory_kib);
+    let iterations = env.parse_or::<u32>("EDDA_ARGON2_ITERATIONS", d.iterations);
+    let parallelism = env.parse_or::<u32>("EDDA_ARGON2_PARALLELISM", d.parallelism);
+    if iterations == 0 {
+        env.fail("EDDA_ARGON2_ITERATIONS", "must be greater than 0");
+    }
+    if parallelism == 0 {
+        env.fail("EDDA_ARGON2_PARALLELISM", "must be greater than 0");
+    }
+    // The argon2 spec requires m_cost >= 8 * p_cost.
+    if parallelism > 0 && memory_kib < 8 * parallelism {
+        env.fail(
+            "EDDA_ARGON2_MEMORY_KIB",
+            format!(
+                "must be at least 8 * EDDA_ARGON2_PARALLELISM ({})",
+                8 * parallelism
+            ),
+        );
+    }
+    Argon2Config {
+        memory_kib,
+        iterations,
+        parallelism,
     }
 }
 
 fn parse_webauthn(env: &mut Env) -> Option<WebauthnConfig> {
+    let require_uv = env.parse_or("EDDA_WEBAUTHN_REQUIRE_UV", false);
+    let allow_cross_origin = env.parse_or("EDDA_WEBAUTHN_ALLOW_CROSS_ORIGIN", false);
     match (
         env.get("EDDA_WEBAUTHN_RP_ID"),
         env.get("EDDA_WEBAUTHN_ORIGIN"),
     ) {
         (None, None) => None,
-        (Some(rp_id), Some(origin)) => Some(WebauthnConfig { rp_id, origin }),
+        (Some(rp_id), Some(origin)) => Some(WebauthnConfig {
+            rp_id,
+            origin,
+            require_uv,
+            allow_cross_origin,
+        }),
         (rp_id, _origin) => {
             let missing = if rp_id.is_none() {
                 "EDDA_WEBAUTHN_RP_ID"
@@ -599,6 +819,8 @@ mod tests {
         "EDDA_SECRET_KEYS",
         "EDDA_WEBAUTHN_RP_ID",
         "EDDA_WEBAUTHN_ORIGIN",
+        "EDDA_WEBAUTHN_REQUIRE_UV",
+        "EDDA_WEBAUTHN_ALLOW_CROSS_ORIGIN",
         "EDDA_OAUTH_ISSUER_URL",
         "EDDA_OAUTH_CLIENT_ID",
         "EDDA_OAUTH_CLIENT_SECRET",
@@ -607,6 +829,14 @@ mod tests {
         "EDDA_SMTP_FROM",
         "EDDA_RATE_LIMIT_PER_SECOND",
         "EDDA_RATE_LIMIT_BURST",
+        "EDDA_AUTH_RATE_LIMIT_PER_SECOND",
+        "EDDA_AUTH_RATE_LIMIT_BURST",
+        "EDDA_TRUSTED_PROXIES",
+        "EDDA_ARGON2_MEMORY_KIB",
+        "EDDA_ARGON2_ITERATIONS",
+        "EDDA_ARGON2_PARALLELISM",
+        "EDDA_SESSION_ROLLING_TTL_SECONDS",
+        "EDDA_SESSION_ABSOLUTE_TTL_SECONDS",
         "EDDA_GIT_MAX_PACK_BYTES",
         "EDDA_LFS_MAX_OBJECT_BYTES",
     ];
@@ -693,13 +923,64 @@ mod tests {
     }
 
     #[test]
-    fn a_versioned_secret_key_entry_takes_the_hex_after_the_colon() {
+    fn a_multi_key_secret_key_list_parses_in_order_first_is_primary() {
         let mut scope = EnvScope::new();
-        scope.set(
-            "EDDA_SECRET_KEYS",
-            "v2:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef,v1:dead",
-        );
+        let k1 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let k2 = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+        assert_eq!(k1.len(), 64);
+        scope.set("EDDA_SECRET_KEYS", &format!("v2:{k1}, v1:{k2}"));
         let s = Settings::from_env().expect("valid");
         assert!(s.secret_keys.is_configured());
+        let all = s.secret_keys.all();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].0, "v2");
+        assert_eq!(all[1].0, "v1");
+        assert_eq!(s.secret_keys.primary_id().as_deref(), Some("v2"));
+    }
+
+    #[test]
+    fn a_malformed_or_duplicate_secret_key_entry_is_a_startup_error() {
+        let mut scope = EnvScope::new();
+        let k = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        // second entry is short, and a bare key alongside a named one.
+        scope.set("EDDA_SECRET_KEYS", &format!("v2:{k},v1:dead"));
+        let errs = Settings::from_env().expect_err("v1:dead is not 64 hex");
+        assert!(errs.0.iter().any(|e| e.var == "EDDA_SECRET_KEYS"));
+
+        scope.set("EDDA_SECRET_KEYS", &format!("v1:{k},v1:{k}"));
+        let errs = Settings::from_env().expect_err("duplicate id");
+        assert!(errs
+            .0
+            .iter()
+            .any(|e| e.var == "EDDA_SECRET_KEYS" && e.problem.contains("duplicate")));
+    }
+
+    #[test]
+    fn argon2_and_auth_rate_limit_knobs_parse_and_reject_bad_values() {
+        let mut scope = EnvScope::new();
+        scope.set("EDDA_ARGON2_MEMORY_KIB", "65536");
+        scope.set("EDDA_ARGON2_ITERATIONS", "3");
+        scope.set("EDDA_ARGON2_PARALLELISM", "2");
+        scope.set("EDDA_AUTH_RATE_LIMIT_PER_SECOND", "2");
+        scope.set("EDDA_AUTH_RATE_LIMIT_BURST", "8");
+        scope.set("EDDA_TRUSTED_PROXIES", "10.0.0.0/8, 192.168.1.1");
+        let s = Settings::from_env().expect("valid");
+        assert_eq!(s.argon2.memory_kib, 65536);
+        assert_eq!(s.argon2.parallelism, 2);
+        assert_eq!(s.rate_limit.auth_per_second, 2);
+        assert_eq!(s.rate_limit.trusted_proxies.len(), 2);
+
+        // memory below 8*parallelism is rejected.
+        scope.set("EDDA_ARGON2_MEMORY_KIB", "8");
+        let errs = Settings::from_env().expect_err("m_cost < 8*p_cost");
+        assert!(errs.0.iter().any(|e| e.var == "EDDA_ARGON2_MEMORY_KIB"));
+    }
+
+    #[test]
+    fn a_bad_trusted_proxy_cidr_is_rejected() {
+        let mut scope = EnvScope::new();
+        scope.set("EDDA_TRUSTED_PROXIES", "not-an-ip");
+        let errs = Settings::from_env().expect_err("bad cidr");
+        assert!(errs.0.iter().any(|e| e.var == "EDDA_TRUSTED_PROXIES"));
     }
 }

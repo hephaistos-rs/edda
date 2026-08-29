@@ -19,14 +19,22 @@
 //! both debug and release builds, so `ConnectInfo` is never available
 //! here, in production or in this crate's own integration tests (which
 //! bind a real `TcpListener` and call `axum::serve` the same plain way).
-//! `EddaKeyExtractor` below reads `X-Forwarded-For`/`X-Real-IP` instead —
-//! correct for the common "self-hosted, reverse-proxied" deployment shape
-//! (the proxy sets one of these) — and falls back to a single shared
-//! bucket for direct, unproxied traffic rather than failing every request
-//! outright, so the no-mandatory-external-services standalone deployment
-//! path (`AGENTS.md`'s dependency principle) still starts and serves
-//! traffic normally; it's simply coarser (every unidentified client
-//! shares one budget) until a reverse proxy is added in front.
+//! `EddaKeyExtractor` below reads `Forwarded` (RFC 7239) / `X-Forwarded-For`
+//! / `X-Real-IP` instead — correct for the common "self-hosted,
+//! reverse-proxied" deployment shape (the proxy sets one of these) — and
+//! falls back to a single shared bucket for direct, unproxied traffic
+//! rather than failing every request outright, so the
+//! no-mandatory-external-services standalone deployment path (`AGENTS.md`'s
+//! dependency principle) still starts and serves traffic normally.
+//!
+//! **Forwarded headers are trusted only when `EDDA_TRUSTED_PROXIES` is
+//! non-empty** (S4). Without it, every direct client shares one bucket
+//! regardless of what `X-Forwarded-For` it sends — a spoofed header can no
+//! longer hand an attacker a private per-key budget. Actually matching the
+//! *peer* IP against the configured CIDRs needs `ConnectInfo`, which this
+//! serve loop doesn't provide until Phase 13; until then a non-empty list
+//! is simply the operator's assertion that "there is a trusted proxy in
+//! front, honour its forwarded hop."
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
@@ -44,13 +52,22 @@ use tower_governor::GovernorLayer;
 const ANONYMOUS_BUCKET: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 
 #[derive(Debug, Clone, Copy)]
-pub struct EddaKeyExtractor;
+pub struct EddaKeyExtractor {
+    /// Whether `EDDA_TRUSTED_PROXIES` is configured — the gate on reading
+    /// any client-supplied forwarding header.
+    trust_forwarded: bool,
+}
 
 impl KeyExtractor for EddaKeyExtractor {
     type Key = IpAddr;
 
     fn extract<B>(&self, req: &Request<B>) -> Result<Self::Key, GovernorError> {
-        Ok(client_ip(req.headers()).unwrap_or(ANONYMOUS_BUCKET))
+        let ip = if self.trust_forwarded {
+            client_ip(req.headers())
+        } else {
+            None
+        };
+        Ok(ip.unwrap_or(ANONYMOUS_BUCKET))
     }
 
     fn key_name(&self, key: &Self::Key) -> Option<String> {
@@ -62,16 +79,19 @@ impl KeyExtractor for EddaKeyExtractor {
     }
 }
 
-/// `X-Forwarded-For` (its first, left-most hop — the original client, per
-/// the header's own de-facto convention) then `X-Real-IP`, matching the
-/// two proxy headers `tower_governor::key_extractor::SmartIpKeyExtractor`
-/// itself checks first, before its `Forwarded`/`ConnectInfo` fallbacks
-/// (neither reachable from this deployment — see this module's doc
-/// comment). Either header is attacker-controlled unless a trusted
-/// reverse proxy overwrites it before forwarding the request — the same
-/// trust assumption every rate limiter keyed on these headers makes, not
-/// specific to this implementation.
-fn client_ip(headers: &HeaderMap) -> Option<IpAddr> {
+/// The client IP from a forwarding header, checked in the order a
+/// standards-aware proxy sets them: `Forwarded` (RFC 7239) `for=` of the
+/// first hop, then `X-Forwarded-For`'s left-most hop, then `X-Real-IP`.
+/// Only consulted when `EDDA_TRUSTED_PROXIES` is set (see the module doc) —
+/// otherwise these are attacker-controlled.
+pub(crate) fn client_ip(headers: &HeaderMap) -> Option<IpAddr> {
+    if let Some(ip) = headers
+        .get("forwarded")
+        .and_then(|value| value.to_str().ok())
+        .and_then(first_forwarded_for)
+    {
+        return Some(ip);
+    }
     if let Some(ip) = headers
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok())
@@ -84,6 +104,37 @@ fn client_ip(headers: &HeaderMap) -> Option<IpAddr> {
         .get("x-real-ip")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.trim().parse().ok())
+}
+
+/// The `for=` identifier of the first hop in an RFC 7239 `Forwarded`
+/// header, as an `IpAddr`. Handles the quoted `for="[2001:db8::1]:41237"`
+/// and bare `for=192.0.2.60` forms; `for=unknown` / `for=_obfuscated`
+/// yield `None`.
+fn first_forwarded_for(value: &str) -> Option<IpAddr> {
+    let first_hop = value.split(',').next()?;
+    for pair in first_hop.split(';') {
+        let (key, val) = pair.split_once('=')?;
+        if !key.trim().eq_ignore_ascii_case("for") {
+            continue;
+        }
+        let val = val.trim().trim_matches('"');
+        let host = if let Some(rest) = val.strip_prefix('[') {
+            // `[2001:db8::1]:41237` — everything between the brackets.
+            rest.split_once(']').map_or(rest, |(inner, _)| inner)
+        } else if let Some((h, port)) = val.rsplit_once(':') {
+            // `192.0.2.60:8080` — a single colon means host:port for IPv4;
+            // a bare IPv6 literal has several colons and no port here.
+            if !h.contains(':') && port.chars().all(|c| c.is_ascii_digit()) {
+                h
+            } else {
+                val
+            }
+        } else {
+            val
+        };
+        return host.parse().ok();
+    }
+    None
 }
 
 pub type EddaGovernorLayer =
@@ -103,10 +154,32 @@ pub type EddaGovernorLayer =
 /// -call boundary, unlike `edda_jobs::spawn_poller` which already lives
 /// there) that would be needed to close it.
 pub fn layer(settings: &crate::config::RateLimitConfig) -> EddaGovernorLayer {
+    build(
+        settings.per_second,
+        settings.burst,
+        !settings.trusted_proxies.is_empty(),
+    )
+}
+
+/// A **stricter** limiter for the auth endpoints (`/api/auth/*`, OAuth /
+/// WebAuthn begin+verify) — `EDDA_AUTH_RATE_LIMIT_*`, which default well
+/// below the general bucket. Applied via its own `route_layer` on an
+/// auth-only sub-router in [`crate::router`], so an auth request is charged
+/// against both this and the general bucket and the tighter one bites
+/// first.
+pub fn auth_layer(settings: &crate::config::RateLimitConfig) -> EddaGovernorLayer {
+    build(
+        settings.auth_per_second,
+        settings.auth_burst,
+        !settings.trusted_proxies.is_empty(),
+    )
+}
+
+fn build(per_second: u64, burst: u32, trust_forwarded: bool) -> EddaGovernorLayer {
     let config = GovernorConfigBuilder::default()
-        .per_second(settings.per_second)
-        .burst_size(settings.burst)
-        .key_extractor(EddaKeyExtractor)
+        .per_second(per_second)
+        .burst_size(burst)
+        .key_extractor(EddaKeyExtractor { trust_forwarded })
         .finish()
         .expect("a RateLimitConfig validated by edda_app::config produces a valid governor config");
 
@@ -157,8 +230,53 @@ mod tests {
     }
 
     #[test]
+    fn parses_the_first_for_of_an_rfc7239_forwarded_header() {
+        let headers = headers_with(
+            "forwarded",
+            "for=192.0.2.60;proto=http;by=203.0.113.43, for=198.51.100.17",
+        );
+        assert_eq!(client_ip(&headers), Some("192.0.2.60".parse().unwrap()));
+    }
+
+    #[test]
+    fn parses_a_quoted_bracketed_ipv6_forwarded_for_with_a_port() {
+        let headers = headers_with("forwarded", r#"For="[2001:db8:cafe::17]:4711""#);
+        assert_eq!(
+            client_ip(&headers),
+            Some("2001:db8:cafe::17".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn an_obfuscated_forwarded_identifier_yields_no_ip() {
+        let headers = headers_with("forwarded", "for=_hidden;proto=https");
+        assert_eq!(client_ip(&headers), None);
+    }
+
+    #[test]
     fn the_key_extractor_never_errors_even_with_no_identifying_header() {
         let req = Request::builder().body(()).unwrap();
-        assert_eq!(EddaKeyExtractor.extract(&req).unwrap(), ANONYMOUS_BUCKET);
+        let extractor = EddaKeyExtractor {
+            trust_forwarded: true,
+        };
+        assert_eq!(extractor.extract(&req).unwrap(), ANONYMOUS_BUCKET);
+    }
+
+    #[test]
+    fn an_untrusting_extractor_ignores_a_spoofable_forwarded_header() {
+        let mut req = Request::builder().body(()).unwrap();
+        req.headers_mut()
+            .insert("x-forwarded-for", HeaderValue::from_static("203.0.113.7"));
+        let untrusting = EddaKeyExtractor {
+            trust_forwarded: false,
+        };
+        assert_eq!(untrusting.extract(&req).unwrap(), ANONYMOUS_BUCKET);
+        let trusting = EddaKeyExtractor {
+            trust_forwarded: true,
+        };
+        assert_eq!(
+            trusting.extract(&req).unwrap(),
+            "203.0.113.7".parse::<IpAddr>().unwrap()
+        );
     }
 }

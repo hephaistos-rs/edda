@@ -10,16 +10,14 @@
 //! a valid code plus this token.
 //!
 //! Same shape as `edda_app::lfs::transfer_auth`'s transfer tokens: HS256,
-//! a process-local `OnceLock`-cached secret, a short `exp`. A process
-//! restart between the two login requests just makes the client retry
-//! from the password step — not a correctness problem, since the whole
-//! exchange is expected to complete within seconds.
+//! a short `exp`. The signing secret comes from `crate::signing_keys`
+//! (HKDF over the primary `EDDA_SECRET_KEYS` entry, or a process-random
+//! fallback when none is set), so with a key configured a restart no
+//! longer drops an in-flight second-factor step.
 
-use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
-use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
 const PENDING_LOGIN_TTL_SECONDS: u64 = 300;
@@ -30,13 +28,8 @@ struct Claims {
     exp: u64,
 }
 
-fn secret() -> &'static [u8; 32] {
-    static SECRET: OnceLock<[u8; 32]> = OnceLock::new();
-    SECRET.get_or_init(|| {
-        let mut bytes = [0u8; 32];
-        rand::rng().fill(&mut bytes);
-        bytes
-    })
+fn secret() -> [u8; 32] {
+    crate::signing_keys::derive(crate::signing_keys::PENDING_LOGIN)
 }
 
 fn now_unix() -> u64 {
@@ -56,7 +49,7 @@ pub fn issue(user_id: &str) -> String {
     encode(
         &Header::new(Algorithm::HS256),
         &claims,
-        &EncodingKey::from_secret(secret()),
+        &EncodingKey::from_secret(&secret()),
     )
     .expect("HMAC signing over an in-memory struct never fails")
 }
@@ -65,7 +58,7 @@ pub fn issue(user_id: &str) -> String {
 /// still validly signed and unexpired.
 pub fn verify(token: &str) -> Option<String> {
     let validation = Validation::new(Algorithm::HS256);
-    decode::<Claims>(token, &DecodingKey::from_secret(secret()), &validation)
+    decode::<Claims>(token, &DecodingKey::from_secret(&secret()), &validation)
         .ok()
         .map(|data| data.claims.user_id)
 }

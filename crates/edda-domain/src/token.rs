@@ -1,4 +1,4 @@
-use crate::access::RepositoryScope;
+use crate::access::{RepositoryScope, TokenScope};
 use crate::ids::{AccessTokenId, UserId};
 
 /// A personal access token's identity and scope. The raw token secret
@@ -10,7 +10,10 @@ pub struct AccessToken {
     pub id: AccessTokenId,
     pub user_id: UserId,
     pub name: String,
+    /// Which repositories this token may act against.
     pub repository_scope: RepositoryScope,
+    /// Which kinds of operation this token may perform.
+    pub token_scope: TokenScope,
     pub created_at: i64,
     pub last_used_at: Option<i64>,
 }

@@ -6,7 +6,8 @@ use dioxus_free_icons::Icon;
 
 use edda_api_types::{
     BlobDto, CommitLogEntryDto, DiffLineDto, DiffLineKind, FileDiffDto, ForkedRepoDto, RepoDto,
-    SearchMatchDto, SetVisibilityRequest, TreeEntryDto, UpdateRepoRequest,
+    SearchMatchDto, SetVisibilityRequest, SetWatchRequest, TreeEntryDto, UpdateRepoRequest,
+    WatchStatusDto,
 };
 
 use crate::api_client::{self, with_query};
@@ -78,6 +79,16 @@ pub fn Repo(owner: String, name: String) -> Element {
 
     let mut editing_description = use_signal(|| false);
     let mut description_draft = use_signal(String::new);
+
+    let mut watch_pending = use_signal(|| false);
+    let mut subscription = use_resource({
+        let owner = owner.clone();
+        let name = name.clone();
+        move || {
+            let path = format!("{}/subscription", repo_path(&owner, &name));
+            async move { api_client::get_json::<WatchStatusDto>(&path).await }
+        }
+    });
 
     let mut tab = use_signal(|| RepoTab::Files);
     let mut path_segments = use_signal(Vec::<String>::new);
@@ -281,9 +292,37 @@ pub fn Repo(owner: String, name: String) -> Element {
             let is_private = dto.is_private;
             let is_owner = dto.is_owner;
 
+            let watching = matches!(
+                &*subscription.read(),
+                Some(Ok(WatchStatusDto { level: Some(l) })) if l == "watching"
+            );
+
             rsx! {
                 div { class: "mt-4 flex items-center gap-2",
                     h1 { class: "font-mono text-2xl font-semibold text-ink", "{dto.owner}/{dto.name}" }
+                    button {
+                        r#type: "button",
+                        class: "border border-line px-2 py-0.5 font-mono text-xs text-ink-muted hover:text-ink disabled:opacity-50",
+                        disabled: watch_pending(),
+                        onclick: {
+                            let owner = owner.clone();
+                            let name = name.clone();
+                            move |_| {
+                                let path = format!("{}/subscription", repo_path(&owner, &name));
+                                watch_pending.set(true);
+                                spawn(async move {
+                                    let _ = if watching {
+                                        api_client::delete_ok(&path).await
+                                    } else {
+                                        api_client::put_ok(&path, &SetWatchRequest { level: "watching".to_string() }).await
+                                    };
+                                    subscription.restart();
+                                    watch_pending.set(false);
+                                });
+                            }
+                        },
+                        if watching { "watching" } else { "watch" }
+                    }
                     span {
                         class: "flex items-center gap-1 border border-line px-1.5 py-0.5 font-mono text-[11px] uppercase tracking-wide text-ink-muted",
                         title: if is_private { "only the owner and collaborators can see this repo" } else { "anyone can see this repo" },

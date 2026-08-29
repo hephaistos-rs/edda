@@ -162,7 +162,8 @@ impl PullRequest {
 /// submitting a new one never deletes an earlier one, so review history
 /// is preserved; `latest_reviews` (a query-layer concern, not this type)
 /// is what actually counts toward a required-approval count.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReviewState {
     Approved,
     ChangesRequested,

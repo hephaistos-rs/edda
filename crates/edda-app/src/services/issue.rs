@@ -37,7 +37,8 @@ impl IssueService {
         Self::new(state.pool.clone(), state.authz.clone())
     }
 
-    /// Open an issue — write access. Returns its number.
+    /// Open an issue — write access. Returns its number. Emits
+    /// `IssueOpened` in the same transaction as the insert.
     pub async fn open(
         &self,
         actor: &ActorContext,
@@ -51,19 +52,33 @@ impl IssueService {
                 "an issue needs a title".to_string(),
             ));
         }
+        let issue_id = edda_domain::IssueId::new();
+        let mut tx = self.pool.begin().await?;
         let number = IssueRepo::insert(
-            &self.pool,
-            edda_domain::IssueId::new(),
+            &mut tx,
+            issue_id,
             repository.id,
             input.title.trim(),
             input.body.as_deref().filter(|b| !b.trim().is_empty()),
             author_id,
         )
         .await?;
+        EventRepo::append(
+            &mut tx,
+            EventId::new(),
+            &DomainEvent::IssueOpened {
+                issue_id,
+                repository_id: repository.id,
+                opened_by_id: author_id,
+            },
+        )
+        .await?;
+        tx.commit().await?;
         Ok(number)
     }
 
-    /// Close an open issue — write access.
+    /// Close an open issue — write access. Emits `IssueClosed` (a manual
+    /// close: `via_pull_request` is `None`).
     pub async fn close(
         &self,
         actor: &ActorContext,
@@ -71,15 +86,16 @@ impl IssueService {
         name: &str,
         number: i64,
     ) -> Result<(), ServiceError> {
-        let (repository, _) = self.write_checked(actor, owner, name).await?;
+        let (repository, actor_id) = self.write_checked(actor, owner, name).await?;
         let issue = self.load_issue(repository.id, number).await?;
         if !issue.state.is_open() {
             return Err(ServiceError::Conflict(
                 "this issue is already closed".to_string(),
             ));
         }
+        let mut tx = self.pool.begin().await?;
         IssueRepo::update_state(
-            &self.pool,
+            &mut tx,
             issue.id,
             &IssueState::Closed {
                 closed_at: now_unix(),
@@ -87,6 +103,18 @@ impl IssueService {
             },
         )
         .await?;
+        EventRepo::append(
+            &mut tx,
+            EventId::new(),
+            &DomainEvent::IssueClosed {
+                issue_id: issue.id,
+                repository_id: repository.id,
+                closed_by_id: actor_id,
+                via_pull_request: None,
+            },
+        )
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -317,6 +345,16 @@ impl IssueService {
         let comment_id = IssueCommentId::new();
         let mut tx = self.pool.begin().await?;
         IssueCommentRepo::insert(&mut tx, comment_id, issue.id, commenter, body).await?;
+        EventRepo::append(
+            &mut tx,
+            EventId::new(),
+            &DomainEvent::IssueCommented {
+                issue_id: issue.id,
+                repository_id: repository.id,
+                comment_author_id: commenter,
+            },
+        )
+        .await?;
         for mentioned_user_id in mentioned {
             EventRepo::append(
                 &mut tx,
@@ -394,19 +432,23 @@ mod tests {
             .unwrap();
 
         let outbox = EventRepo::fetch_unprocessed(&pool, 50).await.unwrap();
-        // One event: @bob resolves, @nobody doesn't, the author isn't
-        // self-mentioned here anyway.
-        assert_eq!(outbox.len(), 1);
-        let DomainEvent::UserMentioned {
-            mentioned_user_id,
-            mentioned_by_user_id,
-            ..
-        } = outbox[0].event
-        else {
-            panic!("unexpected event: {:?}", outbox[0].event);
-        };
-        assert_eq!(mentioned_user_id, mentioned);
-        assert_eq!(mentioned_by_user_id, author);
+        // An `IssueCommented` event, plus one `UserMentioned` (@bob
+        // resolves, @nobody doesn't, no self-mention).
+        assert!(outbox
+            .iter()
+            .any(|r| matches!(r.event, DomainEvent::IssueCommented { .. })));
+        let mentions: Vec<_> = outbox
+            .iter()
+            .filter_map(|r| match r.event {
+                DomainEvent::UserMentioned {
+                    mentioned_user_id,
+                    mentioned_by_user_id,
+                    ..
+                } => Some((mentioned_user_id, mentioned_by_user_id)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(mentions, vec![(mentioned, author)]);
     }
 
     #[tokio::test]

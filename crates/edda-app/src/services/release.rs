@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use edda_auth::AuthorizationService;
-use edda_db::{DbPool, NewRelease, ReleaseRepo};
-use edda_domain::{ActorContext, ReleaseId, Repository};
+use edda_db::{DbPool, EventRepo, NewRelease, ReleaseRepo};
+use edda_domain::{ActorContext, DomainEvent, EventId, ReleaseId, Repository};
 use edda_git::store::RepoStore;
 
 use super::{git_identity, ServiceError};
@@ -70,9 +70,11 @@ impl ReleaseService {
             }
         };
 
+        let release_id = ReleaseId::new();
+        let mut tx = self.pool.begin().await?;
         ReleaseRepo::insert(
-            &self.pool,
-            ReleaseId::new(),
+            &mut tx,
+            release_id,
             repository.id,
             NewRelease {
                 tag_name: &tag_name,
@@ -85,6 +87,21 @@ impl ReleaseService {
             },
         )
         .await?;
+        // A draft release is collaborator-only and fires nothing; a
+        // published one fans out `ReleasePublished`.
+        if !input.draft {
+            EventRepo::append(
+                &mut tx,
+                EventId::new(),
+                &DomainEvent::ReleasePublished {
+                    release_id,
+                    repository_id: repository.id,
+                    published_by_id: author_id,
+                },
+            )
+            .await?;
+        }
+        tx.commit().await?;
 
         Ok(tag_name)
     }

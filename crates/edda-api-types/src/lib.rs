@@ -420,6 +420,20 @@ pub struct UsernameRequest {
     pub username: String,
 }
 
+/// `GET/PUT /api/v1/repos/{owner}/{repo}/subscription`. `level` is
+/// `watching` / `ignoring`, or `null` for the default (notified only for
+/// direct involvement).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchStatusDto {
+    pub level: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetWatchRequest {
+    /// `watching` or `ignoring`.
+    pub level: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum IssueStateDto {

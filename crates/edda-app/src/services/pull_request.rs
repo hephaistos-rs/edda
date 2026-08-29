@@ -144,8 +144,9 @@ impl PullRequestService {
             )?;
         }
 
+        let mut tx = self.pool.begin().await?;
         let number = PullRequestRepo::insert(
-            &self.pool,
+            &mut tx,
             pr_id,
             target.id,
             NewPullRequest {
@@ -161,6 +162,17 @@ impl PullRequestService {
             },
         )
         .await?;
+        EventRepo::append(
+            &mut tx,
+            EventId::new(),
+            &DomainEvent::PullRequestOpened {
+                pull_request_id: pr_id,
+                repository_id: target.id,
+                opened_by_id: author_id,
+            },
+        )
+        .await?;
+        tx.commit().await?;
         Ok(number)
     }
 
@@ -191,8 +203,10 @@ impl PullRequestService {
         let review_state = ReviewState::from_db_str(state)
             .ok_or_else(|| ServiceError::Validation("unrecognized review state".to_string()))?;
         let pr = self.load_pr(repository.id, number).await?;
+
+        let mut tx = self.pool.begin().await?;
         PrReviewRepo::insert(
-            &self.pool,
+            &mut tx,
             PrReviewId::new(),
             pr.id,
             reviewer_id,
@@ -200,6 +214,18 @@ impl PullRequestService {
             body.as_deref().filter(|b| !b.trim().is_empty()),
         )
         .await?;
+        EventRepo::append(
+            &mut tx,
+            EventId::new(),
+            &DomainEvent::PullRequestReviewSubmitted {
+                pull_request_id: pr.id,
+                repository_id: repository.id,
+                reviewer_id,
+                state: review_state,
+            },
+        )
+        .await?;
+        tx.commit().await?;
         // A submitted review satisfies any outstanding request for this
         // reviewer.
         ReviewRequestRepo::delete(&self.pool, pr.id, reviewer_id).await?;
@@ -317,7 +343,7 @@ impl PullRequestService {
         name: &str,
         number: i64,
     ) -> Result<(), ServiceError> {
-        let (_, pr, _) = self
+        let (repository, pr, actor_id) = self
             .author_or_write_checked(actor, owner, name, number)
             .await?;
         if !pr.state.is_open() {
@@ -325,8 +351,9 @@ impl PullRequestService {
                 "this pull request is already merged or closed".to_string(),
             ));
         }
+        let mut tx = self.pool.begin().await?;
         PullRequestRepo::update_state(
-            &self.pool,
+            &mut tx,
             pr.id,
             &PrState::Closed {
                 closed_at: now_unix(),
@@ -334,6 +361,17 @@ impl PullRequestService {
             },
         )
         .await?;
+        EventRepo::append(
+            &mut tx,
+            EventId::new(),
+            &DomainEvent::PullRequestClosed {
+                pull_request_id: pr.id,
+                repository_id: repository.id,
+                closed_by_id: actor_id,
+            },
+        )
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -345,14 +383,26 @@ impl PullRequestService {
         name: &str,
         number: i64,
     ) -> Result<(), ServiceError> {
-        let (repository, _) = self.write_checked(actor, owner, name).await?;
+        let (repository, actor_id) = self.write_checked(actor, owner, name).await?;
         let pr = self.load_pr(repository.id, number).await?;
         if !matches!(pr.state, PrState::Closed { .. }) {
             return Err(ServiceError::Conflict(
                 "only a closed pull request can be reopened".to_string(),
             ));
         }
-        PullRequestRepo::update_state(&self.pool, pr.id, &PrState::Open).await?;
+        let mut tx = self.pool.begin().await?;
+        PullRequestRepo::update_state(&mut tx, pr.id, &PrState::Open).await?;
+        EventRepo::append(
+            &mut tx,
+            EventId::new(),
+            &DomainEvent::PullRequestReopened {
+                pull_request_id: pr.id,
+                repository_id: repository.id,
+                reopened_by_id: actor_id,
+            },
+        )
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 

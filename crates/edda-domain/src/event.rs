@@ -22,7 +22,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::ids::{IssueId, PullRequestId, RepositoryId, UserId};
+use crate::ids::{IssueId, PullRequestId, ReleaseId, RepositoryId, UserId};
+use crate::pull_request::ReviewState;
 
 /// Where a `@mention` was written — the two comment surfaces this
 /// workspace has today. Not `MentionSource::Other(String)`: a third
@@ -88,6 +89,51 @@ pub enum DomainEvent {
         closed_by_id: UserId,
         via_pull_request: Option<PullRequestId>,
     },
+    /// An issue was opened.
+    IssueOpened {
+        issue_id: IssueId,
+        repository_id: RepositoryId,
+        opened_by_id: UserId,
+    },
+    /// A comment was posted on an issue (separate from any `@mention`s it
+    /// also contains).
+    IssueCommented {
+        issue_id: IssueId,
+        repository_id: RepositoryId,
+        comment_author_id: UserId,
+    },
+    /// A pull request was opened (draft or ready).
+    PullRequestOpened {
+        pull_request_id: PullRequestId,
+        repository_id: RepositoryId,
+        opened_by_id: UserId,
+    },
+    /// A pull request was closed without merging.
+    PullRequestClosed {
+        pull_request_id: PullRequestId,
+        repository_id: RepositoryId,
+        closed_by_id: UserId,
+    },
+    /// A closed (not merged) pull request was reopened.
+    PullRequestReopened {
+        pull_request_id: PullRequestId,
+        repository_id: RepositoryId,
+        reopened_by_id: UserId,
+    },
+    /// A review was submitted on a pull request.
+    PullRequestReviewSubmitted {
+        pull_request_id: PullRequestId,
+        repository_id: RepositoryId,
+        reviewer_id: UserId,
+        state: ReviewState,
+    },
+    /// A non-draft release was published (created directly as published,
+    /// or a draft flipped to published).
+    ReleasePublished {
+        release_id: ReleaseId,
+        repository_id: RepositoryId,
+        published_by_id: UserId,
+    },
 }
 
 /// The discriminant of [`DomainEvent`] — stored in the `events.kind`
@@ -102,6 +148,13 @@ pub enum DomainEventKind {
     IssueAssigned,
     ReviewRequested,
     IssueClosed,
+    IssueOpened,
+    IssueCommented,
+    PullRequestOpened,
+    PullRequestClosed,
+    PullRequestReopened,
+    PullRequestReviewSubmitted,
+    ReleasePublished,
 }
 
 impl DomainEventKind {
@@ -114,20 +167,34 @@ impl DomainEventKind {
             DomainEventKind::IssueAssigned => "issue_assigned",
             DomainEventKind::ReviewRequested => "review_requested",
             DomainEventKind::IssueClosed => "issue_closed",
+            DomainEventKind::IssueOpened => "issue_opened",
+            DomainEventKind::IssueCommented => "issue_commented",
+            DomainEventKind::PullRequestOpened => "pull_request_opened",
+            DomainEventKind::PullRequestClosed => "pull_request_closed",
+            DomainEventKind::PullRequestReopened => "pull_request_reopened",
+            DomainEventKind::PullRequestReviewSubmitted => "pull_request_review_submitted",
+            DomainEventKind::ReleasePublished => "release_published",
         }
     }
 
     #[must_use]
     pub fn from_db_str(value: &str) -> Option<Self> {
-        match value {
-            "pull_request_merged" => Some(DomainEventKind::PullRequestMerged),
-            "user_mentioned" => Some(DomainEventKind::UserMentioned),
-            "branch_pushed" => Some(DomainEventKind::BranchPushed),
-            "issue_assigned" => Some(DomainEventKind::IssueAssigned),
-            "review_requested" => Some(DomainEventKind::ReviewRequested),
-            "issue_closed" => Some(DomainEventKind::IssueClosed),
-            _ => None,
-        }
+        Some(match value {
+            "pull_request_merged" => DomainEventKind::PullRequestMerged,
+            "user_mentioned" => DomainEventKind::UserMentioned,
+            "branch_pushed" => DomainEventKind::BranchPushed,
+            "issue_assigned" => DomainEventKind::IssueAssigned,
+            "review_requested" => DomainEventKind::ReviewRequested,
+            "issue_closed" => DomainEventKind::IssueClosed,
+            "issue_opened" => DomainEventKind::IssueOpened,
+            "issue_commented" => DomainEventKind::IssueCommented,
+            "pull_request_opened" => DomainEventKind::PullRequestOpened,
+            "pull_request_closed" => DomainEventKind::PullRequestClosed,
+            "pull_request_reopened" => DomainEventKind::PullRequestReopened,
+            "pull_request_review_submitted" => DomainEventKind::PullRequestReviewSubmitted,
+            "release_published" => DomainEventKind::ReleasePublished,
+            _ => return None,
+        })
     }
 }
 
@@ -142,6 +209,15 @@ impl DomainEvent {
             DomainEvent::IssueAssigned { .. } => DomainEventKind::IssueAssigned,
             DomainEvent::ReviewRequested { .. } => DomainEventKind::ReviewRequested,
             DomainEvent::IssueClosed { .. } => DomainEventKind::IssueClosed,
+            DomainEvent::IssueOpened { .. } => DomainEventKind::IssueOpened,
+            DomainEvent::IssueCommented { .. } => DomainEventKind::IssueCommented,
+            DomainEvent::PullRequestOpened { .. } => DomainEventKind::PullRequestOpened,
+            DomainEvent::PullRequestClosed { .. } => DomainEventKind::PullRequestClosed,
+            DomainEvent::PullRequestReopened { .. } => DomainEventKind::PullRequestReopened,
+            DomainEvent::PullRequestReviewSubmitted { .. } => {
+                DomainEventKind::PullRequestReviewSubmitted
+            }
+            DomainEvent::ReleasePublished { .. } => DomainEventKind::ReleasePublished,
         }
     }
 
@@ -150,11 +226,18 @@ impl DomainEvent {
     #[must_use]
     pub const fn aggregate_type(&self) -> &'static str {
         match self {
-            DomainEvent::PullRequestMerged { .. } | DomainEvent::ReviewRequested { .. } => {
-                "pull_request"
-            }
+            DomainEvent::PullRequestMerged { .. }
+            | DomainEvent::ReviewRequested { .. }
+            | DomainEvent::PullRequestOpened { .. }
+            | DomainEvent::PullRequestClosed { .. }
+            | DomainEvent::PullRequestReopened { .. }
+            | DomainEvent::PullRequestReviewSubmitted { .. } => "pull_request",
             DomainEvent::BranchPushed { .. } => "repository",
-            DomainEvent::IssueAssigned { .. } | DomainEvent::IssueClosed { .. } => "issue",
+            DomainEvent::ReleasePublished { .. } => "release",
+            DomainEvent::IssueAssigned { .. }
+            | DomainEvent::IssueClosed { .. }
+            | DomainEvent::IssueOpened { .. }
+            | DomainEvent::IssueCommented { .. } => "issue",
             DomainEvent::UserMentioned { source, .. } => match source {
                 MentionSource::PullRequestComment { .. } => "pull_request",
                 MentionSource::IssueComment { .. } => "issue",
@@ -173,10 +256,25 @@ impl DomainEvent {
             }
             | DomainEvent::ReviewRequested {
                 pull_request_id, ..
+            }
+            | DomainEvent::PullRequestOpened {
+                pull_request_id, ..
+            }
+            | DomainEvent::PullRequestClosed {
+                pull_request_id, ..
+            }
+            | DomainEvent::PullRequestReopened {
+                pull_request_id, ..
+            }
+            | DomainEvent::PullRequestReviewSubmitted {
+                pull_request_id, ..
             } => pull_request_id.as_uuid(),
             DomainEvent::BranchPushed { repository_id, .. } => repository_id.as_uuid(),
+            DomainEvent::ReleasePublished { release_id, .. } => release_id.as_uuid(),
             DomainEvent::IssueAssigned { issue_id, .. }
-            | DomainEvent::IssueClosed { issue_id, .. } => issue_id.as_uuid(),
+            | DomainEvent::IssueClosed { issue_id, .. }
+            | DomainEvent::IssueOpened { issue_id, .. }
+            | DomainEvent::IssueCommented { issue_id, .. } => issue_id.as_uuid(),
             DomainEvent::UserMentioned { source, .. } => match source {
                 MentionSource::PullRequestComment { pull_request_id } => pull_request_id.as_uuid(),
                 MentionSource::IssueComment { issue_id } => issue_id.as_uuid(),
@@ -218,6 +316,13 @@ mod tests {
             DomainEventKind::IssueAssigned,
             DomainEventKind::ReviewRequested,
             DomainEventKind::IssueClosed,
+            DomainEventKind::IssueOpened,
+            DomainEventKind::IssueCommented,
+            DomainEventKind::PullRequestOpened,
+            DomainEventKind::PullRequestClosed,
+            DomainEventKind::PullRequestReopened,
+            DomainEventKind::PullRequestReviewSubmitted,
+            DomainEventKind::ReleasePublished,
         ] {
             assert_eq!(DomainEventKind::from_db_str(kind.as_db_str()), Some(kind));
         }

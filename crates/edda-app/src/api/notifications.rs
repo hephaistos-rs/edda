@@ -7,8 +7,8 @@ use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
-use edda_api_types::{EmailNotificationsRequest, NotificationDto};
-use edda_domain::{Notification, NotificationId};
+use edda_api_types::{EmailNotificationsRequest, NotificationDto, SetWatchRequest, WatchStatusDto};
+use edda_domain::{Notification, NotificationId, WatchLevel};
 
 use super::Actor;
 use crate::services::{NotificationService, ServiceError};
@@ -23,6 +23,53 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/user/email-notifications",
             get(get_email_notifications).put(set_email_notifications),
         )
+        .route(
+            "/api/v1/repos/{owner}/{repo}/subscription",
+            get(get_subscription)
+                .put(set_subscription)
+                .delete(clear_subscription),
+        )
+}
+
+async fn get_subscription(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path((owner, repo)): Path<(String, String)>,
+) -> Result<Json<WatchStatusDto>, ServiceError> {
+    actor.require_user()?;
+    let level = NotificationService::from_state(&state)
+        .repo_watch_level(actor.context(), &owner, &repo)
+        .await?;
+    Ok(Json(WatchStatusDto {
+        level: level.map(|l| l.as_db_str().to_string()),
+    }))
+}
+
+async fn set_subscription(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path((owner, repo)): Path<(String, String)>,
+    Json(body): Json<SetWatchRequest>,
+) -> Result<Json<()>, ServiceError> {
+    actor.require_user()?;
+    let level = WatchLevel::from_db_str(&body.level)
+        .ok_or_else(|| ServiceError::Validation(format!("unknown watch level {:?}", body.level)))?;
+    NotificationService::from_state(&state)
+        .set_repo_watch(actor.context(), &owner, &repo, level)
+        .await?;
+    Ok(Json(()))
+}
+
+async fn clear_subscription(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path((owner, repo)): Path<(String, String)>,
+) -> Result<Json<()>, ServiceError> {
+    actor.require_user()?;
+    NotificationService::from_state(&state)
+        .clear_repo_watch(actor.context(), &owner, &repo)
+        .await?;
+    Ok(Json(()))
 }
 
 fn notification_dto(notification: &Notification) -> NotificationDto {

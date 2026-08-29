@@ -21,11 +21,12 @@ use std::time::Duration;
 
 use edda_db::{
     BranchProtectionRepo, DbPool, EventRecord, EventRepo, IssueAssigneeRepo, IssueRepo, JobRepo,
-    OrganizationRepo, PrReviewRepo, PullRequestRepo, RepositoryRepo, UserRepo, WebhookRepo,
+    OrganizationRepo, PrReviewRepo, PullRequestRepo, ReleaseRepo, RepositoryRepo, UserRepo,
+    WatchRepo, WebhookRepo,
 };
 use edda_domain::{
     DomainEvent, JobId, JobPayload, MentionSource, NotificationKind, NotificationSubject,
-    RepositoryId, RepositoryOwner, UserId, WebhookEvent,
+    PullRequestId, RepositoryId, RepositoryOwner, UserId, WatchLevel, WatchSubject, WebhookEvent,
 };
 
 use crate::{now_unix, DEFAULT_MAX_ATTEMPTS};
@@ -116,9 +117,6 @@ async fn fan_out(pool: &DbPool, event: &DomainEvent) -> Result<Vec<JobPayload>, 
             let webhooks =
                 WebhookRepo::find_subscribed(pool, *repository_id, WebhookEvent::PullRequestMerged)
                     .await?;
-            if webhooks.is_empty() {
-                return Ok(Vec::new());
-            }
             let (Some(pr), Some(repo)) = (
                 PullRequestRepo::find_by_id(pool, *pull_request_id).await?,
                 RepositoryRepo::find_by_id(pool, *repository_id).await?,
@@ -132,14 +130,31 @@ async fn fan_out(pool: &DbPool, event: &DomainEvent) -> Result<Vec<JobPayload>, 
                 "pull_request": { "number": pr.number, "title": pr.title },
             })
             .to_string();
-            Ok(webhooks
+            let mut jobs: Vec<JobPayload> = webhooks
                 .into_iter()
                 .map(|webhook| JobPayload::DeliverWebhook {
                     webhook_id: webhook.id,
                     event: WebhookEvent::PullRequestMerged,
                     payload_json: payload_json.clone(),
                 })
-                .collect())
+                .collect();
+            // The merging user is not carried on this (older) event, so
+            // pass a nil actor — the PR author still gets notified, which
+            // is the case that matters.
+            jobs.extend(
+                notify_watchers(
+                    pool,
+                    *repository_id,
+                    NotificationSubject::PullRequest(*pull_request_id),
+                    NotificationKind::PrMerged,
+                    None,
+                    &[pr.author_id],
+                    "A pull request you follow was merged",
+                    &format!("merged pull request #{}: {}", pr.number, pr.title),
+                )
+                .await?,
+            );
+            Ok(jobs)
         }
         DomainEvent::UserMentioned {
             mentioned_user_id,
@@ -197,7 +212,7 @@ async fn fan_out(pool: &DbPool, event: &DomainEvent) -> Result<Vec<JobPayload>, 
             Ok(notify(
                 pool,
                 *assignee_id,
-                *assigned_by_id,
+                Some(*assigned_by_id),
                 NotificationKind::IssueAssigned,
                 NotificationSubject::Issue(*issue_id),
                 "You were assigned an issue on Edda",
@@ -217,7 +232,7 @@ async fn fan_out(pool: &DbPool, event: &DomainEvent) -> Result<Vec<JobPayload>, 
             Ok(notify(
                 pool,
                 *reviewer_id,
-                *requested_by_id,
+                Some(*requested_by_id),
                 NotificationKind::PrReviewRequested,
                 NotificationSubject::PullRequest(*pull_request_id),
                 "Your review was requested on Edda",
@@ -225,63 +240,373 @@ async fn fan_out(pool: &DbPool, event: &DomainEvent) -> Result<Vec<JobPayload>, 
             )
             .await)
         }
+        DomainEvent::IssueOpened {
+            issue_id,
+            repository_id,
+            opened_by_id,
+        } => {
+            issue_activity(
+                pool,
+                *issue_id,
+                *repository_id,
+                *opened_by_id,
+                WebhookEvent::IssueOpened,
+                "opened",
+                None,
+            )
+            .await
+        }
+        DomainEvent::IssueCommented {
+            issue_id,
+            repository_id,
+            comment_author_id,
+        } => {
+            issue_activity(
+                pool,
+                *issue_id,
+                *repository_id,
+                *comment_author_id,
+                WebhookEvent::IssueCommented,
+                "commented on",
+                None,
+            )
+            .await
+        }
         DomainEvent::IssueClosed {
             issue_id,
+            repository_id,
             closed_by_id,
             via_pull_request,
-            ..
         } => {
-            let Some(issue) = IssueRepo::find_by_id(pool, *issue_id).await? else {
-                return Ok(Vec::new());
+            let via = match via_pull_request {
+                Some(pr_id) => PullRequestRepo::find_by_id(pool, *pr_id)
+                    .await?
+                    .map(|pr| format!(" via pull request #{}", pr.number))
+                    .unwrap_or_default(),
+                None => String::new(),
             };
-            let mut recipients: Vec<UserId> = IssueAssigneeRepo::list_for_issue(pool, *issue_id)
-                .await?
+            issue_activity(
+                pool,
+                *issue_id,
+                *repository_id,
+                *closed_by_id,
+                WebhookEvent::IssueClosed,
+                &format!("closed{via}"),
+                Some((
+                    NotificationKind::IssueClosed,
+                    "An issue you follow was closed",
+                )),
+            )
+            .await
+        }
+        DomainEvent::PullRequestOpened {
+            pull_request_id,
+            repository_id,
+            opened_by_id,
+        } => {
+            pr_activity(
+                pool,
+                *pull_request_id,
+                *repository_id,
+                *opened_by_id,
+                Some(WebhookEvent::PullRequestOpened),
+                "opened",
+                None,
+            )
+            .await
+        }
+        DomainEvent::PullRequestClosed {
+            pull_request_id,
+            repository_id,
+            closed_by_id,
+        } => {
+            pr_activity(
+                pool,
+                *pull_request_id,
+                *repository_id,
+                *closed_by_id,
+                Some(WebhookEvent::PullRequestClosed),
+                "closed",
+                Some((
+                    NotificationKind::PrClosed,
+                    "A pull request you follow was closed",
+                )),
+            )
+            .await
+        }
+        DomainEvent::PullRequestReopened {
+            pull_request_id,
+            repository_id,
+            reopened_by_id,
+        } => {
+            pr_activity(
+                pool,
+                *pull_request_id,
+                *repository_id,
+                *reopened_by_id,
+                Some(WebhookEvent::PullRequestReopened),
+                "reopened",
+                None,
+            )
+            .await
+        }
+        DomainEvent::PullRequestReviewSubmitted {
+            pull_request_id,
+            repository_id,
+            reviewer_id,
+            state,
+        } => {
+            pr_activity(
+                pool,
+                *pull_request_id,
+                *repository_id,
+                *reviewer_id,
+                Some(WebhookEvent::PullRequestReviewSubmitted),
+                &format!("submitted a {} review on", state.as_db_str()),
+                None,
+            )
+            .await
+        }
+        DomainEvent::ReleasePublished {
+            release_id,
+            repository_id,
+            published_by_id,
+        } => release_activity(pool, *release_id, *repository_id, *published_by_id).await,
+    }
+}
+
+/// Everyone who should be notified of activity on a repository's issue or
+/// pull request: the repository's `watching` subscribers plus the
+/// `involved` set (the entity's author, its assignees), minus anyone
+/// `ignoring` the repository and minus the actor who did the thing.
+#[allow(clippy::too_many_arguments)]
+async fn notify_watchers(
+    pool: &DbPool,
+    repository_id: RepositoryId,
+    subject: NotificationSubject,
+    kind: NotificationKind,
+    actor_id: Option<UserId>,
+    involved: &[UserId],
+    email_subject: &str,
+    action: &str,
+) -> Result<Vec<JobPayload>, edda_db::DbError> {
+    let watches = WatchRepo::watchers_of(pool, WatchSubject::Repository(repository_id)).await?;
+    let ignoring: std::collections::HashSet<UserId> = watches
+        .iter()
+        .filter(|w| w.level == WatchLevel::Ignoring)
+        .map(|w| w.user_id)
+        .collect();
+    let mut recipients: Vec<UserId> = watches
+        .iter()
+        .filter(|w| w.level == WatchLevel::Watching)
+        .map(|w| w.user_id)
+        .chain(involved.iter().copied())
+        .filter(|id| Some(*id) != actor_id && !ignoring.contains(id))
+        .collect();
+    recipients.sort_unstable();
+    recipients.dedup();
+
+    let mut jobs = Vec::new();
+    for recipient in recipients {
+        jobs.extend(
+            notify(
+                pool,
+                recipient,
+                actor_id,
+                kind,
+                subject,
+                email_subject,
+                action,
+            )
+            .await,
+        );
+    }
+    Ok(jobs)
+}
+
+/// Fan an issue lifecycle event out to the `issue.*` webhook and — when
+/// `notification` is `Some` — to repository watchers, the issue author,
+/// and its assignees. `action` is the verb fragment for both the webhook
+/// `action` field and the notification line ("opened", "closed", …).
+async fn issue_activity(
+    pool: &DbPool,
+    issue_id: edda_domain::IssueId,
+    repository_id: RepositoryId,
+    actor_id: UserId,
+    webhook_event: WebhookEvent,
+    action: &str,
+    notification: Option<(NotificationKind, &str)>,
+) -> Result<Vec<JobPayload>, edda_db::DbError> {
+    let (Some(issue), Some(repo)) = (
+        IssueRepo::find_by_id(pool, issue_id).await?,
+        RepositoryRepo::find_by_id(pool, repository_id).await?,
+    ) else {
+        return Ok(Vec::new());
+    };
+    let owner = owner_display_name(pool, repo.owner).await?;
+
+    let mut jobs = Vec::new();
+    let webhooks = WebhookRepo::find_subscribed(pool, repository_id, webhook_event).await?;
+    if !webhooks.is_empty() {
+        let payload_json = serde_json::json!({
+            "action": action,
+            "repository": { "owner": owner, "name": repo.name },
+            "issue": { "number": issue.number, "title": issue.title },
+        })
+        .to_string();
+        jobs.extend(
+            webhooks
                 .into_iter()
-                .chain(std::iter::once(issue.author_id))
-                .filter(|id| id != closed_by_id)
-                .collect();
-            recipients.sort_unstable();
-            recipients.dedup();
-            let detail = match via_pull_request {
-                Some(pr_id) => {
-                    let pr_number = PullRequestRepo::find_by_id(pool, *pr_id)
-                        .await?
-                        .map_or(0, |pr| pr.number);
-                    format!(
-                        "closed issue #{} via pull request #{pr_number}",
-                        issue.number
-                    )
-                }
-                None => format!("closed issue #{}", issue.number),
-            };
-            let mut jobs = Vec::new();
-            for recipient in recipients {
-                jobs.extend(
-                    notify(
-                        pool,
-                        recipient,
-                        *closed_by_id,
-                        NotificationKind::IssueClosed,
-                        NotificationSubject::Issue(*issue_id),
-                        "An issue you follow was closed",
-                        &detail,
-                    )
-                    .await,
-                );
-            }
-            Ok(jobs)
+                .map(|webhook| JobPayload::DeliverWebhook {
+                    webhook_id: webhook.id,
+                    event: webhook_event,
+                    payload_json: payload_json.clone(),
+                }),
+        );
+    }
+
+    if let Some((kind, email_subject)) = notification {
+        let mut involved = IssueAssigneeRepo::list_for_issue(pool, issue_id).await?;
+        involved.push(issue.author_id);
+        jobs.extend(
+            notify_watchers(
+                pool,
+                repository_id,
+                NotificationSubject::Issue(issue_id),
+                kind,
+                Some(actor_id),
+                &involved,
+                email_subject,
+                &format!("{action} issue #{}: {}", issue.number, issue.title),
+            )
+            .await?,
+        );
+    }
+    Ok(jobs)
+}
+
+/// The pull-request analogue of [`issue_activity`]. `webhook_event` is
+/// `None` for `PullRequestMerged` (whose payload shape is a legacy the
+/// existing consumers depend on — it keeps its own arm).
+async fn pr_activity(
+    pool: &DbPool,
+    pull_request_id: PullRequestId,
+    repository_id: RepositoryId,
+    actor_id: UserId,
+    webhook_event: Option<WebhookEvent>,
+    action: &str,
+    notification: Option<(NotificationKind, &str)>,
+) -> Result<Vec<JobPayload>, edda_db::DbError> {
+    let (Some(pr), Some(repo)) = (
+        PullRequestRepo::find_by_id(pool, pull_request_id).await?,
+        RepositoryRepo::find_by_id(pool, repository_id).await?,
+    ) else {
+        return Ok(Vec::new());
+    };
+    let owner = owner_display_name(pool, repo.owner).await?;
+
+    let mut jobs = Vec::new();
+    if let Some(webhook_event) = webhook_event {
+        let webhooks = WebhookRepo::find_subscribed(pool, repository_id, webhook_event).await?;
+        if !webhooks.is_empty() {
+            let payload_json = serde_json::json!({
+                "action": action,
+                "repository": { "owner": owner, "name": repo.name },
+                "pull_request": { "number": pr.number, "title": pr.title },
+            })
+            .to_string();
+            jobs.extend(
+                webhooks
+                    .into_iter()
+                    .map(|webhook| JobPayload::DeliverWebhook {
+                        webhook_id: webhook.id,
+                        event: webhook_event,
+                        payload_json: payload_json.clone(),
+                    }),
+            );
         }
     }
+
+    if let Some((kind, email_subject)) = notification {
+        jobs.extend(
+            notify_watchers(
+                pool,
+                repository_id,
+                NotificationSubject::PullRequest(pull_request_id),
+                kind,
+                Some(actor_id),
+                &[pr.author_id],
+                email_subject,
+                &format!("{action} pull request #{}: {}", pr.number, pr.title),
+            )
+            .await?,
+        );
+    }
+    Ok(jobs)
+}
+
+/// `release.published` webhook + a `ReleasePublished` notification to
+/// repository watchers.
+async fn release_activity(
+    pool: &DbPool,
+    release_id: edda_domain::ReleaseId,
+    repository_id: RepositoryId,
+    actor_id: UserId,
+) -> Result<Vec<JobPayload>, edda_db::DbError> {
+    let (Some(release), Some(repo)) = (
+        ReleaseRepo::find_by_id(pool, release_id).await?,
+        RepositoryRepo::find_by_id(pool, repository_id).await?,
+    ) else {
+        return Ok(Vec::new());
+    };
+    let owner = owner_display_name(pool, repo.owner).await?;
+
+    let mut jobs = Vec::new();
+    let webhooks =
+        WebhookRepo::find_subscribed(pool, repository_id, WebhookEvent::ReleasePublished).await?;
+    if !webhooks.is_empty() {
+        let payload_json = serde_json::json!({
+            "action": "published",
+            "repository": { "owner": owner, "name": repo.name },
+            "release": { "tag_name": release.tag_name, "name": release.name },
+        })
+        .to_string();
+        jobs.extend(
+            webhooks
+                .into_iter()
+                .map(|webhook| JobPayload::DeliverWebhook {
+                    webhook_id: webhook.id,
+                    event: WebhookEvent::ReleasePublished,
+                    payload_json: payload_json.clone(),
+                }),
+        );
+    }
+
+    jobs.extend(
+        notify_watchers(
+            pool,
+            repository_id,
+            NotificationSubject::Release(release_id),
+            NotificationKind::ReleasePublished,
+            Some(actor_id),
+            &[release.author_id],
+            "A new release was published",
+            &format!("published release {}", release.tag_name),
+        )
+        .await?,
+    );
+    Ok(jobs)
 }
 
 /// The standard "one person did something to another person" fan-out: an
 /// in-app notification plus, when the recipient hasn't opted out, an
 /// email. `action` is the sentence fragment after "@actor " (e.g.
-/// "assigned you issue #5: …").
+/// "assigned you issue #5: …"). `actor_id` is `None` when the acting user
+/// is unknown (an older event that didn't carry it).
 async fn notify(
     pool: &DbPool,
     recipient_id: UserId,
-    actor_id: UserId,
+    actor_id: Option<UserId>,
     kind: NotificationKind,
     subject: NotificationSubject,
     email_subject: &str,
@@ -297,14 +622,17 @@ async fn notify(
         .unwrap_or(true);
     if email_enabled {
         if let Ok(Some(recipient)) = UserRepo::find_by_id(pool, recipient_id).await {
-            let actor = UserRepo::find_by_id(pool, actor_id)
-                .await
-                .ok()
-                .flatten()
-                .map_or_else(
-                    || "Someone".to_string(),
-                    |row| format!("@{}", row.user.username),
-                );
+            let actor = match actor_id {
+                Some(id) => UserRepo::find_by_id(pool, id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map_or_else(
+                        || "Someone".to_string(),
+                        |row| format!("@{}", row.user.username),
+                    ),
+                None => "Someone".to_string(),
+            };
             jobs.push(JobPayload::SendEmail {
                 to_email: recipient.user.email,
                 subject: email_subject.to_string(),
@@ -498,20 +826,29 @@ mod tests {
         process_one(&pool, record).await.unwrap();
 
         let claimed = JobRepo::claim_batch(&pool, now_unix(), 10).await.unwrap();
-        assert_eq!(claimed.len(), 1);
-        match &claimed[0].payload {
-            JobPayload::DeliverWebhook {
-                webhook_id,
-                event,
-                payload_json,
-            } => {
-                assert_eq!(*webhook_id, subscribed);
-                assert_eq!(*event, WebhookEvent::PullRequestMerged);
-                assert!(payload_json.contains("\"alice\""));
-                assert!(payload_json.contains("Add a thing"));
-            }
-            other => panic!("unexpected payload: {other:?}"),
-        }
+        // Exactly one webhook delivery — to the subscribed hook only.
+        let deliveries: Vec<_> = claimed
+            .iter()
+            .filter_map(|job| match &job.payload {
+                JobPayload::DeliverWebhook {
+                    webhook_id,
+                    event,
+                    payload_json,
+                } => Some((*webhook_id, *event, payload_json.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].0, subscribed);
+        assert_eq!(deliveries[0].1, WebhookEvent::PullRequestMerged);
+        assert!(deliveries[0].2.contains("\"alice\""));
+        assert!(deliveries[0].2.contains("Add a thing"));
+        // The PR author is notified of the merge.
+        assert!(claimed.iter().any(|job| matches!(
+            &job.payload,
+            JobPayload::CreateNotification { user_id, kind, .. }
+                if *user_id == owner && *kind == NotificationKind::PrMerged
+        )));
         assert!(EventRepo::fetch_unprocessed(&pool, 10)
             .await
             .unwrap()
@@ -844,6 +1181,112 @@ mod tests {
             .collect();
         assert!(notified.contains(&author));
         assert!(notified.contains(&assignee));
+        assert!(!notified.contains(&closer), "the closer is not notified");
+    }
+
+    #[tokio::test]
+    async fn an_issue_opened_event_delivers_the_issue_opened_webhook() {
+        let pool = edda_db::test_pool().await;
+        let author = insert_user(&pool, "alice").await;
+        let repo_id = insert_repo(&pool, author, "demo").await;
+        let issue_id = edda_domain::IssueId::new();
+        IssueRepo::insert(&pool, issue_id, repo_id, "Bug", None, author)
+            .await
+            .unwrap();
+        WebhookRepo::insert(
+            &pool,
+            WebhookId::new(),
+            repo_id,
+            "https://example.com/hook",
+            b"ciphertext",
+            &[WebhookEvent::IssueOpened],
+        )
+        .await
+        .unwrap();
+
+        let event = DomainEvent::IssueOpened {
+            issue_id,
+            repository_id: repo_id,
+            opened_by_id: author,
+        };
+        EventRepo::append(&pool, EventId::new(), &event)
+            .await
+            .unwrap();
+        let record = EventRepo::fetch_unprocessed(&pool, 10).await.unwrap()[0].clone();
+        process_one(&pool, &record).await.unwrap();
+
+        let claimed = JobRepo::claim_batch(&pool, now_unix(), 10).await.unwrap();
+        assert!(claimed.iter().any(|job| matches!(
+            &job.payload,
+            JobPayload::DeliverWebhook { event, payload_json, .. }
+                if *event == WebhookEvent::IssueOpened && payload_json.contains("\"opened\"")
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_closed_event_notifies_a_repository_watcher_with_pr_closed() {
+        use edda_domain::{WatchId, WatchLevel, WatchSubject};
+
+        let pool = edda_db::test_pool().await;
+        let author = insert_user(&pool, "alice").await;
+        let closer = insert_user(&pool, "bob").await;
+        let watcher = insert_user(&pool, "carol").await;
+        let repo_id = insert_repo(&pool, author, "demo").await;
+        WatchRepo::set(
+            &pool,
+            WatchId::new(),
+            watcher,
+            WatchSubject::Repository(repo_id),
+            WatchLevel::Watching,
+        )
+        .await
+        .unwrap();
+
+        let pr_id = PullRequestId::new();
+        PullRequestRepo::insert(
+            &pool,
+            pr_id,
+            repo_id,
+            edda_db::NewPullRequest {
+                title: "Add a thing",
+                body: None,
+                author_id: author,
+                source: &edda_domain::PrRef {
+                    repository_id: repo_id,
+                    branch: "feature".to_string(),
+                },
+                target: "main",
+                draft: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let event = DomainEvent::PullRequestClosed {
+            pull_request_id: pr_id,
+            repository_id: repo_id,
+            closed_by_id: closer,
+        };
+        EventRepo::append(&pool, EventId::new(), &event)
+            .await
+            .unwrap();
+        let record = EventRepo::fetch_unprocessed(&pool, 10).await.unwrap()[0].clone();
+        process_one(&pool, &record).await.unwrap();
+
+        let claimed = JobRepo::claim_batch(&pool, now_unix(), 20).await.unwrap();
+        let notified: std::collections::HashSet<_> = claimed
+            .iter()
+            .filter_map(|job| match &job.payload {
+                JobPayload::CreateNotification { user_id, kind, .. }
+                    if *kind == NotificationKind::PrClosed =>
+                {
+                    Some(*user_id)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(notified.contains(&watcher), "the repo watcher is notified");
+        assert!(notified.contains(&author), "the PR author is notified");
         assert!(!notified.contains(&closer), "the closer is not notified");
     }
 }

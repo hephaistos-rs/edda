@@ -279,6 +279,7 @@ async fn seeded_state(store_root_suffix: &str) -> (SshState, TestStore, UserId, 
         }),
         locks: Arc::new(LockRegistry::new()),
         authz: AuthorizationService::new(pool),
+        max_repo_size_bytes: None,
     };
 
     (state, store, user_id, key)

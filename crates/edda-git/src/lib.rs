@@ -1,6 +1,8 @@
 pub mod archive;
 pub mod blame;
 pub mod diff;
+pub mod history;
+pub mod hooks;
 pub mod merge;
 pub mod pack;
 pub mod pktline;
@@ -16,6 +18,7 @@ pub mod transfer;
 pub use archive::{archive, ArchiveFormat};
 pub use blame::{blame, Blame, BlameHunk};
 pub use diff::{commit_diff, diff_refs, DiffHunk, DiffLine, FileDiff};
+pub use hooks::{AppliedRef, ReceiveChecks, ReceiveOutcome};
 pub use merge::{merge_branches, merge_ref_into_branch, MergeOutcome};
 pub use refs::{force_set_ref, point_head_at, update_refs, RefUpdate, ZERO_ID};
 pub use search::{search_tree, SearchMatch};

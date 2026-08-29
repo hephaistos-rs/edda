@@ -18,4 +18,8 @@ pub struct SshState {
     pub store: Arc<dyn RepoStore>,
     pub locks: Arc<LockRegistry>,
     pub authz: AuthorizationService,
+    /// `EDDA_MAX_REPO_SIZE_BYTES` — the per-repository size quota the
+    /// receive hook enforces on a push, or `None` when unset. Wired from
+    /// `Settings` by the composition root (`edda-ssh` reads no env).
+    pub max_repo_size_bytes: Option<i64>,
 }

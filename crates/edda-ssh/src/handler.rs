@@ -27,10 +27,10 @@ enum ChannelState {
         identity: String,
         buffer: Vec<u8>,
         /// Resolved once, here, at command-open time (where `actor`/
-        /// `repository` are both in scope) — see `AuthorizationService::
-        /// protected_ref_names`'s own doc comment for why this
-        /// resolution can't happen inside `edda-git` itself.
-        protected_refs: std::collections::HashSet<String>,
+        /// `repository` are both in scope) — see
+        /// `AuthorizationService::resolve_receive_checks`'s own doc comment
+        /// for why this resolution can't happen inside `edda-git` itself.
+        checks: edda_git::ReceiveChecks,
     },
 }
 
@@ -226,16 +226,23 @@ impl server::Handler for Connection {
                 buffer: Vec::new(),
             },
             crate::command::GitService::ReceivePack => {
-                let protected_refs = self
+                let checks = self
                     .state
                     .authz
-                    .protected_ref_names(&actor, &repository)
+                    .resolve_receive_checks(&actor, &repository, self.state.max_repo_size_bytes)
                     .await
+                    .map(|resolved| edda_git::ReceiveChecks {
+                        blocked_ref_patterns: resolved.blocked_ref_patterns,
+                        linear_history_ref_patterns: resolved.linear_history_ref_patterns,
+                        signed_commit_ref_patterns: resolved.signed_commit_ref_patterns,
+                        max_repo_bytes: resolved.max_repo_bytes,
+                        current_repo_bytes: resolved.current_repo_bytes,
+                    })
                     .unwrap_or_default();
                 ChannelState::ReceivePack {
                     identity,
                     buffer: Vec::new(),
-                    protected_refs,
+                    checks,
                 }
             }
         };
@@ -296,7 +303,7 @@ impl server::Handler for Connection {
         if let Some(ChannelState::ReceivePack {
             identity,
             buffer,
-            protected_refs,
+            checks,
         }) = self.channels.remove(&channel)
         {
             let body = Bytes::from(buffer);
@@ -305,11 +312,11 @@ impl server::Handler for Connection {
                 &self.state.locks,
                 &identity,
                 body,
-                &protected_refs,
+                checks,
             )
             .await
             {
-                Ok(response) => succeed_git_command(channel, session, response)?,
+                Ok(outcome) => succeed_git_command(channel, session, outcome.response)?,
                 Err(err) => fail_git_command(channel, session, &err.to_string())?,
             }
         }

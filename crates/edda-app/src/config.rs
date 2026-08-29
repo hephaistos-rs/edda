@@ -187,6 +187,14 @@ pub struct GitLimits {
     /// `EDDA_LFS_MAX_OBJECT_BYTES` (default 4 GiB) — the largest single
     /// Git LFS object an upload may send.
     pub max_lfs_object_bytes: u64,
+    /// `EDDA_MAX_REPO_SIZE_BYTES` (unset / `0` → no quota) — a push that
+    /// would take a repository past this on-disk size is rejected by the
+    /// receive hook.
+    pub max_repo_size_bytes: Option<u64>,
+    /// `EDDA_MAX_USER_REPOS` (unset / `0` → no quota) — the largest number
+    /// of repositories one user account may own; creating another is
+    /// rejected.
+    pub max_user_repos: Option<u32>,
 }
 
 impl Default for GitLimits {
@@ -194,6 +202,8 @@ impl Default for GitLimits {
         Self {
             max_pack_bytes: 2 * 1024 * 1024 * 1024,
             max_lfs_object_bytes: 4 * 1024 * 1024 * 1024,
+            max_repo_size_bytes: None,
+            max_user_repos: None,
         }
     }
 }
@@ -512,6 +522,10 @@ impl Settings {
         if max_lfs_object_bytes == 0 {
             env.fail("EDDA_LFS_MAX_OBJECT_BYTES", "must be greater than 0");
         }
+        // Quotas: unset (or an explicit 0) means "no limit".
+        let max_repo_size_bytes =
+            Some(env.parse_or::<u64>("EDDA_MAX_REPO_SIZE_BYTES", 0)).filter(|v| *v > 0);
+        let max_user_repos = Some(env.parse_or::<u32>("EDDA_MAX_USER_REPOS", 0)).filter(|v| *v > 0);
 
         if !env.errors.is_empty() {
             return Err(ConfigErrors(env.errors));
@@ -537,6 +551,8 @@ impl Settings {
                 limits: GitLimits {
                     max_pack_bytes,
                     max_lfs_object_bytes,
+                    max_repo_size_bytes,
+                    max_user_repos,
                 },
             },
             secret_keys,
@@ -997,6 +1013,8 @@ mod tests {
         "EDDA_REQUIRE_SIGNIN_VIEW",
         "EDDA_GIT_MAX_PACK_BYTES",
         "EDDA_LFS_MAX_OBJECT_BYTES",
+        "EDDA_MAX_REPO_SIZE_BYTES",
+        "EDDA_MAX_USER_REPOS",
     ];
 
     #[test]

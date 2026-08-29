@@ -235,3 +235,204 @@ async fn a_protected_branch_rejects_a_direct_push_from_a_non_admin_collaborator(
     let _ = std::fs::remove_dir_all(&work_dir);
     let _ = std::fs::remove_dir_all(&store_root);
 }
+
+/// A glob pattern (`release/*`) blocks a non-allowlisted collaborator's
+/// direct push to any matched branch; adding them to the rule's push
+/// allowlist lets the same push through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_glob_pattern_blocks_matched_branches_unless_the_pusher_is_allowlisted() {
+    if !tool_available("git") {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+
+    let pool = edda_db::test_pool().await;
+    let store_root = temp_dir("glob-store");
+    let store: Arc<dyn RepoStore> = Arc::new(LocalFsStore::new(store_root.clone()));
+    let locks = Arc::new(LockRegistry::new());
+
+    let alice_id = UserId::new();
+    edda_db::UserRepo::insert(&pool, alice_id, "alice", "alice@example.com", "unused")
+        .await
+        .unwrap();
+    let (alice_token, _) = tokens::create(&pool, alice_id, "ci").await.unwrap();
+    let bob_id = UserId::new();
+    edda_db::UserRepo::insert(&pool, bob_id, "bob", "bob@example.com", "unused")
+        .await
+        .unwrap();
+    let (bob_token, _) = tokens::create(&pool, bob_id, "ci").await.unwrap();
+
+    edda_git::create_repo(store.as_ref(), &locks, "alice/demo")
+        .await
+        .unwrap();
+    let repository = Repository {
+        id: RepositoryId::new(),
+        owner: RepositoryOwner::User(alice_id),
+        name: "demo".to_string(),
+        description: None,
+        visibility: Visibility::Public,
+        forked_from: None,
+    };
+    RepositoryRepo::insert_with_owner(&pool, &repository, alice_id)
+        .await
+        .unwrap();
+    RepoAccessRepo::grant(
+        &pool,
+        repository.id,
+        AccessSubject::User(bob_id),
+        RepoRole::Write,
+    )
+    .await
+    .unwrap();
+
+    let rule_id = BranchProtectionRepo::upsert_by_pattern(
+        &pool,
+        BranchProtectionRuleId::new(),
+        repository.id,
+        "release/*",
+        &edda_db::BranchProtectionSettings::default(),
+    )
+    .await
+    .unwrap();
+
+    let state = AppState {
+        pool: pool.clone(),
+        store,
+        locks,
+        authz: AuthorizationService::new(pool.clone()),
+        backend: Backend::new(pool.clone()),
+        config: Default::default(),
+    };
+    let addr = spawn_server(state).await;
+
+    let work_dir = temp_dir("glob-work");
+    std::fs::create_dir_all(&work_dir).unwrap();
+
+    // Alice seeds `main`.
+    let alice_remote = format!("http://ci:{alice_token}@{addr}/alice/demo.git");
+    run(&work_dir, "git", &["clone", &alice_remote, "alice-repo"]);
+    let alice_repo_dir = work_dir.join("alice-repo");
+    std::fs::write(alice_repo_dir.join("README.md"), b"# Demo\n").unwrap();
+    run(&alice_repo_dir, "git", &["add", "README.md"]);
+    run(&alice_repo_dir, "git", &["commit", "-m", "initial commit"]);
+    run(
+        &alice_repo_dir,
+        "git",
+        &["push", "origin", "HEAD:refs/heads/main"],
+    );
+
+    // Bob (Write) tries to push a branch matching `release/*` — rejected.
+    let bob_remote = format!("http://ci:{bob_token}@{addr}/alice/demo.git");
+    run(&work_dir, "git", &["clone", &bob_remote, "bob-repo"]);
+    let bob_repo_dir = work_dir.join("bob-repo");
+    std::fs::write(bob_repo_dir.join("r.txt"), b"cut a release\n").unwrap();
+    run(&bob_repo_dir, "git", &["add", "r.txt"]);
+    run(&bob_repo_dir, "git", &["commit", "-m", "release prep"]);
+
+    let blocked = Command::new("git")
+        .args(["push", "origin", "HEAD:refs/heads/release/2.0"])
+        .current_dir(&bob_repo_dir)
+        .output()
+        .unwrap();
+    assert!(
+        !blocked.status.success(),
+        "bob's push to release/2.0 should be blocked by the release/* rule"
+    );
+
+    // Allowlist bob on the rule — now the same push lands.
+    BranchProtectionRepo::replace_allowlist(&pool, rule_id, &[AccessSubject::User(bob_id)])
+        .await
+        .unwrap();
+    run(
+        &bob_repo_dir,
+        "git",
+        &["push", "origin", "HEAD:refs/heads/release/2.0"],
+    );
+
+    let _ = std::fs::remove_dir_all(&work_dir);
+    let _ = std::fs::remove_dir_all(&store_root);
+}
+
+/// A push that would take the repository past `EDDA_MAX_REPO_SIZE_BYTES`
+/// is rejected by the receive hook with a size-limit message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_push_over_the_repository_size_quota_is_rejected() {
+    if !tool_available("git") {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+
+    let pool = edda_db::test_pool().await;
+    let store_root = temp_dir("quota-store");
+    let store: Arc<dyn RepoStore> = Arc::new(LocalFsStore::new(store_root.clone()));
+    let locks = Arc::new(LockRegistry::new());
+
+    let alice_id = UserId::new();
+    edda_db::UserRepo::insert(&pool, alice_id, "alice", "alice@example.com", "unused")
+        .await
+        .unwrap();
+    let (alice_token, _) = tokens::create(&pool, alice_id, "ci").await.unwrap();
+
+    edda_git::create_repo(store.as_ref(), &locks, "alice/demo")
+        .await
+        .unwrap();
+    let repository = Repository {
+        id: RepositoryId::new(),
+        owner: RepositoryOwner::User(alice_id),
+        name: "demo".to_string(),
+        description: None,
+        visibility: Visibility::Public,
+        forked_from: None,
+    };
+    RepositoryRepo::insert_with_owner(&pool, &repository, alice_id)
+        .await
+        .unwrap();
+    // The repo is already recorded as sitting on the limit.
+    edda_db::RepoSizeRepo::upsert(&pool, repository.id, 4_096, 0)
+        .await
+        .unwrap();
+
+    let config = edda_app::RuntimeConfig {
+        git_limits: edda_app::config::GitLimits {
+            max_repo_size_bytes: Some(4_096),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let state = AppState {
+        pool: pool.clone(),
+        store,
+        locks,
+        authz: AuthorizationService::new(pool.clone()),
+        backend: Backend::new(pool.clone()),
+        config,
+    };
+    let addr = spawn_server(state).await;
+
+    let work_dir = temp_dir("quota-work");
+    std::fs::create_dir_all(&work_dir).unwrap();
+    let remote = format!("http://ci:{alice_token}@{addr}/alice/demo.git");
+    run(&work_dir, "git", &["clone", &remote, "repo"]);
+    let repo_dir = work_dir.join("repo");
+    std::fs::write(repo_dir.join("big.txt"), vec![b'x'; 8_192]).unwrap();
+    run(&repo_dir, "git", &["add", "big.txt"]);
+    run(&repo_dir, "git", &["commit", "-m", "over the quota"]);
+
+    let push = Command::new("git")
+        .args(["push", "origin", "HEAD:refs/heads/main"])
+        .current_dir(&repo_dir)
+        .output()
+        .unwrap();
+    assert!(
+        !push.status.success(),
+        "a push past the size quota should be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&push.stderr);
+    assert!(
+        stderr.contains("limit") || stderr.contains("rejected"),
+        "expected a size-limit rejection, got: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&work_dir);
+    let _ = std::fs::remove_dir_all(&store_root);
+}

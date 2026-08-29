@@ -24,7 +24,7 @@ pub mod totp;
 pub mod webauthn;
 pub mod webhook_signing;
 
-pub use authz::AuthorizationService;
+pub use authz::{AuthorizationService, ResolvedReceiveChecks};
 pub use backend::{AuthError, Backend, Credentials, SessionUser};
 pub use organization::{create_organization, CreateOrganizationError};
 pub use signup::{signup, SignupError, SignupOutcome};

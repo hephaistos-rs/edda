@@ -35,6 +35,9 @@ pub struct RepositoryService {
     /// unverified can't create repositories when the instance requires
     /// verification.
     registration: edda_domain::RegistrationPolicy,
+    /// `EDDA_MAX_USER_REPOS` — the cap on how many repositories one user
+    /// account may own, or `None` when unset (Phase 10, S7 quota half).
+    max_user_repos: Option<u32>,
 }
 
 impl RepositoryService {
@@ -44,6 +47,7 @@ impl RepositoryService {
         locks: Arc<LockRegistry>,
         authz: AuthorizationService,
         registration: edda_domain::RegistrationPolicy,
+        max_user_repos: Option<u32>,
     ) -> Self {
         Self {
             pool,
@@ -51,6 +55,7 @@ impl RepositoryService {
             locks,
             authz,
             registration,
+            max_user_repos,
         }
     }
 
@@ -62,7 +67,24 @@ impl RepositoryService {
             state.locks.clone(),
             state.authz.clone(),
             state.config.registration.clone(),
+            state.config.git_limits.max_user_repos,
         )
+    }
+
+    /// Rejects a personal-namespace repo creation that would take the
+    /// caller past `EDDA_MAX_USER_REPOS`. Organization-owned repos don't
+    /// count against a user's cap.
+    async fn check_user_repo_quota(&self, owner: &RepositoryOwner) -> Result<(), ServiceError> {
+        let (RepositoryOwner::User(user_id), Some(max)) = (owner, self.max_user_repos) else {
+            return Ok(());
+        };
+        let owned = RepositoryRepo::count_owned_by_user(&self.pool, *user_id).await?;
+        if owned >= i64::from(max) {
+            return Err(ServiceError::Conflict(format!(
+                "this account already owns the maximum of {max} repositories"
+            )));
+        }
+        Ok(())
     }
 
     /// Create a repository under the caller's namespace, or under an
@@ -107,6 +129,7 @@ impl RepositoryService {
             }
             None => (user.username.clone(), RepositoryOwner::User(user.id), None),
         };
+        self.check_user_repo_quota(&repo_owner).await?;
         let identity = git_identity(&owner_username, spec.name.trim());
 
         let repository = Repository {
@@ -155,6 +178,8 @@ impl RepositoryService {
                 "you already own this repository".to_string(),
             ));
         }
+        self.check_user_repo_quota(&RepositoryOwner::User(user.id))
+            .await?;
 
         edda_git::fork_repo(
             self.store.as_ref(),

@@ -15,12 +15,12 @@
 //! part (ref lines + flush); a caller that needs the service line adds it
 //! itself.
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 
 use bytes::Bytes;
 use gix::ObjectId;
 
+use crate::hooks::{self, AppliedRef, ReceiveChecks, ReceiveOutcome};
 use crate::pack::{build_shallow_pack, Deepen, ShallowSpec};
 use crate::pktline::{read_pkt_line, write_flush, write_pkt_line, PktLine};
 use crate::quarantine::{self, Quarantine};
@@ -474,41 +474,39 @@ pub fn parse_receive_pack_commands(body: &[u8]) -> Result<(Vec<RefCommand>, usiz
 ///    object store byte-identical to before;
 /// 5. repairs an unborn HEAD if the push landed.
 ///
-/// Returns the wire response (`report-status` lines). The caller must
-/// hold `locks`'s lock for `name` for the duration of this call — see
+/// Returns a [`ReceiveOutcome`]: the wire response (`report-status`
+/// lines) and the ref updates that actually landed. The caller must hold
+/// `locks`'s lock for `name` for the duration of this call — see
 /// `run_receive_pack` for the common case.
 ///
-/// `protected_refs` names every ref this push may not touch (empty — the
-/// common case — means no restriction). This crate has no notion of *why*
-/// a branch is protected (no `edda-db`/`edda-domain` dependency, by
-/// design); the caller resolves that against `BranchProtectionRule`s and
-/// the pushing actor's role *before* calling this.
+/// `checks` carries the resolved branch-protection / quota state this push
+/// is evaluated against (empty — the common case — means no restriction).
+/// This crate has no notion of *why* a branch is protected or *who* is
+/// pushing (no `edda-db`/`edda-auth` dependency, by design); the caller
+/// resolves that against `BranchProtectionRule`s and the pushing actor
+/// *before* calling this. See [`crate::hooks`].
 pub async fn apply_receive_pack(
     repo: gix::Repository,
     git_dir: PathBuf,
     commands: Vec<RefCommand>,
     pack_data: Bytes,
-    protected_refs: &HashSet<String>,
-) -> Result<Vec<u8>, String> {
+    checks: ReceiveChecks,
+) -> Result<ReceiveOutcome, String> {
     if commands.is_empty() {
         // `git`'s HTTP transport probes a large chunked push with a bare
         // flush pkt (no commands) and aborts unless that probe gets a 2xx
         // — so an empty request is a benign no-op, not an error.
-        return Ok(Vec::new());
+        return Ok(ReceiveOutcome {
+            response: Vec::new(),
+            applied: Vec::new(),
+        });
     }
 
-    // A push that touches a protected ref is rejected in full — atomic
-    // semantics mean the other refs in the same push don't land either.
-    let protected = commands
-        .iter()
-        .map(|command| command.ref_name.clone())
-        .find(|name| protected_refs.contains(name));
-
-    // Pack ingest, fsck, ref transaction and promotion are all CPU/FS
-    // work — one hop onto the blocking pool for the lot.
+    // Pack ingest, fsck, hooks, ref transaction and promotion are all
+    // CPU/FS work — one hop onto the blocking pool for the lot.
     let current_span = tracing::Span::current();
     match tokio::task::spawn_blocking(move || {
-        current_span.in_scope(|| receive_blocking(repo, git_dir, commands, pack_data, protected))
+        current_span.in_scope(|| receive_blocking(repo, git_dir, commands, pack_data, &checks))
     })
     .await
     {
@@ -537,8 +535,8 @@ fn receive_blocking(
     git_dir: PathBuf,
     commands: Vec<RefCommand>,
     pack_data: Bytes,
-    protected: Option<String>,
-) -> Result<Vec<u8>, String> {
+    checks: &ReceiveChecks,
+) -> Result<ReceiveOutcome, String> {
     let needs_pack = commands.iter().any(|command| command.new_id != ZERO_ID);
 
     let quarantine = if needs_pack {
@@ -550,10 +548,14 @@ fn receive_blocking(
     let mut guard = QuarantineGuard(quarantine);
 
     let applied: Result<(), String> = (|| {
-        if let Some(name) = &protected {
-            return Err(format!(
-                "{name}: protected branch — open a pull request instead"
-            ));
+        // Pre-ingest hook checks: the direct-push block (glob-matched) and
+        // the size quota. A push that trips either is rejected in full —
+        // atomic semantics mean no ref in it lands.
+        if let Some(reason) = hooks::blocked_ref_rejection(checks, &commands) {
+            return Err(reason);
+        }
+        if let Some(reason) = hooks::quota_rejection(checks, pack_data.len() as u64) {
+            return Err(reason);
         }
 
         if let Some(quarantine) = guard.0.as_ref() {
@@ -572,12 +574,26 @@ fn receive_blocking(
 
         // Promote the pack into the live store *before* the ref
         // transaction, so a committed ref never points at objects that
-        // aren't really there. If the transaction then fails its CAS, roll
-        // the pack back out — nothing references it yet.
-        let promoted = match guard.0.take() {
+        // aren't really there. If a later step fails, roll the pack back
+        // out — nothing references it yet.
+        let mut promoted = match guard.0.take() {
             Some(quarantine) => Some(quarantine.promote(&repo).map_err(|err| err.to_string())?),
             None => None,
         };
+
+        // Post-promote hook checks: linear history / signed commits, which
+        // need every added commit to resolve against the live store.
+        if !checks.linear_history_ref_patterns.is_empty()
+            || !checks.signed_commit_ref_patterns.is_empty()
+        {
+            let fresh = gix::open(&git_dir).map_err(|err| err.to_string())?;
+            if let Some(reason) = hooks::history_rejection(&fresh, checks, &commands) {
+                if let Some(promoted) = promoted.take() {
+                    promoted.rollback();
+                }
+                return Err(reason);
+            }
+        }
 
         let updates: Vec<RefUpdate> = commands
             .iter()
@@ -590,7 +606,7 @@ fn receive_blocking(
         match update_refs(&repo, &updates, "push") {
             Ok(()) => Ok(()),
             Err(err) => {
-                if let Some(promoted) = promoted {
+                if let Some(promoted) = promoted.take() {
                     promoted.rollback();
                 }
                 Err(err.to_string())
@@ -615,21 +631,36 @@ fn receive_blocking(
         write_pkt_line(&mut out, line.as_bytes());
     }
     write_flush(&mut out);
-    Ok(out)
+
+    let applied_refs = match &applied {
+        Ok(()) => commands
+            .iter()
+            .map(|command| AppliedRef {
+                name: command.ref_name.clone(),
+                old: command.old_id.clone(),
+                new: command.new_id.clone(),
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    Ok(ReceiveOutcome {
+        response: out,
+        applied: applied_refs,
+    })
 }
 
 /// Opens `name`, holds `locks`'s per-repo lock for the duration (a push is
 /// a write: it must not land while, say, someone deletes the repo out
 /// from under it via the web UI, or another push races it), and runs the
 /// complete receive-pack cycle against `body`. See
-/// [`apply_receive_pack`]'s doc comment for `protected_refs`.
+/// [`apply_receive_pack`]'s doc comment for `checks`.
 pub async fn run_receive_pack(
     store: &dyn RepoStore,
     locks: &LockRegistry,
     name: &str,
     body: Bytes,
-    protected_refs: &HashSet<String>,
-) -> Result<Vec<u8>, GitError> {
+    checks: ReceiveChecks,
+) -> Result<ReceiveOutcome, GitError> {
     let git_dir = crate::validated_repo_dir(store, name)?;
     let repo = gix::open(&git_dir).map_err(|err| GitError::Git(err.to_string()))?;
 
@@ -638,7 +669,7 @@ pub async fn run_receive_pack(
 
     let (commands, pos) = parse_receive_pack_commands(&body).map_err(GitError::Git)?;
     let pack_data = body.slice(pos..);
-    apply_receive_pack(repo, git_dir, commands, pack_data, protected_refs)
+    apply_receive_pack(repo, git_dir, commands, pack_data, checks)
         .await
         .map_err(GitError::Git)
 }

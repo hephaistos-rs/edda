@@ -401,28 +401,50 @@ async fn receive_pack(
     };
 
     let actor = resolve_actor(&state, &auth, &headers).await;
-    let protected_refs = state
+    let checks = state
         .authz
-        .protected_ref_names(&actor, &repository)
+        .resolve_receive_checks(
+            &actor,
+            &repository,
+            state
+                .config
+                .git_limits
+                .max_repo_size_bytes
+                .and_then(|bytes| i64::try_from(bytes).ok()),
+        )
         .await
+        .map(to_git_checks)
         .unwrap_or_default();
 
-    let out = match protocol::run_receive_pack(
+    let outcome = match protocol::run_receive_pack(
         state.store.as_ref(),
         &state.locks,
         &identity,
         body,
-        &protected_refs,
+        checks,
     )
     .await
     {
-        Ok(out) => out,
+        Ok(outcome) => outcome,
         Err(err) => return (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
     };
 
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/x-git-receive-pack-result")
-        .body(Body::from(out))
+        .body(Body::from(outcome.response))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// The trivial field copy from `edda-auth`'s transport-neutral resolution
+/// to `edda-git`'s `ReceiveChecks` (`edda-auth` must not name an
+/// `edda-git` type — see that crate's root).
+fn to_git_checks(resolved: edda_auth::ResolvedReceiveChecks) -> edda_git::ReceiveChecks {
+    edda_git::ReceiveChecks {
+        blocked_ref_patterns: resolved.blocked_ref_patterns,
+        linear_history_ref_patterns: resolved.linear_history_ref_patterns,
+        signed_commit_ref_patterns: resolved.signed_commit_ref_patterns,
+        max_repo_bytes: resolved.max_repo_bytes,
+        current_repo_bytes: resolved.current_repo_bytes,
+    }
 }

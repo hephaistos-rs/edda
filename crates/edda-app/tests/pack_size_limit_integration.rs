@@ -277,6 +277,8 @@ async fn a_push_over_the_configured_pack_ceiling_is_rejected_and_writes_nothing(
             git_limits: edda_app::config::GitLimits {
                 max_pack_bytes: 256 * 1024,
                 max_lfs_object_bytes: 4 * 1024 * 1024 * 1024,
+                max_repo_size_bytes: None,
+                max_user_repos: None,
             },
             ..Default::default()
         },

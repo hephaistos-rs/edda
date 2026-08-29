@@ -4,13 +4,33 @@
 //! a decision in `edda_domain::access` needs.
 
 use edda_db::{
-    BranchProtectionRepo, DbPool, OrganizationRepo, RepoAccessRepo, RepositoryRepo, TeamMemberRepo,
+    BranchProtectionRepo, DbPool, OrganizationRepo, RepoAccessRepo, RepoSizeRepo, RepositoryRepo,
+    TeamMemberRepo,
 };
 use edda_domain::{
     can_administer_repository, can_manage_repository_danger_zone, can_merge_pull_request,
     can_open_cross_repo_pull_request, can_read_repository, can_write_repository,
-    effective_repo_role, ActorContext, AuthzError, OrganizationId, PrReview, Repository,
+    effective_repo_role, AccessSubject, ActorContext, AuthzError, OrganizationId, PrReview,
+    Repository,
 };
+
+/// The branch-protection / quota state a `git push` is evaluated against,
+/// resolved for one pushing actor. A plain-data mirror of
+/// `edda_git::ReceiveChecks` (`edda-auth` must not depend on `edda-git` —
+/// see the crate root); each transport does the trivial field copy.
+#[derive(Debug, Default, Clone)]
+pub struct ResolvedReceiveChecks {
+    /// `refs/heads/*` globs this actor may not push to directly.
+    pub blocked_ref_patterns: Vec<String>,
+    /// `refs/heads/*` globs whose branches must keep a linear history.
+    pub linear_history_ref_patterns: Vec<String>,
+    /// `refs/heads/*` globs whose new commits must be signed.
+    pub signed_commit_ref_patterns: Vec<String>,
+    /// The per-repository byte quota, or `None` if unset.
+    pub max_repo_bytes: Option<u64>,
+    /// The repository's last-measured on-disk size.
+    pub current_repo_bytes: u64,
+}
 
 #[derive(Clone)]
 pub struct AuthorizationService {
@@ -197,29 +217,63 @@ impl AuthorizationService {
         )
     }
 
-    /// Every `refs/heads/{branch}` a direct push to `repository` may not
-    /// touch, for `actor` — empty if `actor` administers the repository
-    /// (branch-protection's direct-push block doesn't apply to Admin+;
-    /// see `edda_domain::branch_protection`'s module doc comment), else
-    /// every protected branch's ref name. Used by `edda-git`'s receive-
-    /// pack path (`edda-git` itself has no `edda-db`/`edda-domain`
-    /// dependency — see that crate's own doc comment on
-    /// `apply_receive_pack`'s `protected_refs` parameter for why this
-    /// resolution happens here instead).
-    pub async fn protected_ref_names(
+    /// Resolves the branch-protection / quota state a `git push` by
+    /// `actor` to `repository` is evaluated against. `edda-git`'s receive
+    /// path enforces the returned globs/limits; it has no `edda-db`
+    /// dependency of its own, so the resolution happens here (see
+    /// `edda_git::hooks`).
+    ///
+    /// An `actor` who administers the repository bypasses every
+    /// branch-protection push check (the direct-push block, linear
+    /// history, signed commits) — matching how mainstream git hosts
+    /// default that control — but the size quota still applies to
+    /// everyone. `max_repo_bytes` is the configured limit (`None` /
+    /// non-positive → no quota); it is passed in because config lives in
+    /// `edda-app`, not here.
+    pub async fn resolve_receive_checks(
         &self,
         actor: &ActorContext,
         repository: &Repository,
-    ) -> Result<std::collections::HashSet<String>, AuthzError> {
-        if self.check_administer(actor, repository).await.is_ok() {
-            return Ok(std::collections::HashSet::new());
-        }
-        let rules = BranchProtectionRepo::list_for_repository(&self.pool, repository.id)
+        max_repo_bytes: Option<i64>,
+    ) -> Result<ResolvedReceiveChecks, AuthzError> {
+        let current_repo_bytes = RepoSizeRepo::get(&self.pool, repository.id)
             .await
-            .map_err(|_| AuthzError::NotFound)?;
-        Ok(rules
-            .into_iter()
-            .map(|rule| format!("refs/heads/{}", rule.pattern))
-            .collect())
+            .map_err(|_| AuthzError::NotFound)?
+            .map_or(0, |size| size.total_bytes().max(0) as u64);
+        let max_repo_bytes = max_repo_bytes
+            .filter(|limit| *limit > 0)
+            .map(|limit| limit as u64);
+
+        let mut checks = ResolvedReceiveChecks {
+            current_repo_bytes,
+            max_repo_bytes,
+            ..Default::default()
+        };
+
+        if self.check_administer(actor, repository).await.is_ok() {
+            return Ok(checks);
+        }
+
+        let rules =
+            BranchProtectionRepo::list_for_repository_with_allowlist(&self.pool, repository.id)
+                .await
+                .map_err(|_| AuthzError::NotFound)?;
+        let actor_subject = actor.user_id().map(AccessSubject::User);
+        for rule in rules {
+            let ref_glob = format!("refs/heads/{}", rule.pattern);
+            let allowlisted = actor_subject
+                .as_ref()
+                .is_some_and(|subject| rule.push_allowlist.contains(subject));
+            if !allowlisted {
+                checks.blocked_ref_patterns.push(ref_glob.clone());
+            }
+            if rule.require_linear_history {
+                checks.linear_history_ref_patterns.push(ref_glob.clone());
+            }
+            if rule.require_signed_commits {
+                checks.signed_commit_ref_patterns.push(ref_glob);
+            }
+        }
+        Ok(checks)
     }
 }

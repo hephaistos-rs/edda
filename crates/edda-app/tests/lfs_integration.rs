@@ -242,6 +242,8 @@ async fn an_lfs_upload_over_the_configured_object_ceiling_is_refused() {
             git_limits: edda_app::config::GitLimits {
                 max_pack_bytes: 2 * 1024 * 1024 * 1024,
                 max_lfs_object_bytes: 64 * 1024,
+                max_repo_size_bytes: None,
+                max_user_repos: None,
             },
             ..Default::default()
         },

@@ -227,6 +227,11 @@ fn main() {
                     store,
                     locks,
                     authz,
+                    max_repo_size_bytes: settings
+                        .git
+                        .limits
+                        .max_repo_size_bytes
+                        .and_then(|bytes| i64::try_from(bytes).ok()),
                 };
                 let ssh_bind = settings.ssh.bind;
                 let host_key_path = settings.ssh.host_key_path.clone();

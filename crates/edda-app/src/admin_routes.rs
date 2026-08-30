@@ -13,11 +13,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_login::AuthSession;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use edda_auth::Backend;
-use edda_domain::require_instance_admin;
+use edda_domain::{require_instance_admin, InstanceSettings, RegistrationMode, Visibility};
 
+use crate::services::InstanceSettingsService;
 use crate::state::AppState;
 
 /// Best-effort admin audit logging, via the one audit path
@@ -40,6 +41,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/admin/users/{id}/enable", post(enable_user))
         .route("/api/admin/users/{id}", axum::routing::delete(delete_user))
         .route("/api/admin/audit-events", get(list_audit_events))
+        .route(
+            "/api/admin/settings",
+            get(get_instance_settings).put(put_instance_settings),
+        )
 }
 
 fn require_admin(
@@ -298,5 +303,96 @@ async fn list_audit_events(State(state): State<AppState>, auth: AuthSession<Back
         )
         .into_response(),
         Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+/// The admin-editable instance settings (Phase 12). `registration_mode`
+/// and `default_repo_visibility` are the same lowercase strings the
+/// corresponding `EDDA_*` variables and the database use.
+#[derive(Serialize, Deserialize)]
+struct InstanceSettingsDto {
+    registration_mode: String,
+    default_repo_visibility: String,
+    welcome_message: Option<String>,
+    require_signin_to_view: bool,
+}
+
+impl From<&InstanceSettings> for InstanceSettingsDto {
+    fn from(settings: &InstanceSettings) -> Self {
+        Self {
+            registration_mode: settings.registration_mode.as_db_str().to_string(),
+            default_repo_visibility: settings.default_repo_visibility.as_db_str().to_string(),
+            welcome_message: settings.welcome_message.clone(),
+            require_signin_to_view: settings.require_signin_to_view,
+        }
+    }
+}
+
+impl InstanceSettingsDto {
+    fn into_domain(self) -> Result<InstanceSettings, (StatusCode, String)> {
+        let registration_mode = RegistrationMode::parse(&self.registration_mode).ok_or((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "registration_mode must be one of open, approval, closed (got {:?})",
+                self.registration_mode
+            ),
+        ))?;
+        let default_repo_visibility = Visibility::from_db_str(self.default_repo_visibility.trim())
+            .ok_or((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "default_repo_visibility must be one of public, private (got {:?})",
+                    self.default_repo_visibility
+                ),
+            ))?;
+        let welcome_message = self
+            .welcome_message
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty());
+        Ok(InstanceSettings {
+            registration_mode,
+            default_repo_visibility,
+            welcome_message,
+            require_signin_to_view: self.require_signin_to_view,
+        })
+    }
+}
+
+#[tracing::instrument(name = "admin.settings.get", skip_all)]
+async fn get_instance_settings(
+    State(state): State<AppState>,
+    auth: AuthSession<Backend>,
+) -> Response {
+    if let Err(err) = require_admin(&auth) {
+        return err.into_response();
+    }
+    let current = state.config.instance_settings.load();
+    Json(InstanceSettingsDto::from(&**current)).into_response()
+}
+
+#[tracing::instrument(name = "admin.settings.put", skip_all)]
+async fn put_instance_settings(
+    State(state): State<AppState>,
+    auth: AuthSession<Backend>,
+    Json(body): Json<InstanceSettingsDto>,
+) -> Response {
+    let admin = match require_admin(&auth) {
+        Ok(admin) => admin,
+        Err(err) => return err.into_response(),
+    };
+    let settings = match body.into_domain() {
+        Ok(settings) => settings,
+        Err((status, message)) => return (status, message).into_response(),
+    };
+    match InstanceSettingsService::from_state(&state)
+        .save(&settings, &admin.id.to_string())
+        .await
+    {
+        Ok(updated) => Json(InstanceSettingsDto::from(&*updated)).into_response(),
+        Err(err) => (
+            StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            err.client_message(),
+        )
+            .into_response(),
     }
 }

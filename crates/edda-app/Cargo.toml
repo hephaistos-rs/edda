@@ -20,6 +20,10 @@ workspace = true
 # not a default `axum` feature.
 axum = { workspace = true, features = ["multipart"] }
 axum-login = { workspace = true }
+# The `instance_settings` runtime cache (`services::instance_settings`): the
+# request path reads the effective settings wait-free; an admin save writes
+# the DB and swaps in a fresh snapshot, no restart.
+arc-swap = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
 edda-api-types = { workspace = true }

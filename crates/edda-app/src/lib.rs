@@ -8,6 +8,7 @@ pub mod api;
 mod auth_routes;
 pub mod config;
 mod git_http;
+mod instance_routes;
 mod lfs;
 mod oauth_routes;
 mod rate_limit;
@@ -62,6 +63,7 @@ pub fn router(state: AppState) -> Router {
         .merge(auth_endpoints)
         .merge(access_routes::routes())
         .merge(ssh_key_routes::routes())
+        .merge(instance_routes::routes())
         .merge(admin_routes::routes())
         .merge(release_assets::routes())
         .merge(api::routes())

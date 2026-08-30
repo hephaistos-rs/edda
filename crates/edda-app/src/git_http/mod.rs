@@ -187,7 +187,7 @@ pub(crate) async fn require_read_access(
 ) -> Result<(), Response> {
     // Instance-private mode (Phase 9, `EDDA_REQUIRE_SIGNIN_VIEW`): no
     // anonymous access to any repository over git-HTTP, public included.
-    if state.config.require_signin_to_view {
+    if state.config.require_signin_to_view() {
         let actor = resolve_actor(state, auth, headers).await;
         if matches!(actor, ActorContext::Anonymous) {
             return Err(unauthorized_response(

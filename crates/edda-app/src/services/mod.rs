@@ -18,6 +18,7 @@ pub mod audit;
 pub mod branch_protection;
 pub mod collaborator;
 pub mod deploy_key;
+pub mod instance_settings;
 pub mod issue;
 pub mod mentions;
 pub mod notification;
@@ -33,6 +34,7 @@ pub use branch_protection::{
 };
 pub use collaborator::CollaboratorService;
 pub use deploy_key::DeployKeyService;
+pub use instance_settings::InstanceSettingsService;
 pub use issue::IssueService;
 pub use notification::NotificationService;
 pub use organization::OrganizationService;

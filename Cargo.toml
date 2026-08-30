@@ -104,6 +104,13 @@ edda-web = { path = "crates/edda-web" }
 # at-rest-encryption questions for whenever those features are built.
 aes-gcm = "0.11.1"
 argon2 = "0.5.3"
+# Lock-free atomic swap of an `Arc` — backs the in-memory `instance_settings`
+# cache (`edda-app`'s `InstanceSettingsService`): the request path reads the
+# effective settings with a wait-free `.load()`, an admin "save settings"
+# writes the DB then `.store()`s a fresh snapshot, no restart. Already in the
+# lock graph transitively (1.9.2); naming it directly adds no resolved
+# version.
+arc-swap = "1.9.2"
 async-trait = "0.1.92"
 axum = "0.8.9"
 axum-login = "0.18.0"

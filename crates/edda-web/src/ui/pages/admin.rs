@@ -1,5 +1,16 @@
 use dioxus::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+/// The admin-editable instance settings (Phase 12). Mirrors the
+/// `InstanceSettingsDto` the `/api/admin/settings` route returns and
+/// accepts.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+struct InstanceSettingsForm {
+    registration_mode: String,
+    default_repo_visibility: String,
+    welcome_message: Option<String>,
+    require_signin_to_view: bool,
+}
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 struct AdminUserDto {
@@ -113,6 +124,47 @@ async fn request_delete_user(_id: &str) -> Result<(), String> {
     Err("not available during server rendering".to_string())
 }
 
+#[cfg(target_arch = "wasm32")]
+async fn fetch_settings() -> Result<InstanceSettingsForm, String> {
+    let response = gloo_net::http::Request::get("/api/admin/settings")
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+    if !response.ok() {
+        return Err(response
+            .text()
+            .await
+            .unwrap_or_else(|_| "couldn't load settings".to_string()));
+    }
+    response.json().await.map_err(|err| err.to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn fetch_settings() -> Result<InstanceSettingsForm, String> {
+    Err("not available during server rendering".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn save_settings(body: InstanceSettingsForm) -> Result<(), String> {
+    let request = gloo_net::http::Request::put("/api/admin/settings")
+        .json(&body)
+        .map_err(|err| err.to_string())?;
+    let response = request.send().await.map_err(|err| err.to_string())?;
+    if response.ok() {
+        Ok(())
+    } else {
+        Err(response
+            .text()
+            .await
+            .unwrap_or_else(|_| "couldn't save settings".to_string()))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn save_settings(_body: InstanceSettingsForm) -> Result<(), String> {
+    Err("not available during server rendering".to_string())
+}
+
 fn relative_time(unix_seconds: i64) -> String {
     let now = web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)
@@ -131,6 +183,7 @@ fn relative_time(unix_seconds: i64) -> String {
 pub fn Admin() -> Element {
     let mut users = use_resource(fetch_users);
     let events = use_resource(fetch_audit_events);
+    let settings = use_resource(fetch_settings);
     let mut action_error = use_signal(|| Option::<String>::None);
 
     rsx! {
@@ -140,7 +193,23 @@ pub fn Admin() -> Element {
                 "Server-side access control applies regardless of this page — a non-admin sees these actions fail, not just hidden."
             }
 
-            h2 { class: "mt-8 font-mono text-sm font-semibold text-ink", "Users" }
+            h2 { class: "mt-8 font-mono text-sm font-semibold text-ink", "Instance settings" }
+            p { class: "mt-1 text-sm text-ink-muted",
+                "Applied immediately, no restart. These override the matching EDDA_* startup values."
+            }
+            div { class: "mt-2",
+                match &*settings.read() {
+                    Some(Ok(current)) => rsx! { SettingsForm { initial: current.clone() } },
+                    Some(Err(err)) => rsx! {
+                        p { class: "text-sm text-status-conflict", "{err}" }
+                    },
+                    None => rsx! {
+                        p { class: "text-sm text-ink-muted", "loading…" }
+                    },
+                }
+            }
+
+            h2 { class: "mt-10 font-mono text-sm font-semibold text-ink", "Users" }
             if let Some(message) = action_error() {
                 p { class: "mt-2 font-mono text-xs text-status-conflict", "{message}" }
             }
@@ -236,6 +305,110 @@ pub fn Admin() -> Element {
                     None => rsx! {
                         p { class: "text-sm text-ink-muted", "loading…" }
                     },
+                }
+            }
+        }
+    }
+}
+
+/// The instance-settings editor. Its own child component so its per-field
+/// signals can be seeded directly from the loaded values — no
+/// populate-after-fetch dance.
+#[component]
+fn SettingsForm(initial: InstanceSettingsForm) -> Element {
+    let mut registration_mode = use_signal(|| initial.registration_mode.clone());
+    let mut default_repo_visibility = use_signal(|| initial.default_repo_visibility.clone());
+    let mut welcome_message = use_signal(|| initial.welcome_message.clone().unwrap_or_default());
+    let mut require_signin = use_signal(|| initial.require_signin_to_view);
+    let mut saving = use_signal(|| false);
+    let mut status = use_signal(|| Option::<Result<String, String>>::None);
+
+    let field =
+        "border border-line bg-surface px-2 py-1.5 font-mono text-sm text-ink disabled:opacity-60";
+
+    let on_save = move |_| {
+        let body = InstanceSettingsForm {
+            registration_mode: registration_mode(),
+            default_repo_visibility: default_repo_visibility(),
+            welcome_message: {
+                let trimmed = welcome_message().trim().to_string();
+                (!trimmed.is_empty()).then_some(trimmed)
+            },
+            require_signin_to_view: require_signin(),
+        };
+        saving.set(true);
+        status.set(None);
+        spawn(async move {
+            let result = save_settings(body).await;
+            saving.set(false);
+            status.set(Some(result.map(|()| {
+                "Saved — changes are live for the next request.".to_string()
+            })));
+        });
+    };
+
+    rsx! {
+        div { class: "space-y-4 border border-line p-4",
+            label { class: "block",
+                span { class: "font-mono text-xs text-ink-muted", "Registration mode" }
+                select {
+                    class: "{field} mt-1 block w-full",
+                    disabled: saving(),
+                    value: "{registration_mode}",
+                    onchange: move |event| registration_mode.set(event.value()),
+                    option { value: "open", "open — anyone may sign up and is active immediately" }
+                    option { value: "approval", "approval — an admin must approve each new account" }
+                    option { value: "closed", "closed — no self-service signup" }
+                }
+            }
+            label { class: "block",
+                span { class: "font-mono text-xs text-ink-muted", "Default repository visibility" }
+                select {
+                    class: "{field} mt-1 block w-full",
+                    disabled: saving(),
+                    value: "{default_repo_visibility}",
+                    onchange: move |event| default_repo_visibility.set(event.value()),
+                    option { value: "private", "private" }
+                    option { value: "public", "public" }
+                }
+            }
+            label { class: "block",
+                span { class: "font-mono text-xs text-ink-muted", "Welcome message (shown on the sign-in page; blank to remove)" }
+                textarea {
+                    class: "{field} mt-1 block w-full",
+                    disabled: saving(),
+                    rows: "3",
+                    value: "{welcome_message}",
+                    oninput: move |event| welcome_message.set(event.value()),
+                }
+            }
+            label { class: "flex items-center gap-2",
+                input {
+                    r#type: "checkbox",
+                    checked: require_signin(),
+                    disabled: saving(),
+                    onchange: move |event| require_signin.set(event.checked()),
+                }
+                span { class: "font-mono text-xs text-ink-muted",
+                    "Require sign-in to view anything (whole instance private, git clone included)"
+                }
+            }
+            div { class: "flex items-center gap-3",
+                button {
+                    r#type: "button",
+                    class: "border border-line px-3 py-1.5 font-mono text-sm text-ink hover:bg-surface disabled:opacity-60",
+                    disabled: saving(),
+                    onclick: on_save,
+                    if saving() { "saving…" } else { "Save settings" }
+                }
+                match status() {
+                    Some(Ok(message)) => rsx! {
+                        span { class: "font-mono text-xs text-accent", "{message}" }
+                    },
+                    Some(Err(err)) => rsx! {
+                        span { class: "font-mono text-xs text-status-conflict", "{err}" }
+                    },
+                    None => rsx! {},
                 }
             }
         }

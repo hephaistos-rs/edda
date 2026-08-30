@@ -43,10 +43,21 @@ async fn state_with(registration: RegistrationConfig) -> AppState {
         locks: Arc::new(edda_git::LockRegistry::new()),
         authz: AuthorizationService::new(pool.clone()),
         backend: Backend::new(pool.clone()),
-        config: RuntimeConfig {
-            registration: registration.policy,
-            require_signin_to_view: registration.require_signin_to_view,
-            ..Default::default()
+        config: {
+            // Mirror what the composition root does: seed the
+            // `instance_settings` cache from the same baseline the rest of
+            // `RuntimeConfig` uses, so the effective registration
+            // mode / privacy flag match `registration`.
+            let defaults = registration.instance_settings_defaults();
+            RuntimeConfig {
+                registration: registration.policy,
+                require_signin_to_view: registration.require_signin_to_view,
+                instance_settings: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                    edda_domain::InstanceSettings::resolve(&defaults, &[]),
+                )),
+                instance_settings_defaults: defaults,
+                ..Default::default()
+            }
         },
     }
 }
@@ -63,6 +74,7 @@ async fn closed_registration_refuses_signup() {
             ..Default::default()
         },
         require_signin_to_view: false,
+        ..Default::default()
     })
     .await;
     let addr = spawn(state).await;
@@ -83,6 +95,7 @@ async fn the_email_domain_allowlist_is_enforced_at_signup() {
             ..Default::default()
         },
         require_signin_to_view: false,
+        ..Default::default()
     })
     .await;
     let addr = spawn(state).await;
@@ -113,6 +126,7 @@ async fn approval_mode_queues_the_account_and_blocks_login_until_an_admin_approv
             ..Default::default()
         },
         require_signin_to_view: false,
+        ..Default::default()
     })
     .await;
     let pool = state.pool.clone();
@@ -165,6 +179,7 @@ async fn an_unverified_account_can_sign_in_but_not_create_a_repository() {
             ..Default::default()
         },
         require_signin_to_view: false,
+        ..Default::default()
     })
     .await;
     let pool = state.pool.clone();
@@ -226,6 +241,7 @@ async fn instance_private_mode_refuses_anonymous_api_access() {
     let state = state_with(RegistrationConfig {
         policy: RegistrationPolicy::default(),
         require_signin_to_view: true,
+        ..Default::default()
     })
     .await;
     let addr = spawn(state).await;
@@ -256,4 +272,110 @@ async fn instance_private_mode_refuses_anonymous_api_access() {
         .await
         .unwrap();
     assert_eq!(signed_in.status(), 200);
+}
+
+#[tokio::test]
+async fn an_admin_closes_registration_from_the_settings_api_and_it_takes_effect_immediately() {
+    // Starts wide open (env default).
+    let state = state_with(RegistrationConfig::default()).await;
+    let pool = state.pool.clone();
+
+    // Create the admin account (with a password) and promote it *before*
+    // any session exists, then log in over HTTP so the session carries
+    // `is_admin = true`.
+    let admin = edda_auth::signup(
+        &pool,
+        &RegistrationPolicy::default(),
+        "root",
+        "root@example.com",
+        "correct-horse-battery",
+    )
+    .await
+    .unwrap()
+    .user;
+    assert!(
+        edda_db::UserRepo::set_admin(&pool, admin.id, true)
+            .await
+            .unwrap(),
+        "set_admin affected a row"
+    );
+    assert!(
+        edda_db::UserRepo::find_by_username(&pool, "root")
+            .await
+            .unwrap()
+            .unwrap()
+            .is_admin,
+        "root is admin in the db"
+    );
+
+    let addr = spawn(state).await;
+    let client = reqwest::Client::builder()
+        .cookie_store(true)
+        .build()
+        .unwrap();
+    let login = client
+        .post(format!("http://{addr}/api/auth/login"))
+        .json(&json!({ "email": "root@example.com", "password": "correct-horse-battery" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(login.status().is_success());
+    let me: serde_json::Value = client
+        .get(format!("http://{addr}/api/auth/me"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(me["is_admin"], true, "/api/auth/me: {me}");
+
+    // A signup still works while the mode is `open`. Use a throwaway
+    // client — signup starts a session, which would otherwise replace the
+    // admin session on the shared cookie jar.
+    let before = reqwest::Client::new()
+        .post(format!("http://{addr}/api/auth/signup"))
+        .json(&signup_body("early", "early@example.com"))
+        .send()
+        .await
+        .unwrap();
+    assert!(before.status().is_success());
+
+    // The admin switches the instance to `closed` — no restart.
+    let put = client
+        .put(format!("http://{addr}/api/admin/settings"))
+        .json(&json!({
+            "registration_mode": "closed",
+            "default_repo_visibility": "private",
+            "welcome_message": "maintenance window Friday",
+            "require_signin_to_view": false,
+        }))
+        .send()
+        .await
+        .unwrap();
+    let put_status = put.status();
+    let put_body = put.text().await.unwrap();
+    assert_eq!(put_status, 200, "PUT /api/admin/settings body: {put_body}");
+
+    // The very next signup attempt is refused by the new effective policy.
+    let after = reqwest::Client::new()
+        .post(format!("http://{addr}/api/auth/signup"))
+        .json(&signup_body("late", "late@example.com"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after.status(), 403);
+
+    // And the public instance endpoint now reflects the change.
+    let info: serde_json::Value = reqwest::Client::new()
+        .get(format!("http://{addr}/api/instance"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(info["registration_mode"], "closed");
+    assert_eq!(info["signup_enabled"], false);
+    assert_eq!(info["welcome_message"], "maintenance window Friday");
 }

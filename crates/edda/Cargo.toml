@@ -18,6 +18,10 @@ workspace = true
 # `session_store::AnySessionStore`'s `SessionStore` impl must match that
 # trait's `#[async_trait]` shape.
 async-trait = { workspace = true, optional = true }
+# Seeds the `instance_settings` runtime cache once at startup, before the
+# first request, then hands the shared handle to `edda-app` via
+# `RuntimeConfig`.
+arc-swap = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
 axum-login = { workspace = true, optional = true }
 dioxus = { workspace = true, features = ["fullstack"] }
@@ -57,6 +61,7 @@ web = ["dioxus/web", "edda-web/web"]
 server = [
     "dioxus/server",
     "edda-web/server",
+    "dep:arc-swap",
     "dep:async-trait",
     "dep:axum",
     "dep:axum-login",

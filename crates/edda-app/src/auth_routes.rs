@@ -292,7 +292,7 @@ async fn signup(
 ) -> Response {
     let outcome = match edda_auth::signup(
         &state.pool,
-        &state.config.registration,
+        &state.config.effective_registration_policy(),
         &body.username,
         &body.email,
         &body.password,

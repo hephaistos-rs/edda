@@ -11,6 +11,7 @@ pub mod crossref;
 pub mod deploy_key;
 pub mod event;
 pub mod ids;
+pub mod instance_settings;
 pub mod issue;
 pub mod job;
 pub mod lfs;
@@ -54,6 +55,7 @@ pub use ids::{
     ReviewRequestId, SshKeyId, TeamId, TotpRecoveryCodeId, UserId, WatchId, WebauthnCredentialId,
     WebhookDeliveryId, WebhookId,
 };
+pub use instance_settings::{InstanceSettings, InstanceSettingsDefaults};
 pub use issue::{
     labels_to_unapply_for_scope, scope_of, Issue, IssueComment, IssueState, Label, Milestone,
     MilestoneState,

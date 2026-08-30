@@ -2040,6 +2040,7 @@ dependencies = [
 name = "edda"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "axum",
  "axum-login",
@@ -2076,6 +2077,7 @@ dependencies = [
 name = "edda-app"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "axum",
  "axum-login",
  "base64 0.22.1",

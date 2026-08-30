@@ -103,6 +103,25 @@ async fn fetch_oauth_enabled() -> bool {
     false
 }
 
+/// The admin-configured instance welcome banner, if any. Best-effort,
+/// same reasoning as `fetch_oauth_enabled`.
+#[cfg(target_arch = "wasm32")]
+async fn fetch_welcome_message() -> Option<String> {
+    let Ok(response) = gloo_net::http::Request::get("/api/instance").send().await else {
+        return None;
+    };
+    if !response.ok() {
+        return None;
+    }
+    let body = response.json::<serde_json::Value>().await.ok()?;
+    body.get("welcome_message")?.as_str().map(str::to_string)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn fetch_welcome_message() -> Option<String> {
+    None
+}
+
 /// The `{options, state_token}` shape `webauthn/login/options` returns —
 /// `options` is passed through to `webauthn_js` untouched (see that
 /// module's own doc comment for why this stays opaque JSON rather than a
@@ -176,6 +195,7 @@ pub fn Login() -> Element {
     let mut pending_totp = use_signal(|| Option::<String>::None);
     let mut totp_code = use_signal(String::new);
     let oauth_enabled = use_resource(fetch_oauth_enabled);
+    let welcome_message = use_resource(fetch_welcome_message);
     // `Some` once a password-verified login is pending 2FA *and* that
     // account has a registered passkey — populated alongside
     // `pending_totp`, never fetched separately, so there's no window
@@ -317,6 +337,11 @@ pub fn Login() -> Element {
     rsx! {
         main { class: "mx-auto max-w-sm px-4 py-16",
             h1 { class: "font-mono text-xl font-semibold text-ink", "sign in" }
+            if let Some(Some(message)) = &*welcome_message.read() {
+                p { class: "mt-3 border border-line bg-surface px-3 py-2 text-sm text-ink-muted whitespace-pre-wrap",
+                    "{message}"
+                }
+            }
             form { class: "mt-6 flex flex-col gap-4", onsubmit: on_submit,
                 label { class: "flex flex-col gap-1 text-sm text-ink-muted",
                     "email"

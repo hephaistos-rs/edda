@@ -48,11 +48,26 @@ pub struct RuntimeConfig {
     /// Instance registration policy (Phase 9, H2/S3) — signup mode, email
     /// domain allowlist, and whether a new account needs email
     /// verification before it may push / create. `Default` is wide open.
+    ///
+    /// This is the *environment* baseline; the effective policy also folds
+    /// in any runtime `instance_settings` override of the signup mode —
+    /// use [`RuntimeConfig::effective_registration_policy`] on the request
+    /// path, not this field directly.
     pub registration: edda_domain::RegistrationPolicy,
-    /// `EDDA_REQUIRE_SIGNIN_VIEW` — when `true`, an anonymous request is
-    /// refused (401) everywhere except the login / health surface, making
-    /// the whole instance private. `false` by default.
+    /// `EDDA_REQUIRE_SIGNIN_VIEW` — the *environment* default for instance
+    /// privacy. The effective value is
+    /// `instance_settings.load().require_signin_to_view`, which an admin
+    /// can toggle at runtime; read that on the request path.
     pub require_signin_to_view: bool,
+    /// The environment-derived baseline the `instance_settings` cache
+    /// resolves overrides against — held so the cache can be recomputed
+    /// after an admin edit without re-reading the environment.
+    pub instance_settings_defaults: edda_domain::InstanceSettingsDefaults,
+    /// The live, admin-editable instance settings (Phase 12). Seeded from
+    /// the database at startup and swapped wholesale by the admin
+    /// "save settings" path — a wait-free `.load()` on the request path,
+    /// no restart. `Default` is the built-in behaviour.
+    pub instance_settings: std::sync::Arc<arc_swap::ArcSwap<edda_domain::InstanceSettings>>,
     /// Streamed-body size ceilings for the git/LFS transfer paths
     /// (`EDDA_GIT_MAX_PACK_BYTES` / `EDDA_LFS_MAX_OBJECT_BYTES`). `Default`
     /// is 2 GiB / 4 GiB — a real cap even in tests that don't tune it.
@@ -62,4 +77,25 @@ pub struct RuntimeConfig {
     /// actor-resolution path; the rolling TTL is applied at wiring time by
     /// the composition root's `Expiry`.
     pub session: SessionConfig,
+}
+
+impl RuntimeConfig {
+    /// The registration policy in force right now: the env-configured
+    /// email-domain allowlist and email-verification requirement, plus the
+    /// signup `mode` from `instance_settings` (an admin can change the
+    /// mode at runtime; the other two are deployment-fixed).
+    #[must_use]
+    pub fn effective_registration_policy(&self) -> edda_domain::RegistrationPolicy {
+        edda_domain::RegistrationPolicy {
+            mode: self.instance_settings.load().registration_mode,
+            ..self.registration.clone()
+        }
+    }
+
+    /// Whether an anonymous request is refused everywhere but the
+    /// login/health surface — the effective, admin-toggleable value.
+    #[must_use]
+    pub fn require_signin_to_view(&self) -> bool {
+        self.instance_settings.load().require_signin_to_view
+    }
 }

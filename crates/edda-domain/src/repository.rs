@@ -9,9 +9,12 @@ pub enum RepositoryOwner {
     Organization(OrganizationId),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Visibility {
     Public,
+    /// The safe default — a repository created with no visibility
+    /// specified is private until its owner opens it up.
+    #[default]
     Private,
 }
 

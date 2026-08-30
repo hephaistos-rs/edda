@@ -356,6 +356,24 @@ impl Default for SessionConfig {
 pub struct RegistrationConfig {
     pub policy: edda_domain::RegistrationPolicy,
     pub require_signin_to_view: bool,
+    /// `EDDA_DEFAULT_REPO_VISIBILITY` (`public` | `private`, default
+    /// `private`) — the visibility a new repository takes when the
+    /// creator doesn't choose one. Also an admin-overridable
+    /// `instance_settings` key.
+    pub default_repo_visibility: edda_domain::Visibility,
+}
+
+impl RegistrationConfig {
+    /// The environment baseline the runtime `instance_settings` cache
+    /// resolves stored overrides against.
+    #[must_use]
+    pub fn instance_settings_defaults(&self) -> edda_domain::InstanceSettingsDefaults {
+        edda_domain::InstanceSettingsDefaults {
+            registration_mode: self.policy.mode,
+            default_repo_visibility: self.default_repo_visibility,
+            require_signin_to_view: self.require_signin_to_view,
+        }
+    }
 }
 
 /// Per-client token-bucket limits for the API surface (never the git or
@@ -668,6 +686,19 @@ fn parse_registration(env: &mut Env) -> RegistrationConfig {
         .unwrap_or_default();
     let require_email_verification = env.parse_or::<bool>("EDDA_REQUIRE_EMAIL_VERIFICATION", false);
     let require_signin_to_view = env.parse_or::<bool>("EDDA_REQUIRE_SIGNIN_VIEW", false);
+    let default_repo_visibility = match env.get("EDDA_DEFAULT_REPO_VISIBILITY") {
+        None => edda_domain::Visibility::Private,
+        Some(raw) => match edda_domain::Visibility::from_db_str(raw.trim()) {
+            Some(visibility) => visibility,
+            None => {
+                env.fail(
+                    "EDDA_DEFAULT_REPO_VISIBILITY",
+                    format!("must be one of public, private (got {raw:?})"),
+                );
+                edda_domain::Visibility::Private
+            }
+        },
+    };
 
     RegistrationConfig {
         policy: edda_domain::RegistrationPolicy {
@@ -676,6 +707,7 @@ fn parse_registration(env: &mut Env) -> RegistrationConfig {
             require_email_verification,
         },
         require_signin_to_view,
+        default_repo_visibility,
     }
 }
 
@@ -1011,6 +1043,7 @@ mod tests {
         "EDDA_ALLOWED_EMAIL_DOMAINS",
         "EDDA_REQUIRE_EMAIL_VERIFICATION",
         "EDDA_REQUIRE_SIGNIN_VIEW",
+        "EDDA_DEFAULT_REPO_VISIBILITY",
         "EDDA_GIT_MAX_PACK_BYTES",
         "EDDA_LFS_MAX_OBJECT_BYTES",
         "EDDA_MAX_REPO_SIZE_BYTES",

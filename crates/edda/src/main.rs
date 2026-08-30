@@ -152,6 +152,18 @@ fn main() {
             let locks = std::sync::Arc::new(edda_git::LockRegistry::new());
             let authz = edda_auth::AuthorizationService::new(pool.clone());
 
+            // Seed the runtime `instance_settings` cache once, before the
+            // first request: the environment baseline with any admin
+            // overrides already stored in the database applied on top. The
+            // admin "save settings" path swaps this `ArcSwap` wholesale
+            // later, no restart.
+            let instance_settings_defaults = settings.registration.instance_settings_defaults();
+            let instance_settings = edda_app::services::InstanceSettingsService::bootstrap(
+                &pool,
+                instance_settings_defaults.clone(),
+            )
+            .await;
+
             let state = edda_app::AppState {
                 pool: pool.clone(),
                 store: store.clone(),
@@ -166,6 +178,8 @@ fn main() {
                     rate_limit: settings.rate_limit.clone(),
                     registration: settings.registration.policy.clone(),
                     require_signin_to_view: settings.registration.require_signin_to_view,
+                    instance_settings_defaults,
+                    instance_settings,
                     git_limits: settings.git.limits,
                     session: settings.session,
                 },

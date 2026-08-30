@@ -441,6 +441,12 @@ TABLE events
   pk id
   index idx_events_aggregate (aggregate_type, aggregate_id)
   index idx_events_unprocessed <dialect-specific>
+TABLE instance_settings
+  col setting_key NOT NULL
+  col setting_value NOT NULL
+  col updated_at NOT NULL
+  col updated_by NULL
+  pk setting_key
 TABLE issue_assignees
   col assigned_at NOT NULL
   col assigned_by_id NULL
@@ -718,6 +724,16 @@ TABLE review_requests
   index idx_review_requests_reviewer (reviewer_id)
   fk pull_request_id -> pull_requests
   fk reviewer_id -> users
+TABLE scheduled_jobs
+  col enabled NOT NULL
+  col interval_seconds NOT NULL
+  col last_detail NULL
+  col last_run_at NULL
+  col last_status NULL
+  col name NOT NULL
+  col next_run_at NOT NULL
+  pk name
+  index idx_scheduled_jobs_due (enabled, next_run_at)
 TABLE ssh_keys
   col created_at NOT NULL
   col fingerprint NOT NULL

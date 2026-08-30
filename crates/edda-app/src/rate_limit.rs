@@ -8,37 +8,32 @@
 //! OAuth/WebAuthn, collaborator/SSH-key management, admin, release
 //! assets, and the versioned `/api/v1/` surface — shares one limiter.
 //!
-//! **Key extraction, and why it isn't `tower_governor`'s own
-//! `PeerIpKeyExtractor`/`SmartIpKeyExtractor`**: both of those extractors
-//! ultimately fall back to `axum::extract::ConnectInfo<SocketAddr>`, which
-//! is only populated when the server is bound via `Router::
-//! into_make_service_with_connect_info`. `edda-web`'s composition root
-//! hands its merged router to `dioxus::server::serve`, which — confirmed
-//! directly against `dioxus-server` 0.7.10's own `launch.rs`, not assumed
-//! — calls `axum::serve`/`.into_make_service()` on a plain `Router` in
-//! both debug and release builds, so `ConnectInfo` is never available
-//! here, in production or in this crate's own integration tests (which
-//! bind a real `TcpListener` and call `axum::serve` the same plain way).
-//! `EddaKeyExtractor` below reads `Forwarded` (RFC 7239) / `X-Forwarded-For`
-//! / `X-Real-IP` instead — correct for the common "self-hosted,
-//! reverse-proxied" deployment shape (the proxy sets one of these) — and
-//! falls back to a single shared bucket for direct, unproxied traffic
-//! rather than failing every request outright, so the
-//! no-mandatory-external-services standalone deployment path (`AGENTS.md`'s
-//! dependency principle) still starts and serves traffic normally.
+//! **Key extraction (`EddaKeyExtractor`).** The composition-root binary
+//! owns `axum::serve` and binds the router with
+//! `into_make_service_with_connect_info::<SocketAddr>()` (Phase 13), so
+//! the real socket peer IP is available here as
+//! `axum::extract::ConnectInfo<SocketAddr>`. The default key is that peer
+//! IP.
 //!
-//! **Forwarded headers are trusted only when `EDDA_TRUSTED_PROXIES` is
-//! non-empty** (S4). Without it, every direct client shares one bucket
-//! regardless of what `X-Forwarded-For` it sends — a spoofed header can no
-//! longer hand an attacker a private per-key budget. Actually matching the
-//! *peer* IP against the configured CIDRs needs `ConnectInfo`, which this
-//! serve loop doesn't provide until Phase 13; until then a non-empty list
-//! is simply the operator's assertion that "there is a trusted proxy in
-//! front, honour its forwarded hop."
+//! A `Forwarded` (RFC 7239) / `X-Forwarded-For` / `X-Real-IP` header is
+//! honoured **only when the peer IP is itself inside one of the
+//! `EDDA_TRUSTED_PROXIES` CIDRs** (S4) — i.e. the request genuinely came
+//! from a configured reverse proxy. A direct client's spoofed forwarding
+//! header is ignored: it just gets keyed on its own peer IP. With no
+//! trusted proxies configured (the standalone default), every request is
+//! keyed purely on its peer IP.
+//!
+//! If `ConnectInfo` is somehow absent (a serve loop that didn't opt in, a
+//! unit test with a bare `Request`), the request falls into one shared
+//! bucket rather than failing outright, so the no-mandatory-external-
+//! services standalone path (`AGENTS.md`'s dependency principle) still
+//! serves traffic.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::ConnectInfo;
 use axum::http::{HeaderMap, Request};
 use governor::clock::QuantaInstant;
 use governor::middleware::NoOpMiddleware;
@@ -51,23 +46,41 @@ use tower_governor::GovernorLayer;
 /// into — see this module's doc comment.
 const ANONYMOUS_BUCKET: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct EddaKeyExtractor {
-    /// Whether `EDDA_TRUSTED_PROXIES` is configured — the gate on reading
-    /// any client-supplied forwarding header.
-    trust_forwarded: bool,
+    /// `EDDA_TRUSTED_PROXIES` — the CIDRs a forwarding header is believed
+    /// from. A header is only read when the *peer* IP falls inside one of
+    /// these; empty means "no proxy in front," so headers are never read.
+    trusted_proxies: Arc<[ipnet::IpNet]>,
 }
 
 impl KeyExtractor for EddaKeyExtractor {
     type Key = IpAddr;
 
     fn extract<B>(&self, req: &Request<B>) -> Result<Self::Key, GovernorError> {
-        let ip = if self.trust_forwarded {
-            client_ip(req.headers())
-        } else {
-            None
+        // The socket peer IP, from `into_make_service_with_connect_info`.
+        let Some(peer_ip) = req
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(addr)| addr.ip())
+        else {
+            // No `ConnectInfo` at all — one shared bucket, never a
+            // per-request failure.
+            return Ok(ANONYMOUS_BUCKET);
         };
-        Ok(ip.unwrap_or(ANONYMOUS_BUCKET))
+
+        // Only a request that actually arrived from a configured proxy may
+        // speak for a different client via a forwarding header.
+        if self
+            .trusted_proxies
+            .iter()
+            .any(|net| net.contains(&peer_ip))
+        {
+            if let Some(client_ip) = client_ip(req.headers()) {
+                return Ok(client_ip);
+            }
+        }
+        Ok(peer_ip)
     }
 
     fn key_name(&self, key: &Self::Key) -> Option<String> {
@@ -143,21 +156,14 @@ pub type EddaGovernorLayer =
 /// Builds the rate-limiting layer and spawns its periodic cleanup task
 /// (`tower_governor`'s own documented recommendation: without it, every
 /// distinct key this process has ever seen stays resident in memory for
-/// the life of the process). Called once per [`crate::router`] call — in
-/// production that's once per process (release builds call the
-/// composition root's router-building callback exactly once); in `dx
-/// serve` hot-reload dev builds, which re-invoke it on every reload, each
-/// reload's cleanup task keeps running against its own (by then
-/// unreachable) limiter rather than being cancelled — a small, bounded,
-/// dev-only resource lingerer, not a production concern, and not worth
-/// the composition-root API change (hoisting this above the per-`router()`
-/// -call boundary, unlike `edda_jobs::spawn_poller` which already lives
-/// there) that would be needed to close it.
+/// the life of the process). Called once per [`crate::router`] call —
+/// the composition root builds the router exactly once per process, so in
+/// production that is one cleanup task for the life of the process.
 pub fn layer(settings: &crate::config::RateLimitConfig) -> EddaGovernorLayer {
     build(
         settings.per_second,
         settings.burst,
-        !settings.trusted_proxies.is_empty(),
+        settings.trusted_proxies.as_slice().into(),
     )
 }
 
@@ -171,15 +177,15 @@ pub fn auth_layer(settings: &crate::config::RateLimitConfig) -> EddaGovernorLaye
     build(
         settings.auth_per_second,
         settings.auth_burst,
-        !settings.trusted_proxies.is_empty(),
+        settings.trusted_proxies.as_slice().into(),
     )
 }
 
-fn build(per_second: u64, burst: u32, trust_forwarded: bool) -> EddaGovernorLayer {
+fn build(per_second: u64, burst: u32, trusted_proxies: Arc<[ipnet::IpNet]>) -> EddaGovernorLayer {
     let config = GovernorConfigBuilder::default()
         .per_second(per_second)
         .burst_size(burst)
-        .key_extractor(EddaKeyExtractor { trust_forwarded })
+        .key_extractor(EddaKeyExtractor { trusted_proxies })
         .finish()
         .expect("a RateLimitConfig validated by edda_app::config produces a valid governor config");
 
@@ -253,30 +259,79 @@ mod tests {
         assert_eq!(client_ip(&headers), None);
     }
 
-    #[test]
-    fn the_key_extractor_never_errors_even_with_no_identifying_header() {
-        let req = Request::builder().body(()).unwrap();
-        let extractor = EddaKeyExtractor {
-            trust_forwarded: true,
-        };
-        assert_eq!(extractor.extract(&req).unwrap(), ANONYMOUS_BUCKET);
+    fn extractor(trusted_proxies: &[&str]) -> EddaKeyExtractor {
+        EddaKeyExtractor {
+            trusted_proxies: trusted_proxies
+                .iter()
+                .map(|cidr| cidr.parse::<ipnet::IpNet>().unwrap())
+                .collect(),
+        }
+    }
+
+    fn request(peer: Option<&str>, header: Option<(&'static str, &str)>) -> Request<()> {
+        let mut req = Request::builder().body(()).unwrap();
+        if let Some(peer) = peer {
+            req.extensions_mut()
+                .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+        }
+        if let Some((name, value)) = header {
+            req.headers_mut()
+                .insert(name, HeaderValue::from_str(value).unwrap());
+        }
+        req
     }
 
     #[test]
-    fn an_untrusting_extractor_ignores_a_spoofable_forwarded_header() {
-        let mut req = Request::builder().body(()).unwrap();
-        req.headers_mut()
-            .insert("x-forwarded-for", HeaderValue::from_static("203.0.113.7"));
-        let untrusting = EddaKeyExtractor {
-            trust_forwarded: false,
-        };
-        assert_eq!(untrusting.extract(&req).unwrap(), ANONYMOUS_BUCKET);
-        let trusting = EddaKeyExtractor {
-            trust_forwarded: true,
-        };
+    fn keys_on_the_socket_peer_ip_by_default() {
+        let req = request(Some("203.0.113.5:44321"), None);
         assert_eq!(
-            trusting.extract(&req).unwrap(),
-            "203.0.113.7".parse::<IpAddr>().unwrap()
+            extractor(&[]).extract(&req).unwrap(),
+            "203.0.113.5".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_direct_client_cannot_spoof_a_forwarding_header() {
+        // Peer is not inside any trusted-proxy CIDR, so the header it sent
+        // is ignored — it is keyed on its own peer IP.
+        let req = request(
+            Some("203.0.113.5:1"),
+            Some(("x-forwarded-for", "198.51.100.9")),
+        );
+        assert_eq!(
+            extractor(&["10.0.0.0/8"]).extract(&req).unwrap(),
+            "203.0.113.5".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn honours_the_forwarded_client_ip_from_a_trusted_proxy() {
+        let req = request(
+            Some("203.0.113.5:1"),
+            Some(("x-forwarded-for", "198.51.100.9, 203.0.113.5")),
+        );
+        assert_eq!(
+            extractor(&["203.0.113.0/24"]).extract(&req).unwrap(),
+            "198.51.100.9".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_trusted_proxy_with_no_forwarding_header_is_keyed_on_the_proxy_peer_ip() {
+        let req = request(Some("203.0.113.5:1"), None);
+        assert_eq!(
+            extractor(&["203.0.113.0/24"]).extract(&req).unwrap(),
+            "203.0.113.5".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn falls_into_one_shared_bucket_when_connect_info_is_absent() {
+        let req = request(None, Some(("x-forwarded-for", "203.0.113.7")));
+        assert_eq!(extractor(&[]).extract(&req).unwrap(), ANONYMOUS_BUCKET);
+        assert_eq!(
+            extractor(&["0.0.0.0/0"]).extract(&req).unwrap(),
+            ANONYMOUS_BUCKET
         );
     }
 }

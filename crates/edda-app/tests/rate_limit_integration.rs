@@ -64,8 +64,17 @@ async fn spawn_server(state: AppState) -> SocketAddr {
         .expect("bind an ephemeral port");
     let addr = listener.local_addr().expect("resolve bound address");
     let app = router(state).layer(auth_layer);
+    // Bound the way the composition-root binary binds it (Phase 13), so
+    // the rate limiter keys on the real socket peer IP — here every
+    // request comes from 127.0.0.1, so they share one bucket and the
+    // burst still trips.
     tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve");
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .expect("serve");
     });
     addr
 }

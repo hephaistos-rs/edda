@@ -388,12 +388,11 @@ pub struct RateLimitConfig {
     pub auth_per_second: u64,
     pub auth_burst: u32,
     /// `EDDA_TRUSTED_PROXIES` — CIDRs of reverse proxies whose
-    /// `X-Forwarded-For` / `Forwarded` header may be trusted for the
-    /// limiter key. Empty (the default) means forwarded headers are
-    /// ignored entirely and every direct client shares one bucket. Peer-IP
-    /// matching against these CIDRs needs `ConnectInfo` (Phase 13); for
-    /// now a non-empty list is simply the signal to honour the leftmost
-    /// forwarded hop.
+    /// `X-Forwarded-For` / `Forwarded` header the rate limiter believes.
+    /// A forwarding header is read only when the request's socket peer IP
+    /// (from `ConnectInfo`) falls inside one of these; a direct client is
+    /// always keyed on its own peer IP. Empty (the default) means every
+    /// request is keyed on its peer IP, headers ignored.
     pub trusted_proxies: Vec<ipnet::IpNet>,
 }
 

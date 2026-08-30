@@ -18,6 +18,7 @@ mod conn;
 mod error;
 
 pub mod access_token_repo;
+pub mod admin_stats_repo;
 pub mod audit_event_repo;
 pub mod branch_protection_repo;
 pub mod commit_status_repo;
@@ -62,6 +63,7 @@ pub use conn::{DbConn, DbTx, Handle};
 pub use error::DbError;
 
 pub use access_token_repo::AccessTokenRepo;
+pub use admin_stats_repo::{AdminStats, AdminStatsRepo};
 pub use audit_event_repo::{AuditEvent, AuditEventRepo};
 pub use branch_protection_repo::{BranchProtectionRepo, BranchProtectionSettings};
 pub use commit_status_repo::CommitStatusRepo;

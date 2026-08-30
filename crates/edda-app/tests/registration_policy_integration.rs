@@ -378,4 +378,38 @@ async fn an_admin_closes_registration_from_the_settings_api_and_it_takes_effect_
     assert_eq!(info["registration_mode"], "closed");
     assert_eq!(info["signup_enabled"], false);
     assert_eq!(info["welcome_message"], "maintenance window Friday");
+
+    // The Phase 12 admin-breadth panels are reachable for the admin and
+    // 403 for everyone else.
+    let system: serde_json::Value = client
+        .get(format!("http://{addr}/api/admin/system"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(system["users"].as_i64().unwrap() >= 1);
+    assert!(!system["database_backend"].as_str().unwrap().is_empty());
+
+    let repos = client
+        .get(format!("http://{addr}/api/admin/repos"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(repos.status(), 200);
+    let jobs = client
+        .get(format!("http://{addr}/api/admin/jobs?status=failed"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(jobs.status(), 200);
+
+    // A non-admin (fresh, no session) is refused.
+    let denied = reqwest::Client::new()
+        .get(format!("http://{addr}/api/admin/system"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 401);
 }

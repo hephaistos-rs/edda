@@ -164,6 +164,17 @@ impl OrganizationRepo {
         row.map(row_to_organization_row).transpose()
     }
 
+    /// Every organization on the instance, name order — the admin
+    /// organization list. Capped rather than paginated, matching this
+    /// crate's existing `list_all` precedents.
+    pub async fn list_all<'c>(db: impl DbConn<'c>) -> Result<Vec<Organization>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let rows = sqlx::query("SELECT id, name, display_name FROM organizations ORDER BY name")
+            .fetch_all(&mut *h.conn())
+            .await?;
+        rows.into_iter().map(row_to_organization_row).collect()
+    }
+
     /// Every organization the given user belongs to at least one team of —
     /// used to render "your organizations" without a separate
     /// org-membership concept of its own (an organization's members *are*

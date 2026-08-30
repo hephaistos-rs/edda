@@ -7,7 +7,7 @@
 //! private repo is, so a logged-in non-admin gets a plain 403, not a
 //! fake "not found."
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -16,7 +16,10 @@ use axum_login::AuthSession;
 use serde::{Deserialize, Serialize};
 
 use edda_auth::Backend;
-use edda_domain::{require_instance_admin, InstanceSettings, RegistrationMode, Visibility};
+use edda_domain::{
+    require_instance_admin, InstanceSettings, JobId, JobStatus, RegistrationMode, RepositoryId,
+    Visibility,
+};
 
 use crate::services::InstanceSettingsService;
 use crate::state::AppState;
@@ -24,9 +27,20 @@ use crate::state::AppState;
 /// Best-effort admin audit logging, via the one audit path
 /// (`crate::services::audit`, S11).
 async fn record(pool: &edda_db::DbPool, event_type: &str, actor_id: &str, target_id: &str) {
+    record_on(pool, event_type, actor_id, "user", target_id).await;
+}
+
+async fn record_on(
+    pool: &edda_db::DbPool,
+    event_type: &str,
+    actor_id: &str,
+    target_type: &str,
+    target_id: &str,
+) {
     crate::services::audit::record(
         pool,
-        crate::services::audit::AuditEntry::new(event_type, actor_id).target("user", target_id),
+        crate::services::audit::AuditEntry::new(event_type, actor_id)
+            .target(target_type, target_id),
     )
     .await;
 }
@@ -45,6 +59,20 @@ pub fn routes() -> Router<AppState> {
             "/api/admin/settings",
             get(get_instance_settings).put(put_instance_settings),
         )
+        .route("/api/admin/system", get(system_info))
+        .route("/api/admin/repos", get(list_repos))
+        .route(
+            "/api/admin/repos/{id}/visibility",
+            post(set_repo_visibility),
+        )
+        .route(
+            "/api/admin/repos/{id}",
+            axum::routing::delete(delete_repo_admin),
+        )
+        .route("/api/admin/orgs", get(list_orgs))
+        .route("/api/admin/jobs", get(list_jobs))
+        .route("/api/admin/jobs/{id}/retry", post(retry_job))
+        .route("/api/admin/jobs/{id}/cancel", post(cancel_job))
 }
 
 fn require_admin(
@@ -290,11 +318,23 @@ impl From<edda_db::AuditEvent> for AuditEventDto {
     }
 }
 
-async fn list_audit_events(State(state): State<AppState>, auth: AuthSession<Backend>) -> Response {
+#[derive(Deserialize)]
+struct AuditQuery {
+    /// Prefix filter on `event_type`, e.g. `admin.` or `repository.`.
+    event_type: Option<String>,
+}
+
+async fn list_audit_events(
+    State(state): State<AppState>,
+    auth: AuthSession<Backend>,
+    Query(query): Query<AuditQuery>,
+) -> Response {
     if let Err(err) = require_admin(&auth) {
         return err.into_response();
     }
-    match edda_db::AuditEventRepo::list_recent(&state.pool, 200).await {
+    match edda_db::AuditEventRepo::list_filtered(&state.pool, query.event_type.as_deref(), 200)
+        .await
+    {
         Ok(events) => Json(
             events
                 .into_iter()
@@ -394,5 +434,338 @@ async fn put_instance_settings(
             err.client_message(),
         )
             .into_response(),
+    }
+}
+
+// ───────────────────────── system info (Phase 12) ─────────────────────
+
+#[derive(Serialize)]
+struct SystemInfoDto {
+    version: &'static str,
+    database_backend: String,
+    users: i64,
+    repositories: i64,
+    organizations: i64,
+    open_pull_requests: i64,
+    open_issues: i64,
+    jobs_pending: i64,
+    jobs_running: i64,
+    jobs_dead: i64,
+    tracked_git_bytes: i64,
+    tracked_lfs_bytes: i64,
+}
+
+#[tracing::instrument(name = "admin.system", skip_all)]
+async fn system_info(State(state): State<AppState>, auth: AuthSession<Backend>) -> Response {
+    if let Err(err) = require_admin(&auth) {
+        return err.into_response();
+    }
+    let stats = match edda_db::AdminStatsRepo::snapshot(&state.pool).await {
+        Ok(stats) => stats,
+        Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    };
+    let (pending, running, dead) = match edda_db::JobRepo::queue_depths(&state.pool).await {
+        Ok(depths) => depths,
+        Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    };
+    Json(SystemInfoDto {
+        version: env!("CARGO_PKG_VERSION"),
+        database_backend: format!("{:?}", state.pool.backend()).to_lowercase(),
+        users: stats.users,
+        repositories: stats.repositories,
+        organizations: stats.organizations,
+        open_pull_requests: stats.open_pull_requests,
+        open_issues: stats.open_issues,
+        jobs_pending: pending,
+        jobs_running: running,
+        jobs_dead: dead,
+        tracked_git_bytes: stats.tracked_git_bytes,
+        tracked_lfs_bytes: stats.tracked_lfs_bytes,
+    })
+    .into_response()
+}
+
+// ───────────────────────── repositories (Phase 12) ────────────────────
+
+#[derive(Serialize)]
+struct AdminRepoDto {
+    id: String,
+    owner: String,
+    name: String,
+    private: bool,
+    is_fork: bool,
+}
+
+#[tracing::instrument(name = "admin.repos.list", skip_all)]
+async fn list_repos(State(state): State<AppState>, auth: AuthSession<Backend>) -> Response {
+    if let Err(err) = require_admin(&auth) {
+        return err.into_response();
+    }
+    match edda_db::RepositoryRepo::list_all_with_owner_username(&state.pool).await {
+        Ok(rows) => Json(
+            rows.into_iter()
+                .map(|(repo, owner)| AdminRepoDto {
+                    id: repo.id.to_string(),
+                    private: repo.is_private(),
+                    is_fork: repo.forked_from.is_some(),
+                    owner,
+                    name: repo.name,
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+fn parse_repo_id(id: &str) -> Result<RepositoryId, (StatusCode, &'static str)> {
+    id.parse()
+        .map_err(|_| (StatusCode::NOT_FOUND, "no such repository"))
+}
+
+#[derive(Deserialize)]
+struct SetVisibilityBody {
+    /// `"public"` or `"private"`.
+    visibility: String,
+}
+
+#[tracing::instrument(name = "admin.repos.set_visibility", skip_all, fields(repo.id = %id))]
+async fn set_repo_visibility(
+    State(state): State<AppState>,
+    auth: AuthSession<Backend>,
+    Path(id): Path<String>,
+    Json(body): Json<SetVisibilityBody>,
+) -> Response {
+    let admin = match require_admin(&auth) {
+        Ok(admin) => admin,
+        Err(err) => return err.into_response(),
+    };
+    let repo_id = match parse_repo_id(&id) {
+        Ok(id) => id,
+        Err(err) => return err.into_response(),
+    };
+    let Some(visibility) = Visibility::from_db_str(body.visibility.trim()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "visibility must be public or private",
+        )
+            .into_response();
+    };
+    match edda_db::RepositoryRepo::update_visibility(&state.pool, repo_id, visibility).await {
+        Ok(()) => {
+            record_on(
+                &state.pool,
+                "admin.repository.set_visibility",
+                &admin.id.to_string(),
+                "repository",
+                &id,
+            )
+            .await;
+            StatusCode::OK.into_response()
+        }
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+#[tracing::instrument(name = "admin.repos.delete", skip_all, fields(repo.id = %id))]
+async fn delete_repo_admin(
+    State(state): State<AppState>,
+    auth: AuthSession<Backend>,
+    Path(id): Path<String>,
+) -> Response {
+    let admin = match require_admin(&auth) {
+        Ok(admin) => admin,
+        Err(err) => return err.into_response(),
+    };
+    let repo_id = match parse_repo_id(&id) {
+        Ok(id) => id,
+        Err(err) => return err.into_response(),
+    };
+    let found = match edda_db::RepositoryRepo::find_by_id_with_owner_username(&state.pool, repo_id)
+        .await
+    {
+        Ok(found) => found,
+        Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    };
+    let Some((repo, owner)) = found else {
+        return (StatusCode::NOT_FOUND, "no such repository").into_response();
+    };
+    let identity = format!("{owner}/{}", repo.name);
+    // Git directory first, then the row — an orphan bare repo is cheap to
+    // sweep; a row pointing at a deleted tree is not (same ordering the
+    // RepositoryService uses).
+    if let Err(err) = edda_git::delete_repo(state.store.as_ref(), &state.locks, &identity).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+    }
+    match edda_db::RepositoryRepo::delete(&state.pool, repo_id).await {
+        Ok(()) => {
+            record_on(
+                &state.pool,
+                "admin.repository.delete",
+                &admin.id.to_string(),
+                "repository",
+                &id,
+            )
+            .await;
+            StatusCode::OK.into_response()
+        }
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+// ───────────────────────── organizations (Phase 12) ──────────────────
+
+#[derive(Serialize)]
+struct AdminOrgDto {
+    id: String,
+    name: String,
+    display_name: Option<String>,
+}
+
+#[tracing::instrument(name = "admin.orgs.list", skip_all)]
+async fn list_orgs(State(state): State<AppState>, auth: AuthSession<Backend>) -> Response {
+    if let Err(err) = require_admin(&auth) {
+        return err.into_response();
+    }
+    match edda_db::OrganizationRepo::list_all(&state.pool).await {
+        Ok(orgs) => Json(
+            orgs.into_iter()
+                .map(|org| AdminOrgDto {
+                    id: org.id.to_string(),
+                    name: org.name,
+                    display_name: org.display_name,
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+// ───────────────────────── job queue (Phase 12) ──────────────────────
+
+#[derive(Serialize)]
+struct AdminJobDto {
+    id: String,
+    kind: String,
+    status: String,
+    attempts: u32,
+    max_attempts: u32,
+    run_at: i64,
+    created_at: i64,
+    last_error: Option<String>,
+}
+
+impl From<edda_domain::JobRecord> for AdminJobDto {
+    fn from(job: edda_domain::JobRecord) -> Self {
+        Self {
+            id: job.id.to_string(),
+            kind: job.payload.kind().as_metric_label().to_string(),
+            status: job.status.as_db_str().to_string(),
+            attempts: job.attempts,
+            max_attempts: job.max_attempts,
+            run_at: job.run_at,
+            created_at: job.created_at,
+            last_error: job.last_error,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct JobListQuery {
+    /// `"failed"` for the dead-letter view; anything else (or absent) =
+    /// recent activity across every status.
+    status: Option<String>,
+}
+
+#[tracing::instrument(name = "admin.jobs.list", skip_all)]
+async fn list_jobs(
+    State(state): State<AppState>,
+    auth: AuthSession<Backend>,
+    Query(query): Query<JobListQuery>,
+) -> Response {
+    if let Err(err) = require_admin(&auth) {
+        return err.into_response();
+    }
+    let result = match query.status.as_deref().and_then(JobStatus::from_db_str) {
+        Some(status) => edda_db::JobRepo::list_by_status(&state.pool, status, 200).await,
+        None => edda_db::JobRepo::list_recent(&state.pool, 200).await,
+    };
+    match result {
+        Ok(jobs) => {
+            Json(jobs.into_iter().map(AdminJobDto::from).collect::<Vec<_>>()).into_response()
+        }
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+fn parse_job_id(id: &str) -> Result<JobId, (StatusCode, &'static str)> {
+    id.parse()
+        .map_err(|_| (StatusCode::NOT_FOUND, "no such job"))
+}
+
+#[tracing::instrument(name = "admin.jobs.retry", skip_all, fields(job.id = %id))]
+async fn retry_job(
+    State(state): State<AppState>,
+    auth: AuthSession<Backend>,
+    Path(id): Path<String>,
+) -> Response {
+    let admin = match require_admin(&auth) {
+        Ok(admin) => admin,
+        Err(err) => return err.into_response(),
+    };
+    let job_id = match parse_job_id(&id) {
+        Ok(id) => id,
+        Err(err) => return err.into_response(),
+    };
+    match edda_db::JobRepo::requeue(&state.pool, job_id).await {
+        Ok(true) => {
+            record_on(
+                &state.pool,
+                "admin.job.retry",
+                &admin.id.to_string(),
+                "job",
+                &id,
+            )
+            .await;
+            StatusCode::OK.into_response()
+        }
+        Ok(false) => (
+            StatusCode::CONFLICT,
+            "only a dead-lettered job can be retried",
+        )
+            .into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+#[tracing::instrument(name = "admin.jobs.cancel", skip_all, fields(job.id = %id))]
+async fn cancel_job(
+    State(state): State<AppState>,
+    auth: AuthSession<Backend>,
+    Path(id): Path<String>,
+) -> Response {
+    let admin = match require_admin(&auth) {
+        Ok(admin) => admin,
+        Err(err) => return err.into_response(),
+    };
+    let job_id = match parse_job_id(&id) {
+        Ok(id) => id,
+        Err(err) => return err.into_response(),
+    };
+    match edda_db::JobRepo::delete(&state.pool, job_id).await {
+        Ok(true) => {
+            record_on(
+                &state.pool,
+                "admin.job.cancel",
+                &admin.id.to_string(),
+                "job",
+                &id,
+            )
+            .await;
+            StatusCode::OK.into_response()
+        }
+        Ok(false) => (StatusCode::CONFLICT, "a running job cannot be cancelled").into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
     }
 }

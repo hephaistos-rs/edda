@@ -246,6 +246,112 @@ impl JobRepo {
             })
             .collect()
     }
+
+    /// The most recent `limit` jobs in one status, newest first — the
+    /// admin dead-letter view passes `"failed"`.
+    pub async fn list_by_status<'c>(
+        db: impl DbConn<'c>,
+        status: JobStatus,
+        limit: i64,
+    ) -> Result<Vec<JobRecord>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
+            Backend::Postgres => {
+                "SELECT id, payload, status, attempts, max_attempts, run_at, last_error, created_at
+                 FROM jobs WHERE status = $1 ORDER BY created_at DESC LIMIT $2"
+            }
+            Backend::Sqlite | Backend::MySql => {
+                "SELECT id, payload, status, attempts, max_attempts, run_at, last_error, created_at
+                 FROM jobs WHERE status = ? ORDER BY created_at DESC LIMIT ?"
+            }
+        };
+        let rows = sqlx::query(sql)
+            .bind(status.as_db_str())
+            .bind(limit)
+            .fetch_all(&mut *h.conn())
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(row_to_record(
+                    get_string(&row, "id")?,
+                    get_string(&row, "payload")?,
+                    get_string(&row, "status")?,
+                    get_i64(&row, "attempts")?,
+                    get_i64(&row, "max_attempts")?,
+                    get_i64(&row, "run_at")?,
+                    get_opt_string(&row, "last_error")?,
+                    get_i64(&row, "created_at")?,
+                ))
+            })
+            .collect()
+    }
+
+    /// How many jobs sit in each of `pending` / `running` / `failed` —
+    /// the admin "system info" queue gauges. `succeeded` rows are not
+    /// counted (they are historical, not backlog).
+    pub async fn queue_depths<'c>(db: impl DbConn<'c>) -> Result<(i64, i64, i64), DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let rows = sqlx::query(
+            "SELECT status, COUNT(*) AS n FROM jobs \
+             WHERE status IN ('pending', 'running', 'failed') GROUP BY status",
+        )
+        .fetch_all(&mut *h.conn())
+        .await?;
+        let (mut pending, mut running, mut failed) = (0, 0, 0);
+        for row in &rows {
+            match get_string(row, "status")?.as_str() {
+                "pending" => pending = get_i64(row, "n")?,
+                "running" => running = get_i64(row, "n")?,
+                "failed" => failed = get_i64(row, "n")?,
+                _ => {}
+            }
+        }
+        Ok((pending, running, failed))
+    }
+
+    /// Admin action: return a dead-lettered (`failed`) job to the queue
+    /// with a fresh retry budget, due now. No-op (returns `false`) for a
+    /// job in any other state.
+    pub async fn requeue<'c>(db: impl DbConn<'c>, id: JobId) -> Result<bool, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let now = crate::now_unix();
+        let sql = match h.backend() {
+            Backend::Postgres => {
+                "UPDATE jobs SET status = 'pending', run_at = $1, attempts = 0, last_error = NULL \
+                 WHERE id = $2 AND status = 'failed'"
+            }
+            Backend::Sqlite | Backend::MySql => {
+                "UPDATE jobs SET status = 'pending', run_at = ?, attempts = 0, last_error = NULL \
+                 WHERE id = ? AND status = 'failed'"
+            }
+        };
+        let affected = sqlx::query(sql)
+            .bind(now)
+            .bind(id.to_string())
+            .execute(&mut *h.conn())
+            .await?
+            .rows_affected();
+        Ok(affected > 0)
+    }
+
+    /// Admin action: drop a job that isn't currently executing. Returns
+    /// whether a row was removed (`false` if it was `running` or already
+    /// gone).
+    pub async fn delete<'c>(db: impl DbConn<'c>, id: JobId) -> Result<bool, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
+            Backend::Postgres => "DELETE FROM jobs WHERE id = $1 AND status <> 'running'",
+            Backend::Sqlite | Backend::MySql => {
+                "DELETE FROM jobs WHERE id = ? AND status <> 'running'"
+            }
+        };
+        let affected = sqlx::query(sql)
+            .bind(id.to_string())
+            .execute(&mut *h.conn())
+            .await?
+            .rows_affected();
+        Ok(affected > 0)
+    }
 }
 
 #[cfg(test)]

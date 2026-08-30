@@ -35,6 +35,45 @@ struct AuditEventDto {
     detail_json: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct SystemInfoDto {
+    version: String,
+    database_backend: String,
+    users: i64,
+    repositories: i64,
+    organizations: i64,
+    open_pull_requests: i64,
+    open_issues: i64,
+    jobs_pending: i64,
+    jobs_running: i64,
+    jobs_dead: i64,
+    tracked_git_bytes: i64,
+    tracked_lfs_bytes: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct AdminRepoDto {
+    id: String,
+    owner: String,
+    name: String,
+    private: bool,
+    is_fork: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct AdminJobDto {
+    id: String,
+    kind: String,
+    status: String,
+    attempts: u32,
+    max_attempts: u32,
+    #[allow(dead_code)]
+    run_at: i64,
+    #[allow(dead_code)]
+    created_at: i64,
+    last_error: Option<String>,
+}
+
 // Same wasm32-only-fetch / server-side-stub split as every other
 // hand-written (non-server-function) API call in `ui/` — see `login.rs`'s
 // doc comment. The UI-level check here (rendering this page/its actions
@@ -165,6 +204,98 @@ async fn save_settings(_body: InstanceSettingsForm) -> Result<(), String> {
     Err("not available during server rendering".to_string())
 }
 
+#[cfg(target_arch = "wasm32")]
+async fn fetch_json<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, String> {
+    let response = gloo_net::http::Request::get(path)
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+    if !response.ok() {
+        return Err(response
+            .text()
+            .await
+            .unwrap_or_else(|_| format!("request to {path} failed")));
+    }
+    response.json().await.map_err(|err| err.to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn post_action(path: &str) -> Result<(), String> {
+    let response = gloo_net::http::Request::post(path)
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+    if response.ok() {
+        Ok(())
+    } else {
+        Err(response
+            .text()
+            .await
+            .unwrap_or_else(|_| "the action failed".to_string()))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn fetch_system() -> Result<SystemInfoDto, String> {
+    fetch_json("/api/admin/system").await
+}
+#[cfg(not(target_arch = "wasm32"))]
+async fn fetch_system() -> Result<SystemInfoDto, String> {
+    Err("not available during server rendering".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn fetch_repos() -> Result<Vec<AdminRepoDto>, String> {
+    fetch_json("/api/admin/repos").await
+}
+#[cfg(not(target_arch = "wasm32"))]
+async fn fetch_repos() -> Result<Vec<AdminRepoDto>, String> {
+    Err("not available during server rendering".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn request_delete_repo(id: &str) -> Result<(), String> {
+    let response = gloo_net::http::Request::delete(&format!("/api/admin/repos/{id}"))
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+    if response.ok() {
+        Ok(())
+    } else {
+        Err(response
+            .text()
+            .await
+            .unwrap_or_else(|_| "couldn't delete repository".to_string()))
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+async fn request_delete_repo(_id: &str) -> Result<(), String> {
+    Err("not available during server rendering".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn fetch_jobs(only_dead: bool) -> Result<Vec<AdminJobDto>, String> {
+    let path = if only_dead {
+        "/api/admin/jobs?status=failed"
+    } else {
+        "/api/admin/jobs"
+    };
+    fetch_json(path).await
+}
+#[cfg(not(target_arch = "wasm32"))]
+async fn fetch_jobs(_only_dead: bool) -> Result<Vec<AdminJobDto>, String> {
+    Err("not available during server rendering".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn request_job_action(id: &str, action: &str) -> Result<(), String> {
+    post_action(&format!("/api/admin/jobs/{id}/{action}")).await
+}
+#[cfg(not(target_arch = "wasm32"))]
+async fn request_job_action(_id: &str, _action: &str) -> Result<(), String> {
+    Err("not available during server rendering".to_string())
+}
+
 fn relative_time(unix_seconds: i64) -> String {
     let now = web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)
@@ -179,11 +310,44 @@ fn relative_time(unix_seconds: i64) -> String {
     }
 }
 
+/// Plain `fn` (not a closure) so each per-row `onclick` can call it by
+/// value — a per-iteration `FnMut` closure can't be moved into the next
+/// row's handler (the `apply_label` pattern used elsewhere in `ui/`).
+fn job_action(
+    id: String,
+    action: &'static str,
+    mut jobs: Resource<Result<Vec<AdminJobDto>, String>>,
+    mut action_error: Signal<Option<String>>,
+) {
+    spawn(async move {
+        match request_job_action(&id, action).await {
+            Ok(()) => jobs.restart(),
+            Err(message) => action_error.set(Some(message)),
+        }
+    });
+}
+
+fn delete_repo(
+    id: String,
+    mut repos: Resource<Result<Vec<AdminRepoDto>, String>>,
+    mut action_error: Signal<Option<String>>,
+) {
+    spawn(async move {
+        match request_delete_repo(&id).await {
+            Ok(()) => repos.restart(),
+            Err(message) => action_error.set(Some(message)),
+        }
+    });
+}
+
 #[component]
 pub fn Admin() -> Element {
     let mut users = use_resource(fetch_users);
     let events = use_resource(fetch_audit_events);
     let settings = use_resource(fetch_settings);
+    let system = use_resource(fetch_system);
+    let repos = use_resource(fetch_repos);
+    let jobs = use_resource(move || fetch_jobs(true));
     let mut action_error = use_signal(|| Option::<String>::None);
 
     rsx! {
@@ -193,7 +357,119 @@ pub fn Admin() -> Element {
                 "Server-side access control applies regardless of this page — a non-admin sees these actions fail, not just hidden."
             }
 
-            h2 { class: "mt-8 font-mono text-sm font-semibold text-ink", "Instance settings" }
+            h2 { class: "mt-8 font-mono text-sm font-semibold text-ink", "System" }
+            div { class: "mt-2",
+                match &*system.read() {
+                    Some(Ok(info)) => rsx! {
+                        dl { class: "grid grid-cols-2 gap-x-6 gap-y-1 border border-line p-4 font-mono text-xs text-ink-muted sm:grid-cols-3",
+                            div { "edda " span { class: "text-ink", "{info.version}" } }
+                            div { "db " span { class: "text-ink", "{info.database_backend}" } }
+                            div { "users " span { class: "text-ink", "{info.users}" } }
+                            div { "repos " span { class: "text-ink", "{info.repositories}" } }
+                            div { "orgs " span { class: "text-ink", "{info.organizations}" } }
+                            div { "open PRs " span { class: "text-ink", "{info.open_pull_requests}" } }
+                            div { "open issues " span { class: "text-ink", "{info.open_issues}" } }
+                            div { "jobs pending " span { class: "text-ink", "{info.jobs_pending}" } }
+                            div { "jobs running " span { class: "text-ink", "{info.jobs_running}" } }
+                            div {
+                                "jobs dead "
+                                span {
+                                    class: if info.jobs_dead > 0 { "text-status-conflict" } else { "text-ink" },
+                                    "{info.jobs_dead}"
+                                }
+                            }
+                            div { "git bytes " span { class: "text-ink", "{info.tracked_git_bytes}" } }
+                            div { "lfs bytes " span { class: "text-ink", "{info.tracked_lfs_bytes}" } }
+                        }
+                    },
+                    Some(Err(err)) => rsx! { p { class: "text-sm text-status-conflict", "{err}" } },
+                    None => rsx! { p { class: "text-sm text-ink-muted", "loading…" } },
+                }
+            }
+
+            h2 { class: "mt-10 font-mono text-sm font-semibold text-ink", "Dead-lettered jobs" }
+            div { class: "mt-2",
+                match &*jobs.read() {
+                    Some(Ok(list)) if list.is_empty() => rsx! {
+                        p { class: "text-sm text-ink-muted italic", "the queue has no dead letters" }
+                    },
+                    Some(Ok(list)) => rsx! {
+                        div { class: "divide-y divide-line border border-line",
+                            for job in list.clone() {
+                                div { class: "flex items-center justify-between gap-4 px-4 py-3",
+                                    div { class: "min-w-0",
+                                        div { class: "font-mono text-sm text-ink", "{job.kind}" }
+                                        div { class: "font-mono text-xs text-ink-muted",
+                                            "{job.attempts}/{job.max_attempts} attempts"
+                                            if let Some(err) = &job.last_error {
+                                                " · {err}"
+                                            }
+                                        }
+                                    }
+                                    div { class: "flex shrink-0 gap-3",
+                                        button {
+                                            r#type: "button",
+                                            class: "font-mono text-xs text-ink-muted hover:text-ink",
+                                            onclick: {
+                                                let job_id = job.id.clone();
+                                                move |_| job_action(job_id.clone(), "retry", jobs, action_error)
+                                            },
+                                            "retry"
+                                        }
+                                        button {
+                                            r#type: "button",
+                                            class: "font-mono text-xs text-ink-muted hover:text-status-conflict",
+                                            onclick: {
+                                                let job_id = job.id.clone();
+                                                move |_| job_action(job_id.clone(), "cancel", jobs, action_error)
+                                            },
+                                            "cancel"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    Some(Err(err)) => rsx! { p { class: "text-sm text-status-conflict", "{err}" } },
+                    None => rsx! { p { class: "text-sm text-ink-muted", "loading…" } },
+                }
+            }
+
+            h2 { class: "mt-10 font-mono text-sm font-semibold text-ink", "Repositories" }
+            div { class: "mt-2",
+                match &*repos.read() {
+                    Some(Ok(list)) => rsx! {
+                        div { class: "divide-y divide-line border border-line",
+                            for repo in list.clone() {
+                                div { class: "flex items-center justify-between gap-4 px-4 py-3",
+                                    div { class: "min-w-0 font-mono text-sm text-ink",
+                                        "{repo.owner}/{repo.name}"
+                                        if repo.private {
+                                            span { class: "ml-2 text-xs text-ink-muted", "[private]" }
+                                        }
+                                        if repo.is_fork {
+                                            span { class: "ml-2 text-xs text-ink-muted", "[fork]" }
+                                        }
+                                    }
+                                    button {
+                                        r#type: "button",
+                                        class: "shrink-0 font-mono text-xs text-ink-muted hover:text-status-conflict",
+                                        onclick: {
+                                            let repo_id = repo.id.clone();
+                                            move |_| delete_repo(repo_id.clone(), repos, action_error)
+                                        },
+                                        "delete"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    Some(Err(err)) => rsx! { p { class: "text-sm text-status-conflict", "{err}" } },
+                    None => rsx! { p { class: "text-sm text-ink-muted", "loading…" } },
+                }
+            }
+
+            h2 { class: "mt-10 font-mono text-sm font-semibold text-ink", "Instance settings" }
             p { class: "mt-1 text-sm text-ink-muted",
                 "Applied immediately, no restart. These override the matching EDDA_* startup values."
             }

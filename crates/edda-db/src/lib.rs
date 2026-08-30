@@ -312,6 +312,32 @@ pub async fn optimize(pool: &DbPool) -> Result<(), DbError> {
     Ok(())
 }
 
+/// Writes a consistent snapshot of a **SQLite** database to `dest` via
+/// `VACUUM INTO` — a single defragmented file, safe to take while the
+/// server is running. `edda-cli dump` uses this. Errors on
+/// PostgreSQL/MySQL, which have their own first-class backup tools
+/// (`pg_dump` / `mysqldump`) this crate has no business reimplementing.
+///
+/// # Errors
+/// When the pool is not SQLite, or the underlying `VACUUM INTO` fails
+/// (e.g. `dest` already exists, or its directory is not writable).
+pub async fn backup_sqlite(pool: &DbPool, dest: &std::path::Path) -> Result<(), DbError> {
+    if pool.backend != Backend::Sqlite {
+        return Err(DbError::Other(sqlx::Error::Configuration(
+            "backup_sqlite only supports the SQLite backend — use pg_dump / mysqldump \
+             for PostgreSQL / MySQL"
+                .into(),
+        )));
+    }
+    // `VACUUM INTO` takes a string literal, not a bound parameter.
+    let escaped = dest.to_string_lossy().replace('\'', "''");
+    sqlx::query(&format!("VACUUM INTO '{escaped}'"))
+        .execute(&pool.any)
+        .await
+        .map(|_| ())
+        .map_err(DbError::from)
+}
+
 /// Shared by `pool()` and `test_pool()` — connects, applies this
 /// backend's own SQLite tuning (WAL/foreign-keys/busy-timeout have no
 /// generic `Any`-level equivalent, so they're applied as plain `PRAGMA`

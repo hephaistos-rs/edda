@@ -20,9 +20,15 @@ workspace = true
 # Only for `argon2::password_hash::rand_core` — generating the
 # never-displayed random password `user create` assigns a new account.
 argon2 = { workspace = true }
+# Nested-subcommand parsing + `--help` for the whole CLI surface.
+clap = { workspace = true }
 edda-auth = { workspace = true }
 edda-db = { workspace = true }
 edda-domain = { workspace = true }
+# `dump` / `restore` bundle the SQLite database + `data/` into a
+# `.tar.gz`.
+flate2 = { workspace = true }
+tar = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [dev-dependencies]

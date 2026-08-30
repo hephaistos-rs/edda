@@ -120,6 +120,12 @@ bytes = "1.12.1"
 # (`openidconnect`'s own `CoreIdTokenClaims` timestamps are `chrono`
 # types) — not used by any non-test code in this workspace.
 chrono = "0.4.45"
+# Argument parsing for the `edda-cli` instance-administration binary
+# (`user` / `secrets` / `doctor` / `dump` / `restore` / `repo`). The
+# server binary parses its own environment (`edda_app::config`); this is
+# only the CLI's nested-subcommand surface, which is exactly the
+# "well-established crate, not a hand-roll" case `AGENTS.md` calls out.
+clap = { version = "4.5.48", features = ["derive"] }
 # GFM-compatible markdown -> HTML. Paired unconditionally with `ammonia`
 # below — every markdown render in this workspace must go through HTML
 # sanitization, no exceptions. `default-features = false` here: comrak's
@@ -288,6 +294,10 @@ subtle = "2.6.1"
 # pure-Rust alternative exists (the same preference already applied to
 # `russh`'s `ring` backend and `jsonwebtoken`'s `rust_crypto` backend).
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
+# `edda-cli dump` / `restore` bundle the SQLite database plus `data/`
+# into a `.tar.gz`. Already in the lock graph transitively (via
+# `gix-archive`); naming it directly adds no resolved version.
+tar = "0.4.46"
 thiserror = "2.0.20"
 tokio = "1.53.1"
 # TOTP (RFC 6238) enrollment/verification. `std` (default) + `gen_secret`

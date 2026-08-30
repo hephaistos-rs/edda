@@ -4,6 +4,7 @@ pub mod changelog;
 pub mod diff;
 pub mod history;
 pub mod hooks;
+pub mod maintenance;
 pub mod merge;
 pub mod pack;
 pub mod pktline;
@@ -21,6 +22,7 @@ pub use blame::{blame, Blame, BlameHunk};
 pub use changelog::{changelog_entries, changelog_markdown, ChangelogEntry};
 pub use diff::{commit_diff, diff_refs, DiffHunk, DiffLine, FileDiff};
 pub use hooks::{AppliedRef, ReceiveChecks, ReceiveOutcome};
+pub use maintenance::{repo_gc, sweep_quarantine, QuarantineSweep, RepoGcOutcome};
 pub use merge::{
     fast_forward_branch_to_ref, merge_branches, merge_pull_request, merge_ref_into_branch,
     rebase_ref_onto_branch, squash_ref_into_branch, MergeOutcome,

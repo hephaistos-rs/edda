@@ -228,6 +228,16 @@ fn main() {
                 let store = store.clone();
                 move |payload| jobs::sync_review_requests(pool.clone(), store.clone(), payload)
             });
+            handlers.register(edda_domain::JobKind::RunMaintenance, {
+                let pool = pool.clone();
+                let store = store.clone();
+                move |payload| jobs::run_maintenance(pool.clone(), store.clone(), payload)
+            });
+            handlers.register(edda_domain::JobKind::RunRepoGc, {
+                let pool = pool.clone();
+                let store = store.clone();
+                move |payload| jobs::run_repo_gc(pool.clone(), store.clone(), payload)
+            });
             edda_jobs::spawn_poller(
                 pool.clone(),
                 std::sync::Arc::new(handlers),
@@ -240,6 +250,11 @@ fn main() {
             // this one turns "what happened" into "what work," the poller
             // runs the work.
             edda_jobs::spawn_dispatcher(pool.clone(), edda_jobs::DispatcherConfig::default());
+
+            // The maintenance scheduler (Phase 12): seeds the
+            // `scheduled_jobs` rows, then every minute turns any due
+            // periodic task into a `RunMaintenance` job for the poller.
+            edda_jobs::spawn_scheduler(pool.clone(), edda_jobs::SchedulerConfig::default());
 
             // Same `Once`-guarded pattern as the shutdown watcher below,
             // and for the same reason: this callback can re-run on

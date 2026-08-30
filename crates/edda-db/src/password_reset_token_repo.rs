@@ -124,6 +124,28 @@ impl PasswordResetTokenRepo {
             .await?;
         Ok(())
     }
+
+    /// Deletes tokens that are already consumed or past their expiry —
+    /// the `prune_expired_tokens` maintenance task. Returns the row count.
+    pub async fn delete_consumed_or_expired<'c>(
+        db: impl DbConn<'c>,
+        now: i64,
+    ) -> Result<u64, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
+            Backend::Postgres => {
+                "DELETE FROM password_reset_tokens WHERE used_at IS NOT NULL OR expires_at < $1"
+            }
+            Backend::Sqlite | Backend::MySql => {
+                "DELETE FROM password_reset_tokens WHERE used_at IS NOT NULL OR expires_at < ?"
+            }
+        };
+        Ok(sqlx::query(sql)
+            .bind(now)
+            .execute(&mut *h.conn())
+            .await?
+            .rows_affected())
+    }
 }
 
 #[cfg(test)]
@@ -219,5 +241,40 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn delete_consumed_or_expired_removes_only_dead_rows() {
+        let pool = crate::test_pool().await;
+        let user_id = UserId::new();
+        crate::UserRepo::insert(&pool, user_id, "dave", "dave@example.com", "x")
+            .await
+            .unwrap();
+        // Live: unused and not yet expired.
+        PasswordResetTokenRepo::insert(&pool, PasswordResetTokenId::new(), user_id, "live", 9_999)
+            .await
+            .unwrap();
+        // Expired.
+        PasswordResetTokenRepo::insert(&pool, PasswordResetTokenId::new(), user_id, "old", 100)
+            .await
+            .unwrap();
+        // Consumed.
+        let used = PasswordResetTokenId::new();
+        PasswordResetTokenRepo::insert(&pool, used, user_id, "used", 9_999)
+            .await
+            .unwrap();
+        PasswordResetTokenRepo::mark_used(&pool, used)
+            .await
+            .unwrap();
+
+        let removed = PasswordResetTokenRepo::delete_consumed_or_expired(&pool, 1_000)
+            .await
+            .unwrap();
+        assert_eq!(removed, 2, "the expired and consumed rows are gone");
+        // The live token still resolves.
+        assert!(PasswordResetTokenRepo::find_valid_by_hash(&pool, "live", 0)
+            .await
+            .unwrap()
+            .is_some());
     }
 }

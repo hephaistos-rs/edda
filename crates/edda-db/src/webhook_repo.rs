@@ -361,4 +361,23 @@ impl WebhookDeliveryRepo {
         })
         .transpose()
     }
+
+    /// Deletes delivery records older than `cutoff` (unix seconds) — the
+    /// `prune_webhook_deliveries` maintenance task. The payload blobs
+    /// these carry are the bulk of an old, busy instance's `jobs`-
+    /// adjacent storage. Returns how many rows were removed.
+    pub async fn delete_older_than<'c>(db: impl DbConn<'c>, cutoff: i64) -> Result<u64, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
+            Backend::Postgres => "DELETE FROM webhook_deliveries WHERE created_at < $1",
+            Backend::Sqlite | Backend::MySql => {
+                "DELETE FROM webhook_deliveries WHERE created_at < ?"
+            }
+        };
+        Ok(sqlx::query(sql)
+            .bind(cutoff)
+            .execute(&mut *h.conn())
+            .await?
+            .rows_affected())
+    }
 }

@@ -134,4 +134,31 @@ impl LoginAttemptRepo {
         sqlx::query(sql).bind(key).execute(&mut *h.conn()).await?;
         Ok(())
     }
+
+    /// Deletes throttle counters that are no longer locked and haven't
+    /// seen a failure since `cutoff` — the `prune_expired_tokens`
+    /// maintenance task also sweeps these. Returns the row count.
+    pub async fn delete_stale<'c>(
+        db: impl DbConn<'c>,
+        cutoff: i64,
+        now: i64,
+    ) -> Result<u64, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
+            Backend::Postgres => {
+                "DELETE FROM login_attempts \
+                 WHERE last_failed_at < $1 AND (locked_until IS NULL OR locked_until < $2)"
+            }
+            Backend::Sqlite | Backend::MySql => {
+                "DELETE FROM login_attempts \
+                 WHERE last_failed_at < ? AND (locked_until IS NULL OR locked_until < ?)"
+            }
+        };
+        Ok(sqlx::query(sql)
+            .bind(cutoff)
+            .bind(now)
+            .execute(&mut *h.conn())
+            .await?
+            .rows_affected())
+    }
 }

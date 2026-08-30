@@ -10,8 +10,10 @@
 //! direction).
 
 mod dispatcher;
+mod scheduler;
 
 pub use dispatcher::{spawn_dispatcher, DispatcherConfig};
+pub use scheduler::{spawn_scheduler, SchedulerConfig, DEFAULT_TASKS};
 
 use std::collections::HashMap;
 use std::future::Future;

@@ -121,4 +121,26 @@ impl EmailVerificationTokenRepo {
             .await?;
         Ok(())
     }
+
+    /// Deletes tokens that are already consumed or past their expiry —
+    /// the `prune_expired_tokens` maintenance task. Returns the row count.
+    pub async fn delete_consumed_or_expired<'c>(
+        db: impl DbConn<'c>,
+        now: i64,
+    ) -> Result<u64, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let sql = match h.backend() {
+            Backend::Postgres => {
+                "DELETE FROM email_verification_tokens WHERE used_at IS NOT NULL OR expires_at < $1"
+            }
+            Backend::Sqlite | Backend::MySql => {
+                "DELETE FROM email_verification_tokens WHERE used_at IS NOT NULL OR expires_at < ?"
+            }
+        };
+        Ok(sqlx::query(sql)
+            .bind(now)
+            .execute(&mut *h.conn())
+            .await?
+            .rows_affected())
+    }
 }

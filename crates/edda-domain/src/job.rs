@@ -40,6 +40,18 @@ pub enum JobPayload {
     /// repository's CODEOWNERS file — enqueued by the receive path when a
     /// push updates the PR's source branch.
     SyncReviewRequests { pull_request_id: PullRequestId },
+    /// A periodic housekeeping task (Phase 12), enqueued by the scheduler
+    /// when a `scheduled_jobs` row comes due. `task` is one of a small
+    /// fixed set the handler dispatches on
+    /// (`prune_webhook_deliveries`, `prune_expired_tokens`,
+    /// `prune_quarantine`, `sweep_repo_sizes`, `optimize_database`,
+    /// `repo_gc_sweep`) — a single job kind rather than one per task so
+    /// the set can grow without touching `JobKind`.
+    RunMaintenance { task: String },
+    /// Garbage-collect one repository's git directory (Phase 12) — fan
+    /// out from the `repo_gc_sweep` maintenance task, or enqueued
+    /// directly by `edda-cli repo gc`.
+    RunRepoGc { repository_id: RepositoryId },
 }
 
 /// A `HashMap`-friendly discriminant for `JobPayload`: the job poller's
@@ -53,6 +65,8 @@ pub enum JobKind {
     SendEmail,
     UpdateRepoSize,
     SyncReviewRequests,
+    RunMaintenance,
+    RunRepoGc,
 }
 
 impl JobPayload {
@@ -63,6 +77,8 @@ impl JobPayload {
             JobPayload::SendEmail { .. } => JobKind::SendEmail,
             JobPayload::UpdateRepoSize { .. } => JobKind::UpdateRepoSize,
             JobPayload::SyncReviewRequests { .. } => JobKind::SyncReviewRequests,
+            JobPayload::RunMaintenance { .. } => JobKind::RunMaintenance,
+            JobPayload::RunRepoGc { .. } => JobKind::RunRepoGc,
         }
     }
 }
@@ -77,6 +93,8 @@ impl JobKind {
             JobKind::SendEmail => "send_email",
             JobKind::UpdateRepoSize => "update_repo_size",
             JobKind::SyncReviewRequests => "sync_review_requests",
+            JobKind::RunMaintenance => "run_maintenance",
+            JobKind::RunRepoGc => "run_repo_gc",
         }
     }
 }

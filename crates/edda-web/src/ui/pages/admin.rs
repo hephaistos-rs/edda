@@ -74,6 +74,19 @@ struct AdminJobDto {
     last_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct ScheduledJobDto {
+    name: String,
+    interval_seconds: i64,
+    enabled: bool,
+    #[allow(dead_code)]
+    next_run_at: i64,
+    last_run_at: Option<i64>,
+    last_status: Option<String>,
+    #[allow(dead_code)]
+    last_detail: Option<String>,
+}
+
 // Same wasm32-only-fetch / server-side-stub split as every other
 // hand-written (non-server-function) API call in `ui/` — see `login.rs`'s
 // doc comment. The UI-level check here (rendering this page/its actions
@@ -296,6 +309,45 @@ async fn request_job_action(_id: &str, _action: &str) -> Result<(), String> {
     Err("not available during server rendering".to_string())
 }
 
+#[cfg(target_arch = "wasm32")]
+async fn fetch_scheduled() -> Result<Vec<ScheduledJobDto>, String> {
+    fetch_json("/api/admin/scheduled-jobs").await
+}
+#[cfg(not(target_arch = "wasm32"))]
+async fn fetch_scheduled() -> Result<Vec<ScheduledJobDto>, String> {
+    Err("not available during server rendering".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn request_run_scheduled(name: &str) -> Result<(), String> {
+    post_action(&format!("/api/admin/scheduled-jobs/{name}/run")).await
+}
+#[cfg(not(target_arch = "wasm32"))]
+async fn request_run_scheduled(_name: &str) -> Result<(), String> {
+    Err("not available during server rendering".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn request_toggle_scheduled(name: &str, enabled: bool) -> Result<(), String> {
+    let request =
+        gloo_net::http::Request::post(&format!("/api/admin/scheduled-jobs/{name}/enabled"))
+            .json(&serde_json::json!({ "enabled": enabled }))
+            .map_err(|err| err.to_string())?;
+    let response = request.send().await.map_err(|err| err.to_string())?;
+    if response.ok() {
+        Ok(())
+    } else {
+        Err(response
+            .text()
+            .await
+            .unwrap_or_else(|_| "couldn't update the task".to_string()))
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+async fn request_toggle_scheduled(_name: &str, _enabled: bool) -> Result<(), String> {
+    Err("not available during server rendering".to_string())
+}
+
 fn relative_time(unix_seconds: i64) -> String {
     let now = web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)
@@ -340,6 +392,33 @@ fn delete_repo(
     });
 }
 
+fn run_scheduled(
+    name: String,
+    mut scheduled: Resource<Result<Vec<ScheduledJobDto>, String>>,
+    mut action_error: Signal<Option<String>>,
+) {
+    spawn(async move {
+        match request_run_scheduled(&name).await {
+            Ok(()) => scheduled.restart(),
+            Err(message) => action_error.set(Some(message)),
+        }
+    });
+}
+
+fn toggle_scheduled(
+    name: String,
+    enabled: bool,
+    mut scheduled: Resource<Result<Vec<ScheduledJobDto>, String>>,
+    mut action_error: Signal<Option<String>>,
+) {
+    spawn(async move {
+        match request_toggle_scheduled(&name, enabled).await {
+            Ok(()) => scheduled.restart(),
+            Err(message) => action_error.set(Some(message)),
+        }
+    });
+}
+
 #[component]
 pub fn Admin() -> Element {
     let mut users = use_resource(fetch_users);
@@ -348,6 +427,7 @@ pub fn Admin() -> Element {
     let system = use_resource(fetch_system);
     let repos = use_resource(fetch_repos);
     let jobs = use_resource(move || fetch_jobs(true));
+    let scheduled = use_resource(fetch_scheduled);
     let mut action_error = use_signal(|| Option::<String>::None);
 
     rsx! {
@@ -424,6 +504,62 @@ pub fn Admin() -> Element {
                                                 move |_| job_action(job_id.clone(), "cancel", jobs, action_error)
                                             },
                                             "cancel"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    Some(Err(err)) => rsx! { p { class: "text-sm text-status-conflict", "{err}" } },
+                    None => rsx! { p { class: "text-sm text-ink-muted", "loading…" } },
+                }
+            }
+
+            h2 { class: "mt-10 font-mono text-sm font-semibold text-ink", "Scheduled maintenance" }
+            div { class: "mt-2",
+                match &*scheduled.read() {
+                    Some(Ok(list)) => rsx! {
+                        div { class: "divide-y divide-line border border-line",
+                            for task in list.clone() {
+                                div { class: "flex items-center justify-between gap-4 px-4 py-3",
+                                    div { class: "min-w-0",
+                                        div { class: "font-mono text-sm text-ink",
+                                            "{task.name}"
+                                            if !task.enabled {
+                                                span { class: "ml-2 text-xs text-ink-muted", "[disabled]" }
+                                            }
+                                        }
+                                        div { class: "font-mono text-xs text-ink-muted",
+                                            "every {task.interval_seconds}s"
+                                            if let Some(status) = &task.last_status {
+                                                " · last {status}"
+                                                if task.last_run_at.is_some() {
+                                                    " ({relative_time(task.last_run_at.unwrap())})"
+                                                }
+                                            } else {
+                                                " · never run"
+                                            }
+                                        }
+                                    }
+                                    div { class: "flex shrink-0 gap-3",
+                                        button {
+                                            r#type: "button",
+                                            class: "font-mono text-xs text-ink-muted hover:text-ink",
+                                            onclick: {
+                                                let name = task.name.clone();
+                                                move |_| run_scheduled(name.clone(), scheduled, action_error)
+                                            },
+                                            "run now"
+                                        }
+                                        button {
+                                            r#type: "button",
+                                            class: "font-mono text-xs text-ink-muted hover:text-ink",
+                                            onclick: {
+                                                let name = task.name.clone();
+                                                let next = !task.enabled;
+                                                move |_| toggle_scheduled(name.clone(), next, scheduled, action_error)
+                                            },
+                                            if task.enabled { "disable" } else { "enable" }
                                         }
                                     }
                                 }

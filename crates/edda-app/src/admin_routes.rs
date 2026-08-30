@@ -73,6 +73,15 @@ pub fn routes() -> Router<AppState> {
         .route("/api/admin/jobs", get(list_jobs))
         .route("/api/admin/jobs/{id}/retry", post(retry_job))
         .route("/api/admin/jobs/{id}/cancel", post(cancel_job))
+        .route("/api/admin/scheduled-jobs", get(list_scheduled_jobs))
+        .route(
+            "/api/admin/scheduled-jobs/{name}/run",
+            post(run_scheduled_job),
+        )
+        .route(
+            "/api/admin/scheduled-jobs/{name}/enabled",
+            post(set_scheduled_job_enabled),
+        )
 }
 
 fn require_admin(
@@ -766,6 +775,117 @@ async fn cancel_job(
             StatusCode::OK.into_response()
         }
         Ok(false) => (StatusCode::CONFLICT, "a running job cannot be cancelled").into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+// ─────────────────── scheduled maintenance (Phase 12) ────────────────
+
+#[derive(Serialize)]
+struct ScheduledJobDto {
+    name: String,
+    interval_seconds: i64,
+    enabled: bool,
+    next_run_at: i64,
+    last_run_at: Option<i64>,
+    last_status: Option<String>,
+    last_detail: Option<String>,
+}
+
+impl From<edda_db::ScheduledJob> for ScheduledJobDto {
+    fn from(job: edda_db::ScheduledJob) -> Self {
+        Self {
+            name: job.name,
+            interval_seconds: job.interval_seconds,
+            enabled: job.enabled,
+            next_run_at: job.next_run_at,
+            last_run_at: job.last_run_at,
+            last_status: job.last_status,
+            last_detail: job.last_detail,
+        }
+    }
+}
+
+#[tracing::instrument(name = "admin.scheduled_jobs.list", skip_all)]
+async fn list_scheduled_jobs(
+    State(state): State<AppState>,
+    auth: AuthSession<Backend>,
+) -> Response {
+    if let Err(err) = require_admin(&auth) {
+        return err.into_response();
+    }
+    match edda_db::ScheduledJobRepo::list(&state.pool).await {
+        Ok(jobs) => Json(
+            jobs.into_iter()
+                .map(ScheduledJobDto::from)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+#[tracing::instrument(name = "admin.scheduled_jobs.run", skip_all, fields(task = %name))]
+async fn run_scheduled_job(
+    State(state): State<AppState>,
+    auth: AuthSession<Backend>,
+    Path(name): Path<String>,
+) -> Response {
+    let admin = match require_admin(&auth) {
+        Ok(admin) => admin,
+        Err(err) => return err.into_response(),
+    };
+    match edda_db::ScheduledJobRepo::run_now(&state.pool, &name).await {
+        Ok(true) => {
+            record_on(
+                &state.pool,
+                "admin.scheduled_job.run",
+                &admin.id.to_string(),
+                "scheduled_job",
+                &name,
+            )
+            .await;
+            StatusCode::OK.into_response()
+        }
+        Ok(false) => (StatusCode::NOT_FOUND, "no such scheduled task").into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct SetEnabledBody {
+    enabled: bool,
+}
+
+#[tracing::instrument(name = "admin.scheduled_jobs.set_enabled", skip_all, fields(task = %name))]
+async fn set_scheduled_job_enabled(
+    State(state): State<AppState>,
+    auth: AuthSession<Backend>,
+    Path(name): Path<String>,
+    Json(body): Json<SetEnabledBody>,
+) -> Response {
+    let admin = match require_admin(&auth) {
+        Ok(admin) => admin,
+        Err(err) => return err.into_response(),
+    };
+    match edda_db::ScheduledJobRepo::set_enabled(&state.pool, &name, body.enabled).await {
+        Ok(true) => {
+            let event_type = if body.enabled {
+                "admin.scheduled_job.enable"
+            } else {
+                "admin.scheduled_job.disable"
+            };
+            record_on(
+                &state.pool,
+                event_type,
+                &admin.id.to_string(),
+                "scheduled_job",
+                &name,
+            )
+            .await;
+            StatusCode::OK.into_response()
+        }
+        Ok(false) => (StatusCode::NOT_FOUND, "no such scheduled task").into_response(),
         Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
     }
 }

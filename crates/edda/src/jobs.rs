@@ -231,6 +231,169 @@ pub async fn sync_review_requests(
     Ok(())
 }
 
+/// Retention windows for the pruning maintenance tasks.
+const WEBHOOK_DELIVERY_RETENTION_SECS: i64 = 30 * 86_400;
+const LOGIN_ATTEMPT_RETENTION_SECS: i64 = 7 * 86_400;
+/// A quarantine directory this old is from a crashed push — the scheduled
+/// sweep is less aggressive than a per-repo `repo_gc` (one hour).
+const QUARANTINE_SWEEP_AGE_SECS: u64 = 6 * 3_600;
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// The scheduled housekeeping tasks (Phase 12). One handler for the whole
+/// set — it dispatches on the `task` string the scheduler copied from the
+/// `scheduled_jobs` row. Each arm is best-effort and idempotent: a
+/// failure is returned so the poller retries, but a re-run never
+/// double-counts.
+pub async fn run_maintenance(
+    pool: DbPool,
+    store: Arc<dyn RepoStore>,
+    payload: JobPayload,
+) -> Result<(), String> {
+    let JobPayload::RunMaintenance { task } = payload else {
+        return Err("wrong payload kind routed to the run_maintenance handler".to_string());
+    };
+    let now = now_unix();
+    match task.as_str() {
+        "prune_webhook_deliveries" => {
+            let removed = edda_db::WebhookDeliveryRepo::delete_older_than(
+                &pool,
+                now - WEBHOOK_DELIVERY_RETENTION_SECS,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+            tracing::info!(removed, "pruned old webhook delivery records");
+        }
+        "prune_expired_tokens" => {
+            let a = edda_db::EmailVerificationTokenRepo::delete_consumed_or_expired(&pool, now)
+                .await
+                .map_err(|err| err.to_string())?;
+            let b = edda_db::PasswordResetTokenRepo::delete_consumed_or_expired(&pool, now)
+                .await
+                .map_err(|err| err.to_string())?;
+            let c = edda_db::LoginAttemptRepo::delete_stale(
+                &pool,
+                now - LOGIN_ATTEMPT_RETENTION_SECS,
+                now,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+            tracing::info!(
+                email_verification = a,
+                password_reset = b,
+                login_attempts = c,
+                "pruned expired auth tokens and throttle counters"
+            );
+        }
+        "prune_quarantine" => {
+            let store = store.clone();
+            let swept = tokio::task::spawn_blocking(move || {
+                edda_git::sweep_quarantine(store.as_ref(), QUARANTINE_SWEEP_AGE_SECS)
+            })
+            .await
+            .map_err(|_| "quarantine sweep task panicked".to_string())?
+            .map_err(|err| err.to_string())?;
+            tracing::info!(
+                directories = swept.directories_removed,
+                bytes = swept.bytes_reclaimed,
+                "swept abandoned receive-pack quarantine directories"
+            );
+        }
+        "sweep_repo_sizes" => {
+            let repos = edda_db::RepositoryRepo::list_all(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+            for repository in &repos {
+                edda_jobs::enqueue(
+                    &pool,
+                    JobPayload::UpdateRepoSize {
+                        repository_id: repository.id,
+                    },
+                )
+                .await
+                .map_err(|err| err.to_string())?;
+            }
+            tracing::info!(
+                repositories = repos.len(),
+                "queued a repo-size refresh for every repository"
+            );
+        }
+        "optimize_database" => {
+            edda_db::optimize(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+            tracing::info!("ran the periodic database optimize");
+        }
+        "repo_gc_sweep" => {
+            let repos = edda_db::RepositoryRepo::list_all_with_owner_username(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+            for (repository, _owner) in &repos {
+                edda_jobs::enqueue(
+                    &pool,
+                    JobPayload::RunRepoGc {
+                        repository_id: repository.id,
+                    },
+                )
+                .await
+                .map_err(|err| err.to_string())?;
+            }
+            tracing::info!(
+                repositories = repos.len(),
+                "queued a gc for every repository"
+            );
+        }
+        "session_gc" => {
+            // The dedicated `continuously_delete_expired` task in `main`
+            // already GCs the session store; this scheduled entry exists
+            // so operators see it in the admin panel and it is a no-op
+            // here on purpose.
+            tracing::debug!("session GC is handled by the dedicated session-store task");
+        }
+        other => {
+            tracing::warn!(task = %other, "unknown maintenance task — ignoring");
+        }
+    }
+    Ok(())
+}
+
+/// Garbage-collect one repository's git directory (Phase 12) — fanned out
+/// by `repo_gc_sweep` or enqueued directly by `edda-cli repo gc`.
+pub async fn run_repo_gc(
+    pool: DbPool,
+    store: Arc<dyn RepoStore>,
+    payload: JobPayload,
+) -> Result<(), String> {
+    let JobPayload::RunRepoGc { repository_id } = payload else {
+        return Err("wrong payload kind routed to the run_repo_gc handler".to_string());
+    };
+    let Some((repository, owner_username)) =
+        edda_db::RepositoryRepo::find_by_id_with_owner_username(&pool, repository_id)
+            .await
+            .map_err(|err| err.to_string())?
+    else {
+        return Ok(());
+    };
+    let identity = format!("{owner_username}/{}", repository.name);
+    let outcome = tokio::task::spawn_blocking(move || edda_git::repo_gc(store.as_ref(), &identity))
+        .await
+        .map_err(|_| "repo gc task panicked".to_string())?
+        .map_err(|err| err.to_string())?;
+    tracing::info!(
+        repository = %repository.id,
+        quarantine_dirs = outcome.quarantine.directories_removed,
+        quarantine_bytes = outcome.quarantine.bytes_reclaimed,
+        empty_dirs = outcome.empty_dirs_removed,
+        "repository gc complete"
+    );
+    Ok(())
+}
+
 /// The full delivery attempt: fetch the webhook + its decrypted secret,
 /// sign the already-built payload, re-resolve and re-check the target
 /// (`edda_app::security::ssrf::resolve_and_check` — independently of whatever check
@@ -574,5 +737,83 @@ mod tests {
             !landed.0.load(std::sync::atomic::Ordering::SeqCst),
             "the redirect Location was never requested"
         );
+    }
+
+    fn empty_store() -> Arc<dyn RepoStore> {
+        let root = std::env::temp_dir().join(format!(
+            "edda-jobs-maint-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        Arc::new(edda_git::store::LocalFsStore::new(root))
+    }
+
+    #[tokio::test]
+    async fn run_maintenance_dispatches_known_tasks_and_shrugs_off_unknown_ones() {
+        let pool = edda_db::test_pool().await;
+        let store = empty_store();
+        let user_id = edda_domain::UserId::new();
+        edda_db::UserRepo::insert(&pool, user_id, "alice", "alice@example.com", "x")
+            .await
+            .unwrap();
+        // An already-expired reset token that `prune_expired_tokens` should remove.
+        edda_db::PasswordResetTokenRepo::insert(
+            &pool,
+            edda_domain::PasswordResetTokenId::new(),
+            user_id,
+            "dead",
+            1,
+        )
+        .await
+        .unwrap();
+
+        for task in ["optimize_database", "prune_expired_tokens", "prune_quarantine", "made_up"] {
+            run_maintenance(
+                pool.clone(),
+                store.clone(),
+                JobPayload::RunMaintenance {
+                    task: task.to_string(),
+                },
+            )
+            .await
+            .unwrap_or_else(|err| panic!("maintenance task {task:?} failed: {err}"));
+        }
+
+        assert!(
+            edda_db::PasswordResetTokenRepo::find_valid_by_hash(&pool, "dead", 0)
+                .await
+                .unwrap()
+                .is_none(),
+            "the expired token was pruned"
+        );
+
+        // `sweep_repo_sizes` fans a job out per repository; with none, it's a clean no-op.
+        run_maintenance(
+            pool.clone(),
+            store,
+            JobPayload::RunMaintenance {
+                task: "sweep_repo_sizes".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_repo_gc_is_a_silent_success_for_a_repository_that_no_longer_exists() {
+        let pool = edda_db::test_pool().await;
+        run_repo_gc(
+            pool,
+            empty_store(),
+            JobPayload::RunRepoGc {
+                repository_id: edda_domain::RepositoryId::new(),
+            },
+        )
+        .await
+        .unwrap();
     }
 }

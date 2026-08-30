@@ -429,6 +429,11 @@ pub struct Settings {
     pub oidc: OidcConfig,
     pub smtp: Option<SmtpConfig>,
     pub rate_limit: RateLimitConfig,
+    /// `EDDA_METRICS_TOKEN` — the bearer token that unlocks `GET /metrics`
+    /// (Phase 12). Unset disables the endpoint. Served on the main HTTP
+    /// listener for now; a dedicated `EDDA_METRICS_ADDR` bind is a
+    /// Phase 13 follow-up (it needs the binary to own `axum::serve`).
+    pub metrics_token: Option<String>,
 }
 
 impl Settings {
@@ -504,6 +509,10 @@ impl Settings {
         let webauthn = parse_webauthn(&mut env);
         let oidc = parse_oidc(&mut env);
         let smtp = parse_smtp(&mut env);
+        let metrics_token = env
+            .get("EDDA_METRICS_TOKEN")
+            .map(|token| token.trim().to_string())
+            .filter(|token| !token.is_empty());
 
         let rl_default = RateLimitConfig::default();
         let per_second = env.parse_or::<u64>("EDDA_RATE_LIMIT_PER_SECOND", rl_default.per_second);
@@ -587,6 +596,7 @@ impl Settings {
                 auth_burst: auth_burst.max(1),
                 trusted_proxies,
             },
+            metrics_token,
             data_dir,
         })
     }
@@ -1044,6 +1054,7 @@ mod tests {
         "EDDA_REQUIRE_EMAIL_VERIFICATION",
         "EDDA_REQUIRE_SIGNIN_VIEW",
         "EDDA_DEFAULT_REPO_VISIBILITY",
+        "EDDA_METRICS_TOKEN",
         "EDDA_GIT_MAX_PACK_BYTES",
         "EDDA_LFS_MAX_OBJECT_BYTES",
         "EDDA_MAX_REPO_SIZE_BYTES",

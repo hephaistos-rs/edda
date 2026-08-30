@@ -24,6 +24,30 @@ pub mod metrics;
 
 use std::time::Duration;
 
+/// The W3C `traceparent` value for the current `tracing` span, or `None`
+/// when there is no active, valid OpenTelemetry span context (the usual
+/// case unless OTLP export is configured). Attach it to an outbound HTTP
+/// request — `.header("traceparent", value)` — so the receiver can join
+/// the same distributed trace.
+#[must_use]
+pub fn current_traceparent() -> Option<String> {
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    let context = tracing::Span::current().context();
+    let span = context.span();
+    let span_context = span.span_context();
+    if !span_context.is_valid() {
+        return None;
+    }
+    let flags = u8::from(span_context.trace_flags().is_sampled());
+    Some(format!(
+        "00-{}-{}-{flags:02x}",
+        span_context.trace_id(),
+        span_context.span_id()
+    ))
+}
+
 use opentelemetry::metrics::MeterProvider as _;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::KeyValue;

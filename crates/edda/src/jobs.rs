@@ -510,12 +510,18 @@ async fn send_signed(
         .build()
         .map_err(|err| err.to_string())?;
 
-    let response = client
+    let mut request = client
         .post(target_url)
         .header("Content-Type", "application/json")
         .header("X-Edda-Event", event.as_wire_str())
         .header("X-Edda-Signature", signature)
-        .header("X-Edda-Delivery", delivery_id.to_string())
+        .header("X-Edda-Delivery", delivery_id.to_string());
+    // Propagate the trace when OpenTelemetry export is on, so a webhook
+    // receiver can join this delivery to the request that triggered it.
+    if let Some(traceparent) = edda_telemetry::current_traceparent() {
+        request = request.header("traceparent", traceparent);
+    }
+    let response = request
         .body(payload_json.to_string())
         .send()
         .await
@@ -771,7 +777,12 @@ mod tests {
         .await
         .unwrap();
 
-        for task in ["optimize_database", "prune_expired_tokens", "prune_quarantine", "made_up"] {
+        for task in [
+            "optimize_database",
+            "prune_expired_tokens",
+            "prune_quarantine",
+            "made_up",
+        ] {
             run_maintenance(
                 pool.clone(),
                 store.clone(),

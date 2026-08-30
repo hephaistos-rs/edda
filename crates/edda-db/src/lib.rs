@@ -278,6 +278,14 @@ pub async fn pool(url: &str, options: PoolOptions) -> Result<DbPool, DbError> {
         .map_err(DbError::from)
 }
 
+/// `(open connections, idle connections)` in the pool right now — the
+/// `/metrics` database-pool gauges. Keeps `sqlx::Pool`'s stat methods
+/// (and the `sqlx` dependency) inside this crate.
+#[must_use]
+pub fn pool_stats(pool: &DbPool) -> (u32, usize) {
+    (pool.any.size(), pool.any.num_idle())
+}
+
 /// A cheap `SELECT 1` against the pool — the `/healthz` liveness probe.
 /// Replaces `edda-app` reaching into the pool to issue that query
 /// itself (which needed a direct `sqlx` dependency there).

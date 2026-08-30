@@ -182,6 +182,7 @@ fn main() {
                     instance_settings,
                     git_limits: settings.git.limits,
                     session: settings.session,
+                    metrics_token: settings.metrics_token.clone(),
                 },
             };
             let router = dioxus::server::router(App)

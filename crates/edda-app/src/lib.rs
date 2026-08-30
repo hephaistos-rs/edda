@@ -81,6 +81,10 @@ pub fn router(state: AppState) -> Router {
         .merge(git_http::routes())
         .merge(lfs::routes())
         .merge(rate_limited)
+        // `/metrics` rides the main listener but outside every layer
+        // above — a Prometheus scraper isn't a browser and carries its
+        // own `EDDA_METRICS_TOKEN` bearer.
+        .merge(api::metrics::routes())
         .route("/healthz", get(healthz));
 
     with_http_observability(routes).with_state(state)

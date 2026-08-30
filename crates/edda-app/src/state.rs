@@ -77,6 +77,11 @@ pub struct RuntimeConfig {
     /// actor-resolution path; the rolling TTL is applied at wiring time by
     /// the composition root's `Expiry`.
     pub session: SessionConfig,
+    /// `EDDA_METRICS_TOKEN` — the bearer token `GET /metrics` requires
+    /// (Phase 12). `None` (the default) disables the endpoint entirely:
+    /// it returns 404 rather than exposing instance internals
+    /// unauthenticated.
+    pub metrics_token: Option<String>,
 }
 
 impl RuntimeConfig {

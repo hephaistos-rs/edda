@@ -334,6 +334,17 @@ impl JobRepo {
         Ok(affected > 0)
     }
 
+    /// The `run_at` of the oldest still-pending job, or `None` when the
+    /// queue is empty — the `/metrics` "how far behind is the poller"
+    /// gauge.
+    pub async fn oldest_pending_run_at<'c>(db: impl DbConn<'c>) -> Result<Option<i64>, DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let row = sqlx::query("SELECT MIN(run_at) AS m FROM jobs WHERE status = 'pending'")
+            .fetch_one(&mut *h.conn())
+            .await?;
+        Ok(crate::get_opt_i64(&row, "m")?)
+    }
+
     /// Admin action: drop a job that isn't currently executing. Returns
     /// whether a row was removed (`false` if it was `running` or already
     /// gone).

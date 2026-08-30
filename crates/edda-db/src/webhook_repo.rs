@@ -362,6 +362,22 @@ impl WebhookDeliveryRepo {
         .transpose()
     }
 
+    /// `(total delivery attempts, attempts that never reached a 2xx)`
+    /// across every webhook — the `/metrics` delivery-success gauges. A
+    /// delivery counts as failed while `delivered_at` is still null (it
+    /// exhausted its retries or is mid-flight).
+    pub async fn totals<'c>(db: impl DbConn<'c>) -> Result<(i64, i64), DbError> {
+        let mut h = crate::conn::open(db).await?;
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS total, \
+                    COUNT(CASE WHEN delivered_at IS NULL THEN 1 END) AS failed \
+             FROM webhook_deliveries",
+        )
+        .fetch_one(&mut *h.conn())
+        .await?;
+        Ok((get_i64(&row, "total")?, get_i64(&row, "failed")?))
+    }
+
     /// Deletes delivery records older than `cutoff` (unix seconds) — the
     /// `prune_webhook_deliveries` maintenance task. The payload blobs
     /// these carry are the bulk of an old, busy instance's `jobs`-

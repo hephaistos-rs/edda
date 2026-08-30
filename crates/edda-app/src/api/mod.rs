@@ -25,6 +25,7 @@ pub mod branch_protection;
 pub mod collaborators;
 pub mod deploy_keys;
 pub mod issues;
+pub mod metrics;
 pub mod notifications;
 pub mod orgs;
 pub mod pulls;

@@ -300,6 +300,12 @@ syntect = { version = "5.3.0", default-features = false, features = ["default-fa
 tar = "0.4.46"
 thiserror = "2.0.20"
 tokio = "1.53.1"
+# `CancellationToken` — the one shutdown signal the composition root fans
+# out to the poller / dispatcher / scheduler so a `SIGTERM` drains
+# in-flight work instead of being cut mid-job. Already resolved in the
+# lock graph transitively (hyper-util / sqlx / russh), so naming it
+# directly adds no new version.
+tokio-util = "0.7.19"
 # TOTP (RFC 6238) enrollment/verification. `std` (default) + `gen_secret`
 # for server-side secret generation + `otpauth` for the `otpauth://` URI
 # manual-entry/QR string.

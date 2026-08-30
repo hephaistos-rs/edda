@@ -14,6 +14,7 @@ mod tests;
 
 pub use state::SshState;
 
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -40,14 +41,19 @@ impl russh::server::Server for SshServer {
     }
 }
 
-/// Binds `addr` and serves git-over-SSH until the process is asked to
-/// shut down. `host_key_path` is where the server's persistent SSH host
-/// key lives (generated once, on first run, if absent — see `host_key`'s
-/// module doc).
+/// Binds `addr` and serves git-over-SSH until `shutdown` resolves, then
+/// drains: `russh`'s [`RunningServerHandle`](russh::server::RunningServerHandle)
+/// stops the listener accepting new connections and the returned future
+/// resolves once the sessions already running have finished — so an
+/// in-flight `git clone`/`push` over SSH completes rather than being cut
+/// when the process receives `SIGTERM`. `host_key_path` is where the
+/// server's persistent SSH host key lives (generated once, on first run,
+/// if absent — see `host_key`'s module doc).
 pub async fn serve(
     state: SshState,
     addr: impl Into<SocketAddr>,
     host_key_path: &Path,
+    shutdown: impl Future<Output = ()> + Send,
 ) -> std::io::Result<()> {
     let host_key = host_key::load_or_generate(host_key_path)?;
 
@@ -58,6 +64,23 @@ pub async fn serve(
         ..Default::default()
     });
 
+    // `run_on_socket` borrows `server` and `listener` for the lifetime of
+    // the returned `RunningServer` future; both are locals of this async
+    // fn, which is itself the task the composition root spawns, so the
+    // borrows are fine without an inner `tokio::spawn`. `RunningServer` is
+    // `Unpin`, so `&mut running` works directly as a `select!` branch.
+    let listener = tokio::net::TcpListener::bind(addr.into()).await?;
     let mut server = SshServer { state };
-    server.run_on_address(config, addr.into()).await
+    let mut running = server.run_on_socket(config, &listener);
+    let handle = running.handle();
+
+    let shutdown = std::pin::pin!(shutdown);
+    tokio::select! {
+        result = &mut running => result,
+        () = shutdown => {
+            tracing::info!("git-over-SSH listener draining on shutdown signal");
+            handle.shutdown("edda is shutting down".to_string());
+            running.await
+        }
+    }
 }

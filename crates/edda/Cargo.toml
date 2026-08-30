@@ -46,7 +46,19 @@ serde_json = { workspace = true }
 # documented exception in `AGENTS.md`.
 sqlx = { workspace = true, features = ["any", "sqlite", "postgres", "mysql"], optional = true }
 thiserror = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["sync", "rt", "signal", "time", "net"], optional = true }
+tokio = { workspace = true, features = [
+    "sync",
+    "rt",
+    "rt-multi-thread",
+    "macros",
+    "signal",
+    "time",
+    "net",
+], optional = true }
+# `CancellationToken`: the one shutdown signal `main` fans out to the
+# poller / dispatcher / scheduler / SSH listener so `SIGTERM` drains
+# in-flight work before the process exits.
+tokio-util = { workspace = true, optional = true }
 tower-sessions = { workspace = true, optional = true }
 tower-sessions-sqlx-store = { workspace = true, features = ["sqlite", "postgres", "mysql"], optional = true }
 tracing = { workspace = true }
@@ -78,6 +90,7 @@ server = [
     "dep:sqlx",
     "dep:thiserror",
     "dep:tokio",
+    "dep:tokio-util",
     "dep:tower-sessions",
     "dep:tower-sessions-sqlx-store",
 ]

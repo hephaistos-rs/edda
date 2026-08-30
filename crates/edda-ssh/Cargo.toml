@@ -37,7 +37,11 @@ rand = { workspace = true }
 # dropped since nothing requires it.
 russh = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync"] }
+# `net` for the `TcpListener` `serve` binds itself (so it can hold the
+# `russh` `RunningServerHandle` for a graceful drain on shutdown);
+# `macros` for the `select!` that races the listener against that drain;
+# `sync`/`rt` for the spawned session tasks russh runs.
+tokio = { workspace = true, features = ["rt", "sync", "net", "macros"] }
 tracing = { workspace = true }
 
 # Only the integration test module (`src/tests.rs`) needs a real TCP

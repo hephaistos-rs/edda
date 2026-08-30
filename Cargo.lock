@@ -2157,6 +2157,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "tower-sessions",
  "tower-sessions-sqlx-store",
  "tracing",
@@ -2303,6 +2304,7 @@ dependencies = [
  "rand 0.10.2",
  "serde_json",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use rand::RngExt;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
 use edda_db::{DbPool, EventRepo, JobRepo, PullRequestRepo};
 use edda_domain::{
@@ -179,22 +180,38 @@ impl Default for PollerConfig {
     }
 }
 
+/// How long the poller waits for its in-flight batch to finish after a
+/// shutdown signal before returning regardless.
+const POLLER_DRAIN_GRACE: Duration = Duration::from_secs(20);
+
 /// Starts the poll/claim/dispatch loop on a new task, returning its
-/// handle (the composition root holds it only to let the process exit
-/// cleanly on shutdown; the loop itself runs until the process ends).
-/// Concurrency within one claimed batch is bounded by
+/// handle. `shutdown` is the composition root's one `CancellationToken`:
+/// when it fires the loop stops claiming new work, waits (bounded by
+/// [`POLLER_DRAIN_GRACE`]) for the batch already running to land, and then
+/// returns — so the caller can `await` the handle as part of a graceful
+/// shutdown. Concurrency within one claimed batch is bounded by
 /// `config.max_concurrent` (a `Semaphore`, not an unbounded `tokio::spawn`
 /// loop), the same bounded-concurrency approach `edda-git`'s pack-building
-/// path already uses.
+/// path already uses; the in-flight tasks are tracked in a `JoinSet` so
+/// they can be drained.
 pub fn spawn_poller(
     pool: DbPool,
     handlers: Arc<HandlerRegistry>,
     config: PollerConfig,
+    shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent));
+        let mut in_flight = tokio::task::JoinSet::new();
         loop {
-            tokio::time::sleep(config.poll_interval).await;
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                () = tokio::time::sleep(config.poll_interval) => {}
+            }
+            // Reap whatever finished since the last tick so the JoinSet
+            // doesn't grow unbounded on a busy instance.
+            while in_flight.try_join_next().is_some() {}
+
             let claimed = match JobRepo::claim_batch(&pool, now_unix(), config.batch_size).await {
                 Ok(jobs) => jobs,
                 Err(err) => {
@@ -208,10 +225,27 @@ pub fn spawn_poller(
                 };
                 let pool = pool.clone();
                 let handlers = handlers.clone();
-                tokio::spawn(async move {
+                in_flight.spawn(async move {
                     let _permit = permit;
                     run_one(&pool, &handlers, job).await;
                 });
+            }
+        }
+
+        // Shutdown requested: stop claiming, let the in-flight batch land.
+        if !in_flight.is_empty() {
+            tracing::info!(
+                in_flight = in_flight.len(),
+                "job poller draining in-flight jobs before shutdown"
+            );
+            let drain = async { while in_flight.join_next().await.is_some() {} };
+            if tokio::time::timeout(POLLER_DRAIN_GRACE, drain)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    "job poller: in-flight jobs did not finish within the drain grace period"
+                );
             }
         }
     })
@@ -377,6 +411,27 @@ mod tests {
         assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
         let recent = JobRepo::list_recent(&pool, 10).await.unwrap();
         assert_eq!(recent[0].status, edda_domain::JobStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn the_poller_task_returns_promptly_once_its_shutdown_token_is_cancelled() {
+        let pool = edda_db::test_pool().await;
+        let shutdown = CancellationToken::new();
+        let handle = spawn_poller(
+            pool,
+            Arc::new(HandlerRegistry::new()),
+            PollerConfig {
+                poll_interval: Duration::from_millis(20),
+                ..PollerConfig::default()
+            },
+            shutdown.clone(),
+        );
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("the poller task returns soon after cancellation, not on the process ending")
+            .expect("the poller task does not panic on shutdown");
     }
 
     #[tokio::test]

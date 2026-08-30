@@ -19,6 +19,8 @@
 
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
+
 use edda_db::{
     BranchProtectionRepo, DbPool, EventRecord, EventRepo, IssueAssigneeRepo, IssueRepo, JobRepo,
     OrganizationRepo, PrReviewRepo, PullRequestRepo, ReleaseRepo, RepositoryRepo, UserRepo,
@@ -49,13 +51,22 @@ impl Default for DispatcherConfig {
     }
 }
 
-/// Starts the outbox-draining loop on a new task, returning its handle
-/// (held by the composition root only so the process can exit cleanly).
-/// Runs until the process ends.
-pub fn spawn_dispatcher(pool: DbPool, config: DispatcherConfig) -> tokio::task::JoinHandle<()> {
+/// Starts the outbox-draining loop on a new task, returning its handle.
+/// `shutdown` is the composition root's shared [`CancellationToken`]: the
+/// loop finishes the event it is on, then stops (each `process_one` is
+/// awaited inline, so nothing is left in flight) and the task returns, so
+/// the caller can `await` the handle during a graceful shutdown.
+pub fn spawn_dispatcher(
+    pool: DbPool,
+    config: DispatcherConfig,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(config.poll_interval).await;
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                () = tokio::time::sleep(config.poll_interval) => {}
+            }
             let batch = match EventRepo::fetch_unprocessed(&pool, config.batch_size).await {
                 Ok(batch) => batch,
                 Err(err) => {

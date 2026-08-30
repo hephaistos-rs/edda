@@ -114,24 +114,30 @@ enforce "sqlx types stay inside crates/edda-db/" \
 enforce "no post-commit event dispatch — the outbox is the only path" \
     "$(g '\bedda_jobs::dispatch\b|\bEmailContent\b' --include=*.rs crates || true)"
 
-# API/Dioxus decoupling (plan.local.md §5.1 / Phase 4). `axum` types live
-# in `edda-app` (the one HTTP application). The `edda` binary is the
-# composition root: it merges `edda_app::router` with Dioxus's SSR router
-# and applies the session/auth layer, so it names `axum`/`axum_login` too —
-# the one sanctioned crossing, and the last one Phase 13 removes when the
-# binary owns `axum::serve` outright. `edda-auth` still names `axum` in its
-# OIDC-callback test module only; Phase 9 moves that `Session` coupling out.
-enforce "axum:: outside crates/edda-app/ (composition-root binary + edda-auth OIDC test excepted)" \
+# API/Dioxus decoupling (plan.local.md §5.1 / Phase 4/13). `axum` types
+# live in `edda-app` (the one HTTP application). Two sanctioned crossings
+# remain:
+#   - `crates/edda/` — the composition root owns `axum::serve` (Phase 13:
+#     `into_make_service_with_connect_info` + `with_graceful_shutdown`) and
+#     merges `edda_app::router` with the SSR router.
+#   - `crates/edda-web/` — `ssr_router()`'s signature names the
+#     `axum::Router` that `dioxus::server` produces, so that the binary can
+#     stay entirely free of `dioxus` (Phase 13). No other `edda-web` code
+#     touches `axum`.
+# `edda-auth` still names `axum` in its OIDC-callback test module only;
+# Phase 9 moves that `Session` coupling out.
+enforce "axum:: outside crates/edda-app/ (composition-root binary + edda-web SSR wrapper + edda-auth OIDC test excepted)" \
     "$(g '\baxum::' --include=*.rs crates \
-        | grep -vE 'crates/edda-app/|crates/edda/|crates/edda-auth/|:[0-9]+:\s*(//|//!)' || true)"
+        | grep -vE 'crates/edda-app/|crates/edda/|crates/edda-web/|crates/edda-auth/|:[0-9]+:\s*(//|//!)' || true)"
 
-# `dioxus` types live only in the UI crate `edda-web`. The `edda` binary's
-# `main.rs` calls `dioxus::launch` / `dioxus::server::{serve,router}` to
-# host the UI — the sanctioned composition-root crossing; Phase 13 folds
-# it behind an `edda_web` wrapper.
-enforce "dioxus outside crates/edda-web/ (composition-root main.rs excepted)" \
+# `dioxus` lives only in the UI crate `edda-web` — no exceptions. Phase 13
+# removed the last crossing: the `edda` binary no longer names `dioxus`
+# anywhere (it calls `edda_web::launch_client` for the wasm build and
+# `edda_web::ssr_router` for the server build; `dioxus::server::serve` is
+# gone — the binary owns `axum::serve` itself).
+enforce "dioxus outside crates/edda-web/" \
     "$(g '\bdioxus\b' --include=*.rs crates \
-        | grep -vE 'crates/edda-web/|crates/edda/src/main\.rs|:[0-9]+:\s*(//|//!)' || true)"
+        | grep -vE 'crates/edda-web/|:[0-9]+:\s*(//|//!)' || true)"
 
 # The removed process-global and the deleted Dioxus server-function
 # surface (plan.local.md §19.1) — neither may reappear.

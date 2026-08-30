@@ -27,6 +27,8 @@
 
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
+
 use edda_db::{DbPool, ScheduledJobRepo};
 use edda_domain::JobPayload;
 
@@ -61,16 +63,26 @@ impl Default for SchedulerConfig {
 }
 
 /// Seeds the default `scheduled_jobs` rows (idempotent), then runs the
-/// due-check loop on a new task. Returns its handle; like the poller, the
-/// composition root holds it only for a clean shutdown.
-pub fn spawn_scheduler(pool: DbPool, config: SchedulerConfig) -> tokio::task::JoinHandle<()> {
+/// due-check loop on a new task. Returns its handle. `shutdown` is the
+/// composition root's shared [`CancellationToken`]: the loop stops on the
+/// next tick boundary (or immediately, if it is sleeping) and the task
+/// returns, so the caller can `await` the handle during a graceful
+/// shutdown.
+pub fn spawn_scheduler(
+    pool: DbPool,
+    config: SchedulerConfig,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         if let Err(err) = ScheduledJobRepo::ensure_seeded(&pool, DEFAULT_TASKS).await {
             tracing::error!(error = %err, "could not seed the scheduled_jobs table; the scheduler is idle");
             return;
         }
         loop {
-            tokio::time::sleep(config.tick_interval).await;
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                () = tokio::time::sleep(config.tick_interval) => {}
+            }
             if let Err(err) = run_due(&pool).await {
                 tracing::error!(error = %err, "a scheduler tick failed; will retry next tick");
             }
@@ -129,5 +141,24 @@ mod tests {
         assert!(listed
             .iter()
             .all(|t| t.last_status.as_deref() == Some("queued") && t.next_run_at > 0));
+    }
+
+    #[tokio::test]
+    async fn the_scheduler_task_returns_once_its_shutdown_token_is_cancelled() {
+        let pool = edda_db::test_pool().await;
+        let shutdown = CancellationToken::new();
+        let handle = spawn_scheduler(
+            pool,
+            SchedulerConfig {
+                tick_interval: Duration::from_millis(20),
+            },
+            shutdown.clone(),
+        );
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("the scheduler task returns soon after cancellation")
+            .expect("the scheduler task does not panic on shutdown");
     }
 }

@@ -2,9 +2,12 @@
 //! consumes `/api/v1` over HTTP. It holds no server state, defines no
 //! server functions, and depends on no server-side Edda crate: `dioxus`
 //! and an HTTP client (`gloo-net` on wasm) are all it needs (plus
-//! `edda-api-types` for the wire DTOs). The composition-root binary
-//! (`edda`) mounts [`App`] via `dioxus::server::router` for SSR + asset
-//! serving and merges it with `edda_app::router` for the API.
+//! `edda-api-types` for the wire DTOs). `dioxus` lives here and nowhere
+//! else — the composition-root binary (`edda`) never names it: it calls
+//! [`launch_client`] for the wasm build and [`ssr_router`] for the server
+//! build, and this crate keeps every Dioxus detail (including the
+//! `axum::Router` that `dioxus::server` produces for SSR) behind those two
+//! functions.
 
 use dioxus::prelude::*;
 
@@ -66,8 +69,8 @@ const FAVICON: Asset = asset!("/assets/favicon.ico");
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 /// The root component: injects the favicon + stylesheet links and renders
-/// the router. Mounted by the binary for both the wasm client
-/// (`dioxus::launch`) and SSR (`dioxus::server::router`).
+/// the router. Reached through [`launch_client`] on the wasm build and
+/// [`ssr_router`] on the server build.
 #[component]
 pub fn App() -> Element {
     rsx! {
@@ -75,4 +78,23 @@ pub fn App() -> Element {
         document::Link { rel: "stylesheet", href: TAILWIND_CSS }
         Router::<Route> {}
     }
+}
+
+/// The wasm client entrypoint: hydrates [`App`] in the browser. The
+/// `edda` binary's client `main` is just a call to this — so `dioxus`
+/// stays contained in this crate.
+#[cfg(not(feature = "server"))]
+pub fn launch_client() {
+    dioxus::launch(App);
+}
+
+/// The SSR + static-asset router for [`App`], as built by
+/// `dioxus::server`. The `edda` binary merges this with
+/// `edda_app::router` and owns the `axum::serve` loop itself (Phase 13):
+/// there is no `dioxus::server::serve` call anywhere. Returning the
+/// concrete `axum::Router` here — rather than exposing `dioxus::server`
+/// to the binary — is what keeps `dioxus` out of every other crate.
+#[cfg(feature = "server")]
+pub fn ssr_router() -> dioxus::server::axum::Router {
+    dioxus::server::router(App)
 }
